@@ -99,7 +99,7 @@ class RealDDEClient(BaseDDE):
     def send_scanpara(self, edit_code: str, value: float) -> None:
         """
         Send a scan parameter command to SXM. There is a 1:1 mapping between edit codes and a parameter in SXM. 
-        For instancte, Edit1 = I_t setpoint in the parameter window. The edit codes can be found in the SXM Language Descrion document of your machine, but also somewhere in this repository.
+        For instance, Edit1 = I_t setpoint in the parameter window. The edit codes can be found in the SXM Language Description document of your machine, but also somewhere in this repository.
 
         Example SXM Pascal command:
             ScanPara('Edit23', 0.080);
@@ -146,9 +146,15 @@ class MockDDEClient(BaseDDE):
     """
     Mock implementation for offline development and testing.
 
-    Instead of sending real commands, it prints them to stdout and
-    updates the cache so the GUI behaves normally.
+    Instead of sending real commands, it logs them with detailed information
+    and updates the cache so the GUI behaves normally.
     """
+
+    def __init__(self) -> None:
+        """Initialize mock client with enhanced logging."""
+        super().__init__()
+        self._command_count = 0
+        print("[MOCK] 🔧 MockDDEClient initialized - all commands will be simulated")
 
     def send_scanpara(self, edit_code: str, value: float) -> None:
         """
@@ -161,7 +167,19 @@ class MockDDEClient(BaseDDE):
         Outputs:
             None (prints simulated command, updates cache).
         """
-        print(f"[MOCK] ScanPara('{edit_code}', {value});")
+        self._command_count += 1
+        
+        # Add some context about what this parameter might control
+        param_context = {
+            "Edit1": "I_t setpoint",
+            "Edit23": "Amplitude Reference",
+            "Edit24": "Amplitude Ki", 
+            "Edit32": "Amplitude Kp",
+            "Edit22": "PLL Ki",
+            "Edit27": "PLL Kp"
+        }.get(edit_code, "Unknown parameter")
+        
+        print(f"[MOCK] #{self._command_count:03d} ScanPara('{edit_code}', {value}); // {param_context}")
         self._remember("EDIT", edit_code, value)
 
     def send_dncpara(self, index: int, value: float) -> None:
@@ -175,5 +193,13 @@ class MockDDEClient(BaseDDE):
         Outputs:
             None (prints simulated command, updates cache).
         """
-        print(f"[MOCK] DNCPara({index}, {value});")
+        self._command_count += 1
+        
+        # Add some context about what this DNC parameter might control
+        dnc_context = {
+            3: "Used Frequency (f₀)",
+            4: "Drive amplitude"
+        }.get(index, f"DNC parameter {index}")
+        
+        print(f"[MOCK] #{self._command_count:03d} DNCPara({index}, {value}); // {dnc_context}")
         self._remember("DNC", str(index), value)

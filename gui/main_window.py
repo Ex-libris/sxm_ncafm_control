@@ -16,6 +16,8 @@ class MainWindow(QtWidgets.QWidget):
 
         layout = QtWidgets.QVBoxLayout(self)
         self.tabs = QtWidgets.QTabWidget()
+        
+        # Create all tabs
         self.params_tab = ParamsTab(dde_client)
         self.scope_tab = ScopeTab()
         self.step_tab = StepTestTab(dde_client)
@@ -26,14 +28,17 @@ class MainWindow(QtWidgets.QWidget):
         self.step_tab.tabs_widget = self.tabs
         self.step_tab.scope_tab_index = 1  # assuming tab order: 0=Parameters, 1=Scope, 2=StepTest, 3=Suggested
 
+        # Add tabs to the widget
         self.tabs.addTab(self.params_tab, "Parameters")
         self.tabs.addTab(self.scope_tab, "Scope")
         self.tabs.addTab(self.step_tab, "Step Test")
         self.tabs.addTab(self.suggest_tab, "Suggested Setup")
 
-        self.step_tab = StepTestTab(dde_client)
-        self.step_tab.scope_tab = self.scope_tab  # link step test to scope
+        # Connect custom parameters signal from params_tab to step_test_tab
+        self.params_tab.custom_params_changed.connect(self.step_tab.set_custom_params)
+
         layout.addWidget(self.tabs)
+        
         # Footer
         footer = QtWidgets.QLabel(
             "⚠ Check SXM units & never exceed ±10 V without attenuation. <a href='#'>Details</a>"
@@ -46,7 +51,7 @@ class MainWindow(QtWidgets.QWidget):
                 "Units follow the current SXM GUI (Hz/kHz, V/mV/µV...).\n"
                 "Voltage-like channels (Amplitude Ref, Drive) should never exceed ±10 V "
                 "unless a hardware divider is in place.\n"
-                "Step Test sends values as entered — verify LOW/HIGH against the GUI units."
+                "Step Test sends values as entered – verify LOW/HIGH against the GUI units."
             )
         )
         footer.setStyleSheet(
