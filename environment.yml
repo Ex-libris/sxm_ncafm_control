@@ -1,0 +1,10 @@
+name: sxm-ncafm
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pyqt
+  - pyqtgraph
+  - numpy
+  - scipy
+  - pywin32  # safe, since conda will refuse if not on Windows

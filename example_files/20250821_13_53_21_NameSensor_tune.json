@@ -1,0 +1,50 @@
+{
+  "kind": "ncafm_tune",
+  "params": [
+    {
+      "ptype": "EDIT",
+      "pcode": "Edit24",
+      "label": "Amplitude Ki",
+      "value": null
+    },
+    {
+      "ptype": "EDIT",
+      "pcode": "Edit32",
+      "label": "Amplitude Kp",
+      "value": null
+    },
+    {
+      "ptype": "EDIT",
+      "pcode": "Edit27",
+      "label": "PLL Kp",
+      "value": null
+    },
+    {
+      "ptype": "EDIT",
+      "pcode": "Edit22",
+      "label": "PLL Ki",
+      "value": null
+    },
+    {
+      "ptype": "EDIT",
+      "pcode": "Edit23",
+      "label": "Amplitude Ref",
+      "value": null
+    },
+    {
+      "ptype": "DNC",
+      "pcode": 3,
+      "label": "Used Frequency (f\u2080)",
+      "value": null
+    },
+    {
+      "ptype": "DNC",
+      "pcode": 4,
+      "label": "Drive",
+      "value": null
+    }
+  ],
+  "note": "Values correspond to the CURRENT column in the ncAFM panel.",
+  "comments": "d  asdas  ",
+  "saved_at": "20250821_13_53_21"
+}
