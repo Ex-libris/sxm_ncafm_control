@@ -74,6 +74,24 @@ python -m sxm_ncafm_control.app
 
 The control window will open, ready to connect to your SXM software.
 
+## Screenshots
+
+### Main Interface
+![Main Control Window](screenshots/main_window.png)
+*NC-AFM Control GUI showing the tabbed interface for parameter control and monitoring*
+
+### Scope Tab
+![Scope Tab](screenshots/scope_tab.png)
+*Real-time channel monitoring with direct driver communication*
+
+### Step Test Tab
+![Step Test Tab](screenshots/step_test_tab.png)
+*Square wave testing interface for system characterization*
+
+### Suggested setup Tab
+![Step Test Tab](screenshots/suggested_setup.png)
+*Calculator of PLL parameters. You can also add a .txt or .csv with freq | phase | amplitude columns.*
+
 ## Usage
 - Ensure your SXM software is running before starting the GUI
 - The GUI communicates with SXM through DDE (Dynamic Data Exchange) for parameter control

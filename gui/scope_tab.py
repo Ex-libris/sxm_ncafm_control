@@ -85,10 +85,22 @@ class ScopeTab(QtWidgets.QWidget):
         vbox.addLayout(hbox)
 
         # Plot
+
         self.plot = pg.PlotWidget()
-        self.plot.setBackground("w")
+        self.plot.setBackground("white")
         self.plot.setLabel("bottom", "Sample index")
         self.plot.setLabel("left", "Value")
+
+        # Professional oscilloscope-style grid
+        self.plot.showGrid(x=True, y=True, alpha=0.3)
+
+        # Clean and simple - just enable the grid with custom styling
+        plot_item = self.plot.getPlotItem()
+
+        # Optional: customize grid pen color
+        grid_pen = pg.mkPen(color=(70, 70, 70), width=0.5)
+        plot_item.getAxis('bottom').setPen(grid_pen)
+        plot_item.getAxis('left').setPen(grid_pen)
         vbox.addWidget(self.plot)
 
     # ------------------------------------------------------------------
@@ -122,7 +134,7 @@ class ScopeTab(QtWidgets.QWidget):
             self.capture_thread.stop()
 
     def show_data(self, arr, rate):
-        self.plot.plot(arr, pen="y")
+        self.plot.plot(arr, pen="b")
         self.last_data = arr
         self.last_rate = rate
         self.export_btn.setEnabled(True)
