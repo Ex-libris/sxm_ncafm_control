@@ -122,12 +122,12 @@ CHANNELS = {
     
     # ---- Analog Input Channels (ADC inputs) ----
     'It_ext':     ( 32, 'ADC0',     'A',  1.011e-19),    # External current measurement
-    'QPlus_ext':  ( 33, 'ADC1',    'mV',  1.008e-05),    # External qPlus signal
+    'QPlus_ext':  ( 33, 'ADC1',    'mV',  1.008e-05),    # Digitized qPlus experimental signal
     'AD1':        ( 34, 'ADC2',     'V',  1.012e-08),    # General purpose ADC 1
     'AD2':        ( 35, 'ADC3',    'mV',  1.011e-05),    # General purpose ADC 2
-    'InA':        (  8, 'ADC4',     'V',  3.07991e-09),  # Input channel A
+    'InA':        (  8, 'ADC4',     'V',  3.07991e-09),  # Galvanically isolated qplus signal. Used as input for the amplitude lock-in and the PLL ('LiaO')
     'It_to_PC':   ( 12, 'ADC9',     'A',  8.04187e-20),  # Current to PC (for logging)
-    'Zeit':       ( 23, 'ADC12',    's',  0.001),        # Time channel
+    'Zeit':       ( 23, 'ADC12',    's',  0.001),        # Time channel (from german "Zeit" = time)
     'AD3':        ( 36, 'ADC13',   'mV',  1.01e-05),     # General purpose ADC 3
     'AD4':        ( 37, 'ADC14',   'mV',  1.013e-05),    # General purpose ADC 4
     'AD5':        ( 38, 'ADC15',   'mV',  1.01e-05),     # General purpose ADC 5
