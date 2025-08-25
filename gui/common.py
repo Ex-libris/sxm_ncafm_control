@@ -1,4 +1,5 @@
 # gui/common.py
+
 from typing import Optional
 from PyQt5 import QtWidgets, QtGui
 
@@ -28,7 +29,25 @@ VOLTAGE_LIMIT_ABS = 10.0
 
 
 def _to_float(text: str) -> Optional[float]:
-    """Safely convert text to float or return None if invalid."""
+    """
+    Convert text to a floating-point number.
+
+    This function tries to interpret the input text as a number (for example, '3.14').
+    If the conversion fails (for example, if the text is 'abc'), it returns None.
+
+    This is useful for safely handling user input in scientific applications,
+    where parameters must be numeric.
+
+    Parameters
+    ----------
+    text : str
+        The input text to convert.
+
+    Returns
+    -------
+    float or None
+        The numeric value if conversion succeeds, or None if it fails.
+    """
     try:
         return float(text)
     except Exception:
@@ -36,7 +55,28 @@ def _to_float(text: str) -> Optional[float]:
 
 
 def confirm_high_voltage(parent: QtWidgets.QWidget, label: str, value: float) -> bool:
-    """Ask user for confirmation if exceeding ±10 V on voltage-like channels."""
+    """
+    Display a warning dialog if a voltage-like parameter exceeds ±10 V.
+
+    In many scientific instruments, applying a voltage above a certain threshold
+    can damage equipment or produce unreliable results. This function checks if
+    the value is above the safe limit (±10 V). If so, it asks the user to confirm
+    before proceeding.
+
+    Parameters
+    ----------
+    parent : QtWidgets.QWidget
+        The parent window for the dialog (usually the main application window).
+    label : str
+        The name of the parameter being set (for display).
+    value : float
+        The value the user wants to set.
+
+    Returns
+    -------
+    bool
+        True if the user confirms, False if they cancel.
+    """
     if abs(value) <= VOLTAGE_LIMIT_ABS:
         return True
     box = QtWidgets.QMessageBox(parent)
@@ -53,13 +93,49 @@ def confirm_high_voltage(parent: QtWidgets.QWidget, label: str, value: float) ->
 
 
 class NumericItemDelegate(QtWidgets.QStyledItemDelegate):
-    """Delegate that only allows numeric input in QTableWidget cells."""
+    """
+    Table cell editor that only allows numeric input.
+
+    When editing values in a table (for example, parameter lists), this class
+    ensures that only numbers can be entered. This prevents accidental entry of
+    invalid data (such as letters or symbols) in scientific workflows.
+
+    Parameters
+    ----------
+    parent : QWidget, optional
+        The parent widget.
+    lo : float, optional
+        Minimum allowed value (default: -1e12).
+    hi : float, optional
+        Maximum allowed value (default: 1e12).
+    decimals : int, optional
+        Number of decimal places allowed (default: 9).
+    """
 
     def __init__(self, parent=None, lo=-1e12, hi=1e12, decimals=9):
         super().__init__(parent)
         self._lo, self._hi, self._dec = lo, hi, decimals
 
     def createEditor(self, parent, option, index):
+        """
+        Create a line editor for table cells that only accepts numbers.
+
+        This is automatically called by the table when a cell is edited.
+
+        Parameters
+        ----------
+        parent : QWidget
+            The parent widget.
+        option : QStyleOptionViewItem
+            Style options for the editor.
+        index : QModelIndex
+            The index of the cell being edited.
+
+        Returns
+        -------
+        QLineEdit
+            An editor widget with numeric validation.
+        """
         editor = QtWidgets.QLineEdit(parent)
         validator = QtGui.QDoubleValidator(self._lo, self._hi, self._dec, editor)
         validator.setNotation(QtGui.QDoubleValidator.StandardNotation)

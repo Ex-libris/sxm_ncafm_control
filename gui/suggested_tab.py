@@ -7,18 +7,68 @@ import pyqtgraph as pg
 from .common import PARAMS_BASE, confirm_high_voltage
 
 
-# Lorentzian model for amplitude
 def lorentzian_amp(f, A0, f0, Q):
+    """
+    Calculate amplitude response using a Lorentzian model.
+
+    Parameters
+    ----------
+    f : array-like
+        Frequency values.
+    A0 : float
+        Peak amplitude.
+    f0 : float
+        Resonance frequency.
+    Q : float
+        Quality factor.
+
+    Returns
+    -------
+    array-like
+        Amplitude values for each frequency.
+    """
     return A0 / np.sqrt(1.0 + 4 * Q**2 * ((f - f0) / f0) ** 2)
 
 
 class SuggestedTab(QtWidgets.QWidget):
     """
-    Compute recommended parameters for NC-AFM tuning and optionally fit a
-    resonance spectrum (frequency | phase | amplitude).
+    Tab for computing recommended NC-AFM parameters and fitting resonance spectra.
+
+    This tab provides input fields for Q factor, resonance frequency, and PLL bandwidth.
+    It calculates suggested feedback gains and time constants, displays formulas,
+    and allows loading and fitting of resonance spectra using a Lorentzian model.
+
+    Inputs
+    ------
+    dde_client : object
+        DDE client for communication with the SXM system.
+    params_tab : ParamsTab
+        Reference to the parameters tab for staging values.
+
+    Outputs
+    -------
+    Updates recommended Ki, Kp, tau, and PLL time constant fields.
+    Can stage or send values to the SXM system or parameters tab.
+    Displays fit results and plots for loaded spectra.
     """
 
     def __init__(self, dde_client, params_tab):
+        """
+        Recalculate recommended parameters based on current input values.
+
+        Inputs
+        ------
+        Q : float
+            Quality factor.
+        f0 : float
+            Resonance frequency (Hz).
+        BW_PLL : float
+            PLL bandwidth (Hz).
+
+        Outputs
+        -------
+        Updates Ki, Kp, amplitude tau, and PLL time constant fields.
+        """
         super().__init__()
         self.dde = dde_client
         self.params_tab = params_tab
@@ -147,6 +197,22 @@ class SuggestedTab(QtWidgets.QWidget):
 
     # ------------------------------------------------------------------
     def _recalc(self):
+        """
+        Recalculate recommended parameters based on current input values.
+
+        Inputs
+        ------
+        Q : float
+            Quality factor.
+        f0 : float
+            Resonance frequency (Hz).
+        BW_PLL : float
+            PLL bandwidth (Hz).
+
+        Outputs
+        -------
+        Updates Ki, Kp, amplitude tau, and PLL time constant fields.
+        """
         Q = float(self.q_val.value()); f0 = float(self.f0_val.value()); BW_PLL = float(self.bw_pll.value())
         Ki = 5e8 / max(Q, 1e-9); Kp = 1e4 * Ki; BW_amp = 10 * Q / f0
         tau_amp = 1.0 / BW_amp * 1000; tau_pll = 1.0 / (10.0 * max(BW_PLL, 1e-9)) * 1000
@@ -154,6 +220,21 @@ class SuggestedTab(QtWidgets.QWidget):
         self.tau_amp.setText(f"{tau_amp:.6g}"); self.tpll_out.setText(f"{tau_pll:.6g}")
 
     def _stage(self):
+        """
+        Stage the calculated Ki and Kp values to the parameters tab.
+
+        Inputs
+        ------
+        Ki : float
+            Calculated amplitude integral gain.
+        Kp : float
+            Calculated amplitude proportional gain.
+
+        Outputs
+        -------
+        Stages values to Edit24 and Edit32 in the parameters tab.
+        Shows a message indicating which parameters were loaded.
+        """
         try: Ki = float(self.ki_out.text()); Kp = float(self.kp_out.text())
         except Exception: 
             QtWidgets.QMessageBox.warning(self, "Numbers", "Invalid Ki/Kp."); return
@@ -165,6 +246,22 @@ class SuggestedTab(QtWidgets.QWidget):
         QtWidgets.QMessageBox.information(self, "Loaded", " / ".join(msg) if msg else "Nothing loaded.")
 
     def _send(self):
+        """
+        Send the calculated Ki and Kp values directly to the SXM system.
+
+        Inputs
+        ------
+        Ki : float
+            Calculated amplitude integral gain.
+        Kp : float
+            Calculated amplitude proportional gain.
+
+        Outputs
+        -------
+        Sends values to SXM system.
+        Shows a message indicating the result of the operation.
+        """
+
         try: 
             Ki = float(self.ki_out.text()); Kp = float(self.kp_out.text())
             self.dde.send_scanpara("Edit24", Ki); self.dde.send_scanpara("Edit32", Kp)
@@ -174,6 +271,19 @@ class SuggestedTab(QtWidgets.QWidget):
 
     # ------------------------------------------------------------------
     def _load_spectrum(self):
+        """
+        Load a resonance spectrum from a file and fit a Lorentzian model if enabled.
+
+        Inputs
+        ------
+        File with three columns: frequency, phase, amplitude.
+
+        Outputs
+        -------
+        Displays fit results and plots amplitude and phase spectra.
+        Updates internal fit parameters for use in calculations.
+        """
+
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Load Spectrum", "", "Data Files (*.txt *.csv);;All Files (*)")
         if not path: return
 
@@ -189,6 +299,8 @@ class SuggestedTab(QtWidgets.QWidget):
 
         freq, phase, amp = data[:, 0], data[:, 1], data[:, 2]
         sort_idx = np.argsort(freq); freq, phase, amp = freq[sort_idx], phase[sort_idx], amp[sort_idx]
+        
+        
 
         # Estimate from amplitude
         A0_guess, f0_guess = amp.max(), freq[np.argmax(amp)]
@@ -241,10 +353,34 @@ class SuggestedTab(QtWidgets.QWidget):
             )
 
     def _reload_fit_visibility(self):
+        """
+        Reload the spectrum plot with or without Lorentzian fitting,
+        depending on the checkbox state.
+
+        Inputs
+        ------
+        Checkbox state for fitting.
+
+        Outputs
+        -------
+        Updates spectrum plot.
+        """
         """Reload spectrum with or without fit depending on checkbox."""
         self._load_spectrum()
 
     def _apply_from_spectrum(self):
+        """
+        Apply fitted Q and f₀ values from the loaded spectrum to the input fields.
+
+        Inputs
+        ------
+        Internal fit results (Q, f₀).
+
+        Outputs
+        -------
+        Updates Q factor and resonance frequency fields.
+        Recalculates recommended parameters.
+        """
         if not self._last_fit:
             QtWidgets.QMessageBox.information(self, "No fit", "Please load and fit a spectrum first."); return
         Q_fit, f0_fit, _ = self._last_fit
