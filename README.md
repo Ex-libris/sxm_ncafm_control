@@ -76,24 +76,27 @@ The control window will open, ready to connect to your SXM software.
 ## Screenshots
 
 ### Main Interface
+NC-AFM Control GUI showing the tabbed interface for parameter control and monitoring. You can save tuning files or add extra parameters for tuning using the DDE service. The image referencing the EditXX windows is from the Anfatec manual 'Scanning Probe Controlling System -- SXM-Software 28.8. Language Description'
+
 ![Main Control Window](screenshots/main_window.png)
-*NC-AFM Control GUI showing the tabbed interface for parameter control and monitoring*
+![EditXX](screenshots/Edit_XX_LanguageDescription_Anfatec_Manual_28-02.png)
+
 
 ### Scope Tab
 ![Scope Tab](screenshots/scope_tab.png)
-*Real-time channel monitoring with direct driver communication. You can track in a channels the effects of triggering step-tests. In this example, you can see the effects of a step-test for the Amplitude reference setpoint on the QPlusAmplitude signal. *
+Real-time channel monitoring with direct driver communication. You can track in a given channel the effects of triggering step-tests. In this example, you can see the effects of a step-test for the Amplitude reference setpoint on the QPlusAmplitude signal. 
 
 ### Step Test Tab
 ![Step Test Tab](screenshots/step_test_tab.png)
-*Square wave testing interface for system characterization*
+Square step tests for ncAFM channels parameters. In this tab, you can define a train of step changes in a given parameter for the different PIDs controlling the ncAFM loop.
 
 ### Suggested setup Tab
 ![Step Test Tab](screenshots/suggested_setup.png)
-*Calculator of PLL parameters. You can also add a .txt or .csv with freq | phase | amplitude columns. This is based on the suggested tricks and rules of thumbs of the manual. This might need a bit or work!*
+Calculator of PLL parameters. You can also add a .txt or .csv with freq | phase | amplitude columns. This is based on the suggested tricks and rules of thumbs of the manual. This might need a bit or work!
 
 ### Operation
 ![Step Test Tab](screenshots/full_window.png)
-*An example of the script running with SXM in the background. The scope improves substantially guessing/tuning parameters respect to the native oscilloscope.*
+An example of the script running with SXM in the background. The scope improves substantially guessing/tuning parameters respect to the native oscilloscope.
 
 ## Usage
 - Ensure your SXM software is running before starting the GUI
