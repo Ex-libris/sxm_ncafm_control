@@ -74,6 +74,8 @@ class StepTestTab(QtWidgets.QWidget):
 
         self._timer = QtCore.QTimer(self)
         self._timer.timeout.connect(self._tick)
+        # --- NEW: (timestamp, label) for scope overlay ---
+        self._events = []  # list of (QtCore.QDateTime, str)
 
     # ------------------------------------------------------------------
     def set_custom_params(self, customs: List[Tuple[str, object, str]]):
@@ -112,13 +114,16 @@ class StepTestTab(QtWidgets.QWidget):
         self.step_index = 0
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
+        # --- NEW: fresh event list for this run ---
+        self._events = []
         self._timer.start(int(self.period.value() * 1000))
-
-        if self.chk_trigger_scope.isChecked() and self.scope_tab is not None:
-            self.scope_tab.start_capture()
-    # --- NEW: auto-switch to Scope tab ---
-        if self.tabs_widget is not None and self.scope_tab_index is not None:
+        # If you already have these options, leave them as-is
+        if getattr(self, "chk_trigger_scope", None) is not None and self.chk_trigger_scope.isChecked():
+            if getattr(self, "scope_tab", None) is not None:
+                self.scope_tab.start_capture()
+        if getattr(self, "tabs_widget", None) is not None and getattr(self, "scope_tab_index", None) is not None:
             self.tabs_widget.setCurrentIndex(self.scope_tab_index)
+
 
 
     def stop(self):
@@ -130,6 +135,13 @@ class StepTestTab(QtWidgets.QWidget):
 
         if self.chk_trigger_scope.isChecked() and self.chk_stop_scope.isChecked() and self.scope_tab is not None:
             self.scope_tab.stop_capture()
+                # --- NEW: hand timings to the scope for overlay ---
+        if getattr(self, "scope_tab", None) is not None:
+            try:
+                self.scope_tab.set_event_markers(self._events)
+            except Exception:
+                pass
+
 
     def _tick(self):
         ptype, pcode, label = self.param.currentData()
@@ -149,6 +161,10 @@ class StepTestTab(QtWidgets.QWidget):
         except Exception as e:
             self.log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] SEND ERROR: {e}")
             self.stop(); return
+                # --- NEW: log event for overlay (wall-clock) ---
+        ts_dt = QtCore.QDateTime.currentDateTime()
+        # Keep labels short; include the UI label and value
+        self._events.append((ts_dt, f"{label}={value:g}"))
 
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         code_text = pcode if ptype == "EDIT" else f"DNC{pcode}"

@@ -53,6 +53,10 @@ class ScopeTab(QtWidgets.QWidget):
         self.last_data = None
         self.last_rate = None
         self.last_chan = None
+        # --- NEW: time + markers state ---
+        self.capture_start_dt = None          # QDateTime when capture starts
+        self._event_markers = []              # list[(QtCore.QDateTime, str)]
+        self._marker_items = []               # pg items drawn on the plot
 
         vbox = QtWidgets.QVBoxLayout(self)
 
@@ -96,6 +100,8 @@ class ScopeTab(QtWidgets.QWidget):
 
         # Clean and simple - just enable the grid with custom styling
         plot_item = self.plot.getPlotItem()
+        # Make x-axis show time
+        self.plot.setLabel('bottom', 'Time (s)')
 
         # Optional: customize grid pen color
         grid_pen = pg.mkPen(color=(70, 70, 70), width=0.5)
@@ -109,6 +115,9 @@ class ScopeTab(QtWidgets.QWidget):
         idx, _, unit, scale = CHANNELS[chan_name]
         npts = self.npoints_spin.value()
         self.plot.clear()
+        # --- NEW: start-of-capture time + wipe old overlays ---
+        self._clear_markers()
+        self.capture_start_dt = QtCore.QDateTime.currentDateTime()
 
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
@@ -134,12 +143,32 @@ class ScopeTab(QtWidgets.QWidget):
             self.capture_thread.stop()
 
     def show_data(self, arr, rate):
-        self.plot.plot(arr, pen="b")
-        self.last_data = arr
-        self.last_rate = rate
-        self.export_btn.setEnabled(True)
-        self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
+        try:
+            self.plot.clear()
+
+            self.last_data = np.asarray(arr)
+            self.last_rate = float(rate) if rate else 0.0
+
+            # Build time axis in seconds (0 ... (N-1)/rate). Guard rate=0.
+            if self.last_rate > 0:
+                t = np.arange(len(self.last_data), dtype=float) / self.last_rate
+            else:
+                # Fallback: index as seconds with 1 Hz if rate missing
+                t = np.arange(len(self.last_data), dtype=float)
+
+            # Draw the trace with time on X
+            self.plot.plot(t, self.last_data, pen=pg.mkPen('b', width=1))
+
+            # Buttons and state
+            self.export_btn.setEnabled(True)
+            self.start_btn.setEnabled(True)
+            self.stop_btn.setEnabled(False)
+
+            # Add markers (if any)
+            self._update_markers()
+
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Plot error", str(e))
 
     def export_data(self):
         if self.last_data is None:
@@ -165,3 +194,64 @@ class ScopeTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.information(self, "Export", f"Data saved to:\n{path}")
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Export error", str(e))
+
+    def set_event_markers(self, events):
+        """
+        Accept a list of (QtCore.QDateTime, str_label) to overlay as vertical
+        lines with small text. Units on X are seconds from capture start.
+        """
+        self._event_markers = list(events or [])
+        # If data is already shown, render now; else show_data() will call this.
+        self._update_markers()
+
+    def _clear_markers(self):
+        for it in self._marker_items:
+            try:
+                self.plot.removeItem(it)
+            except Exception:
+                pass
+        self._marker_items = []
+
+    def _update_markers(self):
+        # Need data, a valid rate (or at least X axis) and a start time
+        if (
+            self.last_data is None
+            or self.capture_start_dt is None
+        ):
+            return
+
+        # Compute plot X range in seconds
+        if self.last_rate and self.last_rate > 0:
+            tmax = (len(self.last_data) - 1) / self.last_rate if len(self.last_data) else 0.0
+        else:
+            tmax = float(len(self.last_data) - 1) if len(self.last_data) else 0.0
+
+        # Y position for labels: top of current data
+        try:
+            ymax = float(np.nanmax(self.last_data)) if len(self.last_data) else 0.0
+        except Exception:
+            ymax = 0.0
+
+        self._clear_markers()
+
+        for dt, label in self._event_markers:
+            try:
+                # seconds since capture_start_dt
+                secs = max(0.0, self.capture_start_dt.msecsTo(dt) / 1000.0)
+            except Exception:
+                secs = 0.0
+
+            # Clamp into plotted window
+            x = min(secs, tmax)
+
+            # Vertical line
+            line = pg.InfiniteLine(pos=x, angle=90,
+                                   pen=pg.mkPen('r', width=1, style=QtCore.Qt.DashLine))
+            self.plot.addItem(line)
+
+            # Small text tag
+            txt = pg.TextItem(label, anchor=(0, 1), color='r')
+            txt.setPos(x, ymax)
+            self.plot.addItem(txt)
+
+            self._marker_items.extend([line, txt])

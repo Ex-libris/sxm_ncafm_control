@@ -3,7 +3,6 @@
 A simple GUI for controlling NC-AFM parameters on Anfatec SXM controllers (Omicron systems). Interfaces with the SXM software via DDE to provide parameter adjustment, step testing, and real-time monitoring.
 
 **Author**: Benjamin Mallada  
-**Affiliation**: Department of Biochemistry, University of Oxford  
 **Contact**: [benjamin.mallada@bioch.ox.ac.uk](mailto:benjamin.mallada@bioch.ox.ac.uk)  
 **ORCID**: [0000-0002-8209-9977](https://orcid.org/0000-0002-8209-9977)  
 **Website**: [benjaminmallada.com](https://www.benjaminmallada.com/)
@@ -82,7 +81,7 @@ The control window will open, ready to connect to your SXM software.
 
 ### Scope Tab
 ![Scope Tab](screenshots/scope_tab.png)
-*Real-time channel monitoring with direct driver communication*
+*Real-time channel monitoring with direct driver communication. You can track in a channels the effects of triggering step-tests. In this example, you can see the effects of a step-test for the Amplitude reference setpoint on the QPlusAmplitude signal. *
 
 ### Step Test Tab
 ![Step Test Tab](screenshots/step_test_tab.png)
@@ -90,7 +89,11 @@ The control window will open, ready to connect to your SXM software.
 
 ### Suggested setup Tab
 ![Step Test Tab](screenshots/suggested_setup.png)
-*Calculator of PLL parameters. You can also add a .txt or .csv with freq | phase | amplitude columns.*
+*Calculator of PLL parameters. You can also add a .txt or .csv with freq | phase | amplitude columns. This is based on the suggested tricks and rules of thumbs of the manual. This might need a bit or work!*
+
+### Operation
+![Step Test Tab](screenshots/full_window.png)
+*An example of the script running with SXM in the background. The scope improves substantially guessing/tuning parameters respect to the native oscilloscope.*
 
 ## Usage
 - Ensure your SXM software is running before starting the GUI
