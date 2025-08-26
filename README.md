@@ -83,20 +83,23 @@ NC-AFM Control GUI showing the tabbed interface for parameter control and monito
 
 
 ### Scope Tab
-![Scope Tab](screenshots/scope_tab.png)
 Real-time channel monitoring with direct driver communication. You can track in a given channel the effects of triggering step-tests. In this example, you can see the effects of a step-test for the Amplitude reference setpoint on the QPlusAmplitude signal. 
 
+![Scope Tab](screenshots/scope_tab.png)
+
 ### Step Test Tab
-![Step Test Tab](screenshots/step_test_tab.png)
 Square step tests for ncAFM channels parameters. In this tab, you can define a train of step changes in a given parameter for the different PIDs controlling the ncAFM loop.
+![Step Test Tab](screenshots/step_test_tab.png)
 
 ### Suggested setup Tab
-![Step Test Tab](screenshots/suggested_setup.png)
 Calculator of PLL parameters. You can also add a .txt or .csv with freq | phase | amplitude columns. This is based on the suggested tricks and rules of thumbs of the manual. This might need a bit or work!
 
+![Step Test Tab](screenshots/suggested_setup.png)
+
 ### Operation
-![Step Test Tab](screenshots/full_window.png)
 An example of the script running with SXM in the background. The scope improves substantially guessing/tuning parameters respect to the native oscilloscope.
+
+![Step Test Tab](screenshots/full_window.png)
 
 ## Usage
 - Ensure your SXM software is running before starting the GUI
