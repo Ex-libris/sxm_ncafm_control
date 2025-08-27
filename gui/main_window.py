@@ -52,8 +52,8 @@ class MainWindow(QtWidgets.QWidget):
         # Link StepTest to Scope and Tabs
         self.step_tab.scope_tab = self.scope_tab
         self.step_tab.tabs_widget = self.tabs
-        self.step_tab.scope_tab_index = 1  # Tab order: 0=Parameters, 1=Scope, 2=StepTest, 3=Suggested
-
+        self.step_tab.scope_tab_index = 2  # Tab order: 0=Parameters, 1=Scope, 2=StepTest, 3=Suggested
+        self.scope_tab.set_test_tab_reference(self.step_tab)
         # Add tabs to the widget
         self.tabs.addTab(self.params_tab, "Parameters")
         self.tabs.addTab(self.step_tab, "Step Test")

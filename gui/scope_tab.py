@@ -72,6 +72,9 @@ class ScopeTab(QtWidgets.QWidget):
         self._event_markers = []
         self._marker_items1 = []  # markers for plot1
         self._marker_items2 = []  # markers for plot2
+        
+        # Reference to test tab for repeat functionality
+        self.test_tab = None
 
         vbox = QtWidgets.QVBoxLayout(self)
 
@@ -112,6 +115,11 @@ class ScopeTab(QtWidgets.QWidget):
         self.export_btn.setEnabled(False)
         self.export_btn.clicked.connect(self.export_data)
         hbox.addWidget(self.export_btn)
+
+        self.repeat_test_btn = QtWidgets.QPushButton("Repeat Test")
+        self.repeat_test_btn.setEnabled(False)
+        self.repeat_test_btn.clicked.connect(self.repeat_test)
+        hbox.addWidget(self.repeat_test_btn)
 
         vbox.addLayout(hbox)
 
@@ -315,3 +323,39 @@ class ScopeTab(QtWidgets.QWidget):
             txt2.setPos(x, ymax2)
             self.plot2.addItem(txt2)
             self._marker_items2.extend([line2, txt2])
+
+    def set_test_tab_reference(self, test_tab):
+        """Set reference to test tab for repeat functionality."""
+        self.test_tab = test_tab
+        self.repeat_test_btn.setEnabled(test_tab is not None)
+
+    def repeat_test(self):
+        """Trigger the test tab to repeat the last test configuration."""
+        if self.test_tab is None:
+            QtWidgets.QMessageBox.warning(self, "No Test Tab", 
+                "No test tab reference available. Please run a test first.")
+            return
+            
+        # Check if test is already running
+        if hasattr(self.test_tab, '_timer') and self.test_tab._timer.isActive():
+            QtWidgets.QMessageBox.information(self, "Test Running", 
+                "A test is already in progress. Please wait for it to complete.")
+            return
+            
+        try:
+            # Enable scope triggering for this repeat
+            if hasattr(self.test_tab, 'chk_trigger_scope'):
+                self.test_tab.chk_trigger_scope.setChecked(True)
+            if hasattr(self.test_tab, 'chk_stop_scope'):
+                self.test_tab.chk_stop_scope.setChecked(True)
+                
+            # Start the test
+            self.test_tab.start()
+            
+            # Show a brief message
+            QtWidgets.QMessageBox.information(self, "Test Started", 
+                "Repeating last test configuration. The scope will be triggered automatically.")
+                
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Test Error", 
+                f"Failed to start test: {str(e)}")
