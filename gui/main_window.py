@@ -4,6 +4,8 @@ from sxm_ncafm_control.gui.params_tab import ParamsTab
 from sxm_ncafm_control.gui.step_test_tab import StepTestTab
 from sxm_ncafm_control.gui.suggested_tab import SuggestedTab
 from sxm_ncafm_control.gui.scope_tab import ScopeTab
+from sxm_ncafm_control.gui.qplus_calibration_tab import QplusCalibrationTab
+
 
 class MainWindow(QtWidgets.QWidget):
     """
@@ -48,7 +50,7 @@ class MainWindow(QtWidgets.QWidget):
         self.step_tab = StepTestTab(dde_client)
         self.scope_tab = ScopeTab()
         self.suggest_tab = SuggestedTab(dde_client, self.params_tab)
-
+        self.qplus_tab = QplusCalibrationTab(dde_client)
         # Link StepTest to Scope and Tabs
         self.step_tab.scope_tab = self.scope_tab
         self.step_tab.tabs_widget = self.tabs
@@ -59,7 +61,7 @@ class MainWindow(QtWidgets.QWidget):
         self.tabs.addTab(self.step_tab, "Step Test")
         self.tabs.addTab(self.scope_tab, "Scope")
         self.tabs.addTab(self.suggest_tab, "Suggested Setup")
-
+        self.tabs.addTab(self.qplus_tab, "QPlus Calibration")
         # Connect custom parameters signal from params_tab to step_test_tab
         self.params_tab.custom_params_changed.connect(self.step_tab.set_custom_params)
 
