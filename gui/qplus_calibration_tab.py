@@ -194,14 +194,9 @@ class QplusCalibrationTab(QtWidgets.QWidget):
 
     def start_calibration(self) -> None:
         """Starts the calibration process.
-
-        Asks for user confirmation to proceed with high voltage.
-        Initializes amplitude points and begins measurement.
-
         Shows a warning message if setup is invalid.
         """
-        if not confirm_high_voltage(self, "Start calibration with high voltage enabled?"):
-            return
+
         try:
             self._build_amplitude_points()
             self.start_btn.setEnabled(False)
