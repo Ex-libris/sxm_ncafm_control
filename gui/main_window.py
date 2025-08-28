@@ -45,19 +45,19 @@ class MainWindow(QtWidgets.QWidget):
 
         # Create all tabs
         self.params_tab = ParamsTab(dde_client)
-        self.scope_tab = ScopeTab()
         self.step_tab = StepTestTab(dde_client)
+        self.scope_tab = ScopeTab()
         self.suggest_tab = SuggestedTab(dde_client, self.params_tab)
 
         # Link StepTest to Scope and Tabs
         self.step_tab.scope_tab = self.scope_tab
         self.step_tab.tabs_widget = self.tabs
-        self.step_tab.scope_tab_index = 1  # Tab order: 0=Parameters, 1=Scope, 2=StepTest, 3=Suggested
-
+        self.step_tab.scope_tab_index = 2  # Tab order: 0=Parameters, 1=Scope, 2=StepTest, 3=Suggested
+        self.scope_tab.set_test_tab_reference(self.step_tab)
         # Add tabs to the widget
         self.tabs.addTab(self.params_tab, "Parameters")
-        self.tabs.addTab(self.scope_tab, "Scope")
         self.tabs.addTab(self.step_tab, "Step Test")
+        self.tabs.addTab(self.scope_tab, "Scope")
         self.tabs.addTab(self.suggest_tab, "Suggested Setup")
 
         # Connect custom parameters signal from params_tab to step_test_tab
