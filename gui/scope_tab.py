@@ -75,30 +75,40 @@ class ScopeTab(QtWidgets.QWidget):
         
         # Reference to test tab for repeat functionality
         self.test_tab = None
+        
+        # Remember last export path
+        self.last_export_path = None
 
         vbox = QtWidgets.QVBoxLayout(self)
 
         # Controls
         hbox = QtWidgets.QHBoxLayout()
         
-        # Channel 1 selection
+        # Channel 1 selection - default to QplusAmpl
         hbox.addWidget(QtWidgets.QLabel("Channel 1:"))
         self.chan1_combo = QtWidgets.QComboBox()
         self.chan1_combo.addItems(list(CHANNELS.keys()))
+        # Set default to QplusAmplitude if available
+        if "QPlusAmpl" in CHANNELS:
+            idx = list(CHANNELS.keys()).index("QPlusAmpl")
+            self.chan1_combo.setCurrentIndex(idx)
         hbox.addWidget(self.chan1_combo)
         
-        # Channel 2 selection
+        # Channel 2 selection - default to Drive
         hbox.addWidget(QtWidgets.QLabel("Channel 2:"))
         self.chan2_combo = QtWidgets.QComboBox()
         self.chan2_combo.addItems(list(CHANNELS.keys()))
-        # Set different default for second channel if available
-        if len(CHANNELS) > 1:
+        # Set default to Drive if available, otherwise second channel
+        if "Drive" in CHANNELS:
+            idx = list(CHANNELS.keys()).index("Drive")
+            self.chan2_combo.setCurrentIndex(idx)
+        elif len(CHANNELS) > 1:
             self.chan2_combo.setCurrentIndex(1)
         hbox.addWidget(self.chan2_combo)
 
         self.npoints_spin = QtWidgets.QSpinBox()
         self.npoints_spin.setRange(1000, 2_000_000)
-        self.npoints_spin.setValue(50000)
+        self.npoints_spin.setValue(2_000_000)  # Default to 2M samples for ~1 minute capture
         hbox.addWidget(QtWidgets.QLabel("Samples:"))
         hbox.addWidget(self.npoints_spin)
 
@@ -120,6 +130,10 @@ class ScopeTab(QtWidgets.QWidget):
         self.repeat_test_btn.setEnabled(False)
         self.repeat_test_btn.clicked.connect(self.repeat_test)
         hbox.addWidget(self.repeat_test_btn)
+
+        self.clear_btn = QtWidgets.QPushButton("Clear")
+        self.clear_btn.clicked.connect(self.clear_plots)
+        hbox.addWidget(self.clear_btn)
 
         vbox.addLayout(hbox)
 
@@ -226,12 +240,23 @@ class ScopeTab(QtWidgets.QWidget):
     def export_data(self):
         if self.last_data1 is None or self.last_data2 is None:
             return
+        
+        # Use last path or default filename
+        default_name = f"{self.last_chan1}_{self.last_chan2}_capture.csv"
+        if self.last_export_path:
+            import os
+            default_name = os.path.join(os.path.dirname(self.last_export_path), default_name)
+            
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Export Data", f"{self.last_chan1}_{self.last_chan2}_capture.csv", 
+            self, "Export Data", default_name, 
             "CSV Files (*.csv);;NumPy Files (*.npy)"
         )
         if not path:
             return
+            
+        # Remember this path for next time
+        self.last_export_path = path
+        
         try:
             if path.endswith(".npy"):
                 # Save as structured array with both channels
@@ -247,7 +272,19 @@ class ScopeTab(QtWidgets.QWidget):
                     header="time,channel1,channel2\n" + header,
                     comments="",
                 )
-            QtWidgets.QMessageBox.information(self, "Export", f"Data saved to:\n{path}")
+                
+            # Also save PNG screenshot of the plots
+            png_path = path.rsplit('.', 1)[0] + '.png'
+            try:
+                exporter = pg.exporters.ImageExporter(self.plot_widget.scene())
+                exporter.parameters()['width'] = 1200  # High resolution
+                exporter.export(png_path)
+                QtWidgets.QMessageBox.information(self, "Export", 
+                    f"Data saved to:\n{path}\n\nPlot image saved to:\n{png_path}")
+            except Exception as img_e:
+                QtWidgets.QMessageBox.information(self, "Export", 
+                    f"Data saved to:\n{path}\n\nNote: Could not save plot image: {img_e}")
+                    
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Export error", str(e))
 
@@ -359,3 +396,13 @@ class ScopeTab(QtWidgets.QWidget):
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Test Error", 
                 f"Failed to start test: {str(e)}")
+
+    def clear_plots(self):
+        """Clear both plots and reset data."""
+        self.plot1.clear()
+        self.plot2.clear()
+        self._clear_markers()
+        self.last_data1 = None
+        self.last_data2 = None
+        self.last_rate = None
+        self.export_btn.setEnabled(False)
