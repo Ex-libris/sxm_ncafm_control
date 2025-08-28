@@ -1,4 +1,3 @@
-# dde_client.py
 """
 DDE client bridge for SXM control.
 
@@ -25,22 +24,48 @@ from typing import Dict, Tuple
 
 
 class BaseDDE:
+    """Base class for DDE clients with last-written value caching."""
+
     def __init__(self) -> None:
+        """Initializes the DDE client's internal write cache."""
         self._last: Dict[Tuple[str, str], float] = {}
 
     def _remember(self, ptype: str, pcode: str, value: float) -> None:
+        """Stores the last written value for a parameter.
+
+        Args:
+            ptype (str): Parameter type (e.g., "EDIT", "DNC").
+            pcode (str): Parameter code or identifier.
+            value (float): Value written to the parameter.
+        """
         self._last[(ptype.upper(), str(pcode))] = float(value)
 
     def last_written(self, ptype: str, pcode: str):
+        """Returns the most recently written value for a parameter.
+
+        Args:
+            ptype (str): Parameter type.
+            pcode (str): Parameter code or identifier.
+
+        Returns:
+            float | None: Last written value, or None if not found.
+        """
         return self._last.get((ptype.upper(), str(pcode)))
 
 
 class RealDDEClient(BaseDDE):
-    """
-    Talks to SXM via SXMRemote.DDEClient (Windows).
-    """
+    """Real DDE client that communicates with SXM via SXMRemote.DDEClient (Windows only)."""
 
     def __init__(self, app_name: str = "SXM", topic: str = "Remote") -> None:
+        """Initializes the DDE client and connects to the SXM application.
+
+        Args:
+            app_name (str): Name of the DDE application. Defaults to "SXM".
+            topic (str): DDE topic. Defaults to "Remote".
+
+        Raises:
+            ImportError: If SXMRemote.py is not found or importable.
+        """
         super().__init__()
         try:
             import SXMRemote  # type: ignore
@@ -53,6 +78,15 @@ class RealDDEClient(BaseDDE):
         self._command_count = 0
 
     def send_scanpara(self, edit_code: str, value: float) -> None:
+        """Sends a ScanPara command (e.g., Edit23) to SXM.
+
+        Args:
+            edit_code (str): Edit code name (e.g., "Edit23").
+            value (float): Value to assign.
+
+        Raises:
+            ValueError: If edit_code is not a valid EditNN format.
+        """
         if not (isinstance(edit_code, str) and edit_code.startswith("Edit")):
             raise ValueError("edit_code must look like 'EditNN' (e.g., 'Edit23').")
         self._dde.SendWait(f"ScanPara('{edit_code}', {value});")
@@ -60,30 +94,58 @@ class RealDDEClient(BaseDDE):
         self._command_count += 1
 
     def send_dncpara(self, index: int, value: float) -> None:
+        """Sends a DNCPara command (by index) to SXM.
+
+        Args:
+            index (int): Parameter index.
+            value (float): Value to assign.
+
+        Raises:
+            ValueError: If index is negative.
+        """
         if index < 0:
             raise ValueError("DNC index must be non-negative.")
         self._dde.SendWait(f"DNCPara({index}, {value});")
         self._remember("DNC", str(index), value)
 
     def read_channel(self, index: int) -> float:
-        # SXMRemote.DDEClient provides GetChannel which returns float
+        """Reads the value of a specified channel via DDE.
+
+        Args:
+            index (int): Channel index (e.g., 0 for topography).
+
+        Returns:
+            float: Current value from the SXM channel.
+        """
         return float(self._dde.GetChannel(int(index)))
 
     def read_topography(self) -> float:
-        # Channel 0 = topography, unit nm
+        """Reads topography (channel 0) in nanometers.
+
+        Returns:
+            float: Topography value.
+        """
         return self.read_channel(0)
 
 
 class MockDDEClient(BaseDDE):
-    """
-    Offline mock for development.
-    """
+    """Offline mock client for development and testing without SXM software."""
 
     def __init__(self) -> None:
+        """Initializes the mock client with internal command tracking."""
         super().__init__()
         self._command_count = 0
 
     def send_scanpara(self, edit_code: str, value: float) -> None:
+        """Simulates sending a ScanPara command and logs it.
+
+        Args:
+            edit_code (str): Edit code name (e.g., "Edit23").
+            value (float): Value to assign.
+
+        Raises:
+            ValueError: If edit_code is not a valid EditNN format.
+        """
         if not (isinstance(edit_code, str) and edit_code.startswith("Edit")):
             raise ValueError("edit_code must look like 'EditNN' (e.g., 'Edit23').")
         self._command_count += 1
@@ -91,6 +153,15 @@ class MockDDEClient(BaseDDE):
         self._remember("EDIT", edit_code, value)
 
     def send_dncpara(self, index: int, value: float) -> None:
+        """Simulates sending a DNCPara command and logs it.
+
+        Args:
+            index (int): Parameter index.
+            value (float): Value to assign.
+
+        Raises:
+            ValueError: If index is negative.
+        """
         if index < 0:
             raise ValueError("DNC index must be non-negative.")
         self._command_count += 1
@@ -102,7 +173,16 @@ class MockDDEClient(BaseDDE):
         self._remember("DNC", str(index), value)
 
     def read_channel(self, index: int) -> float:
-        # Simulate slow drift on Topo channel (nm)
+        """Simulates reading a channel value.
+
+        Channel 0 (topography) increases slowly to mimic drift.
+
+        Args:
+            index (int): Channel index.
+
+        Returns:
+            float: Simulated value.
+        """
         base = getattr(self, "_sim_base", 0.0)
         base += 0.001
         self._sim_base = base
@@ -111,4 +191,9 @@ class MockDDEClient(BaseDDE):
         return 0.0
 
     def read_topography(self) -> float:
+        """Returns simulated topography from channel 0.
+
+        Returns:
+            float: Simulated topography value.
+        """
         return self.read_channel(0)

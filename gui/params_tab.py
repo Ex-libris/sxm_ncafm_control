@@ -269,8 +269,8 @@ class ParamsTab(QtWidgets.QWidget):
     # ---------- tune management ----------
     def _row_lookup_by_code(self) -> Dict[Tuple[str, str], int]:
         return {
-            (ptype, str(pcode)): row
-            for row, (_key, ptype, pcode, _label, _vlike) in enumerate(self._all_params())
+        (ptype, str(pcode)): row
+        for row, (_key, ptype, pcode, _label, _vlike) in enumerate(self._all_params())
         }
 
     def _collect_params_snapshot(self) -> Dict[str, Any]:
