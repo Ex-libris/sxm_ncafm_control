@@ -26,7 +26,7 @@ class StepTestTab(QtWidgets.QWidget):
         self._populate_params()
 
         self.low = QtWidgets.QDoubleSpinBox();  self.low.setDecimals(6)
-        self.low.setMinimum(-1e12); self.low.setMaximum(1e12); self.low.setValue(100.0)
+        self.low.setMinimum(-1e12); self.low.setMaximum(1e12); self.low.setValue(10.0)
         self.high = QtWidgets.QDoubleSpinBox(); self.high.setDecimals(6)
         self.high.setMinimum(-1e12); self.high.setMaximum(1e12); self.high.setValue(101.0)
         self.period = QtWidgets.QDoubleSpinBox(); self.period.setDecimals(3)
