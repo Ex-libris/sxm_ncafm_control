@@ -89,8 +89,8 @@ class ScopeTab(QtWidgets.QWidget):
         self.chan1_combo = QtWidgets.QComboBox()
         self.chan1_combo.addItems(list(CHANNELS.keys()))
         # Set default to QplusAmplitude if available
-        if "QplusAmplitude" in CHANNELS:
-            idx = list(CHANNELS.keys()).index("QplusAmplitude")
+        if "QPlusAmpl" in CHANNELS:
+            idx = list(CHANNELS.keys()).index("QPlusAmpl")
             self.chan1_combo.setCurrentIndex(idx)
         hbox.addWidget(self.chan1_combo)
         
