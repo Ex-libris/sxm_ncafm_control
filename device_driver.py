@@ -66,7 +66,7 @@ def CTL_CODE(DeviceType, Access, Function_code, Method):
 # Generate the specific IOCTL code for reading SXM channels
 # Function code 0xF0D is defined by Anfatec's driver specification
 IOCTL_GET_KANAL = CTL_CODE(FILE_DEVICE_UNKNOWN, FILE_ANY_ACCESS, 0xF0D, METHOD_BUFFERED)
-
+IOCTL_SET_CHANNEL = CTL_CODE(FILE_DEVICE_UNKNOWN, FILE_ANY_ACCESS, 0xF18, METHOD_BUFFERED)
 # ---- SXM Driver Device Path ----
 # This is the Windows device path for the SXM driver
 # DEVICE_PATH is the symbolic link created by the Anfatec driver
@@ -301,3 +301,26 @@ class SXMIOCTL:
         # Apply calibration scaling to get physical units
         # Raw driver values are integers; scaling converts to physical units
         return float(raw) * float(scale)
+        
+    def write_raw(self, write_index: int, counts: int) -> None:
+        """
+        Write a 32-bit signed integer to a driver channel (DAC).
+        """
+        import struct
+        buf = struct.pack("<ll", int(write_index), int(counts))
+        win32file.DeviceIoControl(self.handle, IOCTL_SET_CHANNEL, buf, 0)
+
+    def write_unit(self, name: str, value: float) -> int:
+        """
+        Write a value in physical units to the matching DAC.
+        For 'Topo' (read_id=0) this writes DAC index 32 (0 -> 32).
+        Returns the counts sent.
+        """
+        if name not in CHANNELS:
+            raise KeyError(name)
+        read_id, _short, _unit, scale = CHANNELS[name]
+        # read_id -> write_id mapping (same rule used in your earlier code)
+        write_id = 32 - int(read_id)
+        counts = int(round(float(value) / float(scale)))
+        self.write_raw(write_id, counts)
+        return counts

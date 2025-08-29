@@ -11,42 +11,58 @@ Tabs:
     - Scope: View real-time signals from the microscope.
     - Suggested Setup: View recommended starting values.
     - QPlus Calibration: Sweep amplitude and calibrate delta-topography response.
+    - Constant Height: Control Z in constant-height mode.
 
 Safety:
     Displays a footer warning if voltage-like parameters exceed ±10 V.
-
-Usage:
-    Instantiate MainWindow with a valid DDE client.
 """
+
 from PyQt5 import QtWidgets
+
 from sxm_ncafm_control.gui.params_tab import ParamsTab
 from sxm_ncafm_control.gui.step_test_tab import StepTestTab
 from sxm_ncafm_control.gui.suggested_tab import SuggestedTab
 from sxm_ncafm_control.gui.scope_tab import ScopeTab
 from sxm_ncafm_control.gui.qplus_calibration_tab import QplusCalibrationTab
+from sxm_ncafm_control.gui.z_const_acquisition import ZConstAcquisitionTab
 
 
 class MainWindow(QtWidgets.QWidget):
-    """Main window containing all NC-AFM control tabs and safety footer.
+    """
+    Main window containing all NC-AFM control tabs and safety footer.
 
     This widget sets up and displays a tabbed interface for different aspects of
     microscope configuration and monitoring. All tabs are connected to a shared
-    DDE client for communicating with the SXM control software.
+    DDE client and IOCTL driver, which are provided via SXMConnection.
 
-    Attributes:
-        params_tab (ParamsTab): Tab for setting SXM parameters.
-        step_tab (StepTestTab): Tab for executing step tests.
-        scope_tab (ScopeTab): Tab for plotting real-time signal traces.
-        suggest_tab (SuggestedTab): Tab displaying recommended initial settings.
-        qplus_tab (QplusCalibrationTab): Tab for running QPlus amplitude calibration.
-        tabs (QTabWidget): Main tab widget containing all sub-tabs.
+    Attributes
+    ----------
+    params_tab : ParamsTab
+        Tab for setting SXM parameters.
+    step_tab : StepTestTab
+        Tab for executing step tests.
+    scope_tab : ScopeTab
+        Tab for plotting real-time signal traces.
+    suggest_tab : SuggestedTab
+        Tab displaying recommended initial settings.
+    qplus_tab : QplusCalibrationTab
+        Tab for running QPlus amplitude calibration.
+    topo_hold_tab : ZConstAcquisitionTab
+        Tab for Z-constant / constant height control.
+    tabs : QTabWidget
+        Main tab widget containing all sub-tabs.
     """
 
-    def __init__(self, dde_client):
-        """Initializes the main window and all functional tabs.
+    def __init__(self, conn):
+        """
+        Initialize the main window and all functional tabs.
 
-        Args:
-            dde_client (object): DDE client for communicating with the SXM software.
+        Parameters
+        ----------
+        conn : SXMConnection
+            Centralized connection object providing:
+            - conn.dde: DDE client (real or mock)
+            - conn.driver: IOCTL driver (or None if unavailable)
         """
         super().__init__()
         self.setWindowTitle("NC-AFM Control Suite")
@@ -55,24 +71,26 @@ class MainWindow(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(self)
         self.tabs = QtWidgets.QTabWidget()
 
-        # Create all tabs
-        self.params_tab = ParamsTab(dde_client)
-        self.step_tab = StepTestTab(dde_client)
-        self.scope_tab = ScopeTab()
-        self.suggest_tab = SuggestedTab(dde_client, self.params_tab)
-        self.qplus_tab = QplusCalibrationTab(dde_client)
+        # Create all tabs, sharing the same connection handles
+        self.params_tab = ParamsTab(conn.dde)
+        self.step_tab = StepTestTab(conn.dde)
+        self.scope_tab = ScopeTab(conn.dde, conn.driver)
+        self.suggest_tab = SuggestedTab(conn.dde, self.params_tab)
+        self.qplus_tab = QplusCalibrationTab(conn.dde)
+        self.topo_hold_tab = ZConstAcquisitionTab(conn.dde, conn.driver)
 
         # Link StepTest to Scope and Tabs
         self.step_tab.scope_tab = self.scope_tab
         self.step_tab.tabs_widget = self.tabs
         self.step_tab.scope_tab_index = 2  # Tab order: 0=Parameters, 1=Step Test, 2=Scope, ...
-    
+
         # Add tabs to UI
         self.tabs.addTab(self.params_tab, "Parameters")
         self.tabs.addTab(self.step_tab, "Step Test")
         self.tabs.addTab(self.scope_tab, "Scope")
         self.tabs.addTab(self.suggest_tab, "Suggested Setup")
         self.tabs.addTab(self.qplus_tab, "QPlus Amplitude calibration")
+        self.tabs.addTab(self.topo_hold_tab, "Constant Height")
 
         # Connect custom parameters from ParamsTab to StepTestTab
         self.params_tab.custom_params_changed.connect(self.step_tab.set_custom_params)

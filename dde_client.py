@@ -127,6 +127,12 @@ class RealDDEClient(BaseDDE):
         """
         return self.read_channel(0)
 
+    def feed_para(self, ptype: str, value: int) -> None:
+        """
+        Send FeedPara('type', value) to SXM, e.g. enable=0/1.
+        """
+        self._dde.SendWait(f"FeedPara('{ptype}', {int(value)});")
+        self._remember("FEED", ptype, int(value))
 
 class MockDDEClient(BaseDDE):
     """Offline mock client for development and testing without SXM software."""
@@ -197,3 +203,8 @@ class MockDDEClient(BaseDDE):
             float: Simulated topography value.
         """
         return self.read_channel(0)
+
+    def feed_para(self, ptype: str, value: float) -> None:
+        self._command_count += 1
+        print(f"[MOCK] #{self._command_count:03d} FeedPara('{ptype}', {float(value)});")
+        self._remember("FEED", ptype, float(value))

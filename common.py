@@ -141,3 +141,23 @@ class NumericItemDelegate(QtWidgets.QStyledItemDelegate):
         validator.setNotation(QtGui.QDoubleValidator.StandardNotation)
         editor.setValidator(validator)
         return editor
+    
+def offline_message(component: str, error: Exception, mock_name: str):
+    """
+    Print a clear, consistent offline-mode message.
+
+    Parameters
+    ----------
+    component : str
+        Which subsystem failed ("Microscope driver", "DDE connection", etc.)
+    error : Exception
+        The caught exception object (or string)
+    mock_name : str
+        What we will fall back to ("mock driver", "MockDDEClient", etc.)
+    """
+    err_msg = str(error)
+    print(
+        f"\n[OFFLINE MODE] {component} is not available.\n"
+        f"→ Cause: {err_msg}\n"
+        f"→ Action: Switching to {mock_name} (no hardware connected).\n"
+    )
