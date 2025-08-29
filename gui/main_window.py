@@ -72,7 +72,7 @@ class MainWindow(QtWidgets.QWidget):
         self.tabs.addTab(self.step_tab, "Step Test")
         self.tabs.addTab(self.scope_tab, "Scope")
         self.tabs.addTab(self.suggest_tab, "Suggested Setup")
-        self.tabs.addTab(self.qplus_tab, "QPlus Calibration")
+        self.tabs.addTab(self.qplus_tab, "QPlus Amplitude calibration")
 
         # Connect custom parameters from ParamsTab to StepTestTab
         self.params_tab.custom_params_changed.connect(self.step_tab.set_custom_params)
