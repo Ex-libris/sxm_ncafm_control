@@ -1,10 +1,25 @@
-# gui/params_tab.py
+"""
+Parameters tab for NC-AFM control.
+
+This tab provides an editable table of tuning parameters for the SXM system,
+including feedback gains, amplitude references, and custom EditXX entries.
+
+Features:
+    - Displays "Parameter | Code | Previous | Current | New Value" columns.
+    - Supports adding custom EditXX parameters dynamically.
+    - Allows staging, saving, loading, and applying "tunes".
+    - Provides Apply Selected, Auto-Send, logging, and safety checks.
+
+All parameter changes are sent via the shared DDE client provided
+by SXMConnection at startup.
+"""
+
 import json
 import datetime
 from typing import List, Tuple, Dict, Any
 from PyQt5 import QtWidgets, QtCore, QtGui
 
-from .common import (
+from ..common import (
     PARAMS_BASE,
     PARAM_TOOLTIPS,
     _to_float,
@@ -18,23 +33,28 @@ class ParamsTab(QtWidgets.QWidget):
     """
     Parameters tab: editable table of NC-AFM tuning parameters.
 
-    Features:
-        - Displays a table with "Previous | Current | New Value" columns.
-        - Supports adding custom EditXX parameters.
-        - Allows saving/loading/staging of parameter sets ("tunes").
-        - Provides Apply, Auto-Send, and logging functionality.
-
-    Signals:
-        custom_params_changed (list):
-            Emitted whenever custom parameters are added.
-            Carries a list of (ptype, pcode, label) tuples for Step Test tab.
+    Signals
+    -------
+    custom_params_changed : list
+        Emitted whenever custom parameters are added.
+        Carries a list of (ptype, pcode, label) tuples for Step Test tab.
     """
 
     custom_params_changed = QtCore.pyqtSignal(list)
 
-    def __init__(self, dde_client):
-        super().__init__()
-        self.dde = dde_client
+    def __init__(self, dde, parent=None):
+        """
+        Initialize the Parameters tab.
+
+        Parameters
+        ----------
+        dde : object
+            DDE client handle (real or mock), provided by SXMConnection.
+        parent : QWidget, optional
+            Parent widget.
+        """
+        super().__init__(parent)
+        self.dde = dde
         self._custom_params: List[Tuple[str, str, object, str, bool]] = []
 
         # --- Layout ---
@@ -95,7 +115,7 @@ class ParamsTab(QtWidgets.QWidget):
         self.btn_apply_prev.clicked.connect(self.apply_all_preview)
         self.btn_clear_prev.clicked.connect(self.clear_preview)
 
-        # Log
+        # Log widget
         self.log_widget = QtWidgets.QTextEdit()
         self.log_widget.setReadOnly(True)
         self.log_widget.hide()
@@ -103,11 +123,11 @@ class ParamsTab(QtWidgets.QWidget):
 
     # ---------- internal helpers ----------
     def _all_params(self) -> List[Tuple[str, str, object, str, bool]]:
-        """Return base + custom params."""
+        """Return base + custom parameters."""
         return PARAMS_BASE + self._custom_params
 
     def _rebuild_table(self) -> None:
-        """Rebuild table from current parameter list."""
+        """Rebuild the parameter table from the current parameter list."""
         rows = self._all_params()
         self.table.blockSignals(True)
         self.table.setRowCount(len(rows))
@@ -146,6 +166,7 @@ class ParamsTab(QtWidgets.QWidget):
         self.custom_params_changed.emit(customs_for_combo)
 
     def eventFilter(self, widget, event):
+        """Catch Enter/Return in table to trigger Apply when auto-send is enabled."""
         if widget is self.table and event.type() == QtCore.QEvent.KeyPress:
             if (
                 event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter)
@@ -156,20 +177,23 @@ class ParamsTab(QtWidgets.QWidget):
         return super().eventFilter(widget, event)
 
     def _maybe_auto_send(self, row: int, col: int) -> None:
+        """Apply change immediately if auto-send is enabled."""
         if col == 4 and self.chk_auto.isChecked():
             self.apply_row(row)
 
     def _toggle_log(self, show: bool) -> None:
+        """Show or hide the log widget."""
         self.log_widget.setVisible(show)
         self.btn_show_log.setText("Hide Change Log" if show else "Show Change Log")
 
     def _append_log(self, text: str) -> None:
+        """Append a timestamped entry to the change log."""
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         self.log_widget.append(f"[{ts}] {text}")
 
     # ---------- staging ----------
     def stage_value(self, ptype: str, pcode: str, value: float) -> bool:
-        """Stage value in 'New Value' cell for given param."""
+        """Stage a value in 'New Value' cell for the given parameter."""
         mapping = {(t, str(c)): r for r, (_k, t, c, _l, _v) in enumerate(self._all_params())}
         row = mapping.get((ptype, str(pcode)))
         if row is None:
@@ -180,7 +204,7 @@ class ParamsTab(QtWidgets.QWidget):
 
     # ---------- add custom ----------
     def _add_custom_editxx(self) -> None:
-        """Dialog to add custom EditXX parameter."""
+        """Dialog to add a custom EditXX parameter row."""
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle("Add Custom EditXX")
         form = QtWidgets.QFormLayout(dlg)
@@ -223,11 +247,13 @@ class ParamsTab(QtWidgets.QWidget):
 
     # ---------- apply operations ----------
     def apply_selected(self) -> None:
+        """Apply all selected parameter rows."""
         rows = sorted({i.row() for i in self.table.selectedIndexes()})
         for r in rows:
             self.apply_row(r)
 
     def apply_row(self, row: int) -> None:
+        """Apply a parameter change from the given row."""
         all_params = self._all_params()
         key, ptype, pcode, label, voltage_like = all_params[row]
         txt = self.table.item(row, 4).text().strip()
@@ -268,12 +294,14 @@ class ParamsTab(QtWidgets.QWidget):
 
     # ---------- tune management ----------
     def _row_lookup_by_code(self) -> Dict[Tuple[str, str], int]:
+        """Return mapping of (ptype, pcode) → row index."""
         return {
-        (ptype, str(pcode)): row
-        for row, (_key, ptype, pcode, _label, _vlike) in enumerate(self._all_params())
+            (ptype, str(pcode)): row
+            for row, (_key, ptype, pcode, _label, _vlike) in enumerate(self._all_params())
         }
 
     def _collect_params_snapshot(self) -> Dict[str, Any]:
+        """Return snapshot of current parameter values for saving to JSON."""
         records: List[Dict[str, Any]] = []
         for row, (_key, ptype, pcode, label, _vlike) in enumerate(self._all_params()):
             cur_txt = self.table.item(row, 3).text().strip()
@@ -286,15 +314,13 @@ class ParamsTab(QtWidgets.QWidget):
         }
 
     def save_tune(self) -> None:
-        # Default filename: YYYYMMDD_HH_MM_SS_NameSensor_tune.json
+        """Save current parameter values (CURRENT column) to JSON."""
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H_%M_%S")
         default_name = f"{timestamp}_NameSensor_tune.json"
 
-        # Use last directory if available, else current dir
         start_dir = getattr(self, "_last_dir", "")
         start_path = str(QtCore.QDir(start_dir).filePath(default_name)) if start_dir else default_name
 
-        # Ask for save path
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Save Tune",
@@ -304,10 +330,8 @@ class ParamsTab(QtWidgets.QWidget):
         if not path:
             return
 
-        # Remember last used directory
         self._last_dir = str(QtCore.QFileInfo(path).absolutePath())
 
-        # Ask for optional comments
         comments, ok = QtWidgets.QInputDialog.getMultiLineText(
             self,
             "Add Comments",
@@ -317,12 +341,10 @@ class ParamsTab(QtWidgets.QWidget):
         if not ok:
             comments = ""
 
-        # Build payload
         payload = self._collect_params_snapshot()
         payload["comments"] = comments
         payload["saved_at"] = timestamp
 
-        # Write to file
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2)
@@ -332,15 +354,13 @@ class ParamsTab(QtWidgets.QWidget):
 
         QtWidgets.QMessageBox.information(self, "Saved", f"Tune saved to:\n{path}")
 
-
     def load_tune_preview(self) -> None:
         """
-        Load JSON and stage values into 'New Value' (no send).
-        Accepts:
-        1) {"kind":"ncafm_tune","params":[{ptype,pcode,label,value},...], "comments": "..."}
-        2) A simple dict: {"amp_ki": 5.0, "amp_kp": 7.0, ...} — base keys only.
-        Custom EditXX entries in (1) will be matched by (ptype,pcode) and will
-        stage correctly if the custom row exists in the table.
+        Load a tune from JSON and stage values into 'New Value' (no send).
+
+        Accepts two formats:
+        1) {"kind":"ncafm_tune","params":[{ptype,pcode,label,value},...]}
+        2) Simple dict: {"amp_ki": 5.0, "amp_kp": 7.0, ...} — base keys only.
         """
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "Load Tune (Preview)", getattr(self, "_last_dir", ""), "Tune Files (*.json);;All Files (*)"
@@ -355,7 +375,6 @@ class ParamsTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "I/O error", f"Could not read:\n{e}")
             return
 
-        # If the file has comments, display them
         comments = payload.get("comments")
         if comments:
             QtWidgets.QMessageBox.information(
@@ -365,14 +384,13 @@ class ParamsTab(QtWidgets.QWidget):
             )
 
         staged = 0
-        self.chk_auto.setChecked(False)  # do not auto-send while staging
+        self.chk_auto.setChecked(False)
         lookup = self._row_lookup_by_code()
 
         def stage_row(row: int, val: float):
             self.table.item(row, 4).setText(str(val))
             self.table.item(row, 4).setBackground(QtGui.QColor("#e6ffe6"))
 
-        # Case 1: original schema (also supports customs if present in table)
         if isinstance(payload, dict) and "params" in payload and isinstance(payload["params"], list):
             for rec in payload["params"]:
                 ptype = rec.get("ptype")
@@ -383,8 +401,6 @@ class ParamsTab(QtWidgets.QWidget):
                     if row is not None:
                         stage_row(row, float(val))
                         staged += 1
-
-        # Case 2: mapping by base keys only (customs don’t have stable keys)
         elif isinstance(payload, dict):
             base_index = {k: i for i, (k, *_r) in enumerate(PARAMS_BASE)}
             for key, val in payload.items():
@@ -402,46 +418,14 @@ class ParamsTab(QtWidgets.QWidget):
                 f"Staged {staged} value(s). Review and click 'Apply Tune Preview'."
             )
 
-
-        def stage_row(row: int, val: float):
-            self.table.item(row, 4).setText(str(val))
-            self.table.item(row, 4).setBackground(QtGui.QColor("#e6ffe6"))
-
-        if isinstance(payload, dict) and "params" in payload and isinstance(payload["params"], list):
-            # Schema format
-            for rec in payload["params"]:
-                ptype = rec.get("ptype")
-                pcode = str(rec.get("pcode"))
-                val = rec.get("value", None)
-                if isinstance(val, (int, float)):
-                    row = lookup.get((ptype, pcode))
-                    if row is not None:
-                        stage_row(row, float(val))
-                        staged += 1
-        elif isinstance(payload, dict):
-            # Simple mapping format
-            base_index = {k: i for i, (k, *_r) in enumerate(PARAMS_BASE)}
-            for key, val in payload.items():
-                if key in base_index and isinstance(val, (int, float)):
-                    row = base_index[key]
-                    stage_row(row, float(val))
-                    staged += 1
-
-        if staged == 0:
-            QtWidgets.QMessageBox.information(self, "Nothing staged", "No matching numeric values found.")
-        else:
-            QtWidgets.QMessageBox.information(
-                self,
-                "Preview loaded",
-                f"Staged {staged} value(s). Review and click 'Apply Tune Preview'.",
-            )
-
     def clear_preview(self) -> None:
+        """Clear all staged values from the 'New Value' column."""
         for row in range(self.table.rowCount()):
             self.table.item(row, 4).setText("")
             self.table.item(row, 4).setBackground(QtGui.QColor("#fff8dc"))
 
     def apply_all_preview(self) -> None:
+        """Apply all staged values from the preview file."""
         rows_to_apply: List[Tuple[int, float]] = []
         for row in range(self.table.rowCount()):
             txt = self.table.item(row, 4).text().strip()

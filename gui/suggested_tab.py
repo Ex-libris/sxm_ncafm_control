@@ -4,7 +4,7 @@ from scipy.optimize import curve_fit
 from PyQt5 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 
-from .common import PARAMS_BASE, confirm_high_voltage
+from ..common import PARAMS_BASE, confirm_high_voltage
 
 
 def lorentzian_amp(f, A0, f0, Q):
