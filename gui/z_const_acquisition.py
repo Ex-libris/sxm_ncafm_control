@@ -1,9 +1,9 @@
 # z_const_acquisition.py
-# Full script with a second plot + IOCTL channel dropdown (uses device_driver.CHANNELS)
+# Full script with elegant change overlay and color-coded feedback
 
 import sys
 import datetime
-from PyQt5 import QtWidgets, QtCore
+from PyQt5 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 
 # Uses your mapping. CHANNELS[name] -> (idx, short, unit, scale) or similar.
@@ -112,6 +112,113 @@ class FlexibleDoubleSpinBox(QtWidgets.QDoubleSpinBox):
             super().keyPressEvent(event)
 
 
+class ChangeOverlay(QtWidgets.QLabel):
+    """Elegant text overlay for displaying z-position changes"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAlignment(QtCore.Qt.AlignCenter)
+        self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+        self.setStyleSheet("""
+            QLabel {
+                background-color: rgba(255, 255, 255, 200);
+                border: 2px solid rgba(100, 100, 100, 150);
+                border-radius: 15px;
+                padding: 8px 16px;
+                font-size: 16px;
+                font-weight: bold;
+                color: #333;
+            }
+        """)
+        
+        # Animation for fade in/out
+        self.opacity_effect = QtWidgets.QGraphicsOpacityEffect()
+        self.setGraphicsEffect(self.opacity_effect)
+        
+        self.fade_animation = QtCore.QPropertyAnimation(self.opacity_effect, b"opacity")
+        self.fade_animation.setDuration(300)
+        
+        # Timer for auto-hide
+        self.hide_timer = QtCore.QTimer()
+        self.hide_timer.setSingleShot(True)
+        self.hide_timer.timeout.connect(self.fade_out)
+        
+        self.hide()
+    
+    def show_change(self, change_value, current_value):
+        """Display the change value with appropriate color coding"""
+        if abs(change_value) < 0.001:  # Threshold for significant change
+            return
+            
+        # Format the change value
+        if abs(change_value) >= 1.0:
+            change_text = f"{change_value:+.2f}"
+        elif abs(change_value) >= 0.01:
+            change_text = f"{change_value:+.3f}"
+        else:
+            change_text = f"{change_value:+.4f}"
+        
+        # Create the display text
+        display_text = f"Δz: {change_text} nm\nz: {current_value:.3f} nm"
+        
+        # Color coding
+        if change_value > 0:
+            color = "#2E8B57"  # Sea green for positive changes
+            bg_color = "rgba(200, 255, 200, 220)"
+            border_color = "rgba(46, 139, 87, 180)"
+        else:
+            color = "#DC143C"  # Crimson for negative changes
+            bg_color = "rgba(255, 200, 200, 220)"
+            border_color = "rgba(220, 20, 60, 180)"
+        
+        # Background with no color, only text colored
+        self.setStyleSheet(f"""
+            QLabel {{
+                background-color: rgba(255, 255, 255, 240);
+                border: 1px solid rgba(150, 150, 150, 120);
+                border-radius: 12px;
+                padding: 6px 12px;
+                font-size: 14px;
+                font-weight: bold;
+                color: {color};
+            }}
+        """)
+        
+        self.setText(display_text)
+        self.adjustSize()
+        
+        # Position overlay in bottom-left corner of parent
+        if self.parent():
+            parent_rect = self.parent().rect()
+            overlay_rect = self.rect()
+            x = 20
+            y = parent_rect.height() - overlay_rect.height() - 20
+            self.move(x, y)
+        
+        # Show with fade in
+        self.fade_in()
+        
+        # Auto-hide after 4 seconds (increased duration)
+        self.hide_timer.stop()
+        self.hide_timer.start(4000)
+    
+    def fade_in(self):
+        """Fade in animation"""
+        self.show()
+        self.fade_animation.stop()
+        self.fade_animation.setStartValue(0.0)
+        self.fade_animation.setEndValue(1.0)
+        self.fade_animation.start()
+    
+    def fade_out(self):
+        """Fade out animation"""
+        self.fade_animation.stop()
+        self.fade_animation.setStartValue(1.0)
+        self.fade_animation.setEndValue(0.0)
+        self.fade_animation.finished.connect(self.hide)
+        self.fade_animation.start()
+
+
 class ZConstAcquisition(QtWidgets.QWidget):
     def __init__(self, dde=None, driver=None):
         super().__init__()
@@ -125,14 +232,19 @@ class ZConstAcquisition(QtWidgets.QWidget):
         self.live_mode = True
         self.feedback_enabled = True
         self.last_z = 0.0
+        self.previous_z = 0.0  # For change calculation
         self.window_seconds = 10
+        self.change_threshold = 0.001  # Minimum change to display overlay
+
+        # Change event markers
+        self.change_markers = []  # Store reference lines for changes
 
         # topography trace
         self.t_stamps = []
         self.z_hist = []
 
         # aux trace
-        default_aux = "Frequency" if "Frequency" in CHANNELS else list(CHANNELS.keys())[0]
+        default_aux = "df" if "df" in CHANNELS else list(CHANNELS.keys())[0]
         self.aux_channel = default_aux
         self.aux_unit = CHANNELS[self.aux_channel][2]
         self.aux_hist = []
@@ -150,7 +262,8 @@ class ZConstAcquisition(QtWidgets.QWidget):
 
         ctrl.addWidget(QtWidgets.QLabel("Z Position:"))
         self.z_spin = FlexibleDoubleSpinBox()
-        self.z_spin.setRange(-1000.0, 1000.0)
+        self.z_spin.setRange(-250.0, 250.0)
+        self.z_spin.setDecimals(3)            
         self.z_spin.setSuffix(" nm")
         self.z_spin.setEnabled(False)  # enabled only if manual
         self.z_spin.valueChanged.connect(self.manual_update)
@@ -191,14 +304,23 @@ class ZConstAcquisition(QtWidgets.QWidget):
         status.addStretch(1)
         main.addLayout(status)
 
-        # --- topography plot ---
+        # --- topography plot with overlay ---
+        plot_container = QtWidgets.QWidget()
+        plot_layout = QtWidgets.QVBoxLayout(plot_container)
+        plot_layout.setContentsMargins(0, 0, 0, 0)
+        
         self.plot_topo = pg.PlotWidget()
         self.plot_topo.setBackground("w")
         self.curve_topo = self.plot_topo.plot([], [], pen=pg.mkPen('b', width=2))
         self.plot_topo.setLabel("bottom", "Time", units="s")
         self.plot_topo.setLabel("left", "Z Position", units="nm")
         self.plot_topo.showGrid(x=True, y=True, alpha=0.3)
-        main.addWidget(self.plot_topo)
+        plot_layout.addWidget(self.plot_topo)
+        
+        # Create change overlay
+        self.change_overlay = ChangeOverlay(self.plot_topo)
+        
+        main.addWidget(plot_container)
 
         # --- aux controls + plot ---
         aux_ctrl = QtWidgets.QHBoxLayout()
@@ -240,6 +362,7 @@ class ZConstAcquisition(QtWidgets.QWidget):
             if self.driver:
                 z = self.driver.read_scaled("Topo")
                 self.last_z = float(z)
+                self.previous_z = self.last_z
                 self.z_spin.setValue(self.last_z)
         except Exception as e:
             print(f"Init error: {e}")
@@ -261,10 +384,85 @@ class ZConstAcquisition(QtWidgets.QWidget):
     def manual_update(self, val: float):
         if self.feedback_enabled:
             return
-        # Here you would send setpoint to hardware if needed
+        
+        # Calculate change for manual updates
+        change = val - self.last_z
+        self.previous_z = self.last_z
         self.last_z = float(val)
+        
+        # Show overlay for manual changes
+        if abs(change) >= self.change_threshold:
+            self.change_overlay.show_change(change, self.last_z)
+            # Add marker at current time if we have timestamp data
+            if self.t_stamps:
+                current_time = self.t_stamps[-1] if self.t_stamps else 0
+                self.add_change_marker(current_time, self.last_z, change)
 
+    def add_change_marker(self, time_stamp, z_value, change_value):
+        """Add a vertical line marker at the change event"""
+        if abs(change_value) < self.change_threshold:
+            return
+        
+        # Color based on change direction
+        if change_value > 0:
+            color = (46, 139, 87, 150)  # Sea green with transparency
+        else:
+            color = (220, 20, 60, 150)  # Crimson with transparency
+        
+        # Create vertical line
+        line = pg.InfiniteLine(
+            pos=time_stamp,
+            angle=90,
+            pen=pg.mkPen(color, width=1, style=QtCore.Qt.DashLine)
+        )
+        
+        # Create text label with the change value
+        if abs(change_value) >= 1.0:
+            change_text = f"{change_value:+.2f}"
+        elif abs(change_value) >= 0.01:
+            change_text = f"{change_value:+.3f}"
+        else:
+            change_text = f"{change_value:+.4f}"
+        
+        # Position text label slightly offset from line
+        text_item = pg.TextItem(
+            text=change_text,
+            color=color[:3],  # RGB only for text
+            anchor=(0.5, 1.1)  # Center horizontally, above the line
+        )
+        text_item.setPos(time_stamp, z_value)
+        
+        # Add to plot
+        self.plot_topo.addItem(line)
+        self.plot_topo.addItem(text_item)
+        
+        # Store references for cleanup
+        self.change_markers.append((line, text_item, time_stamp))
+        
+        # Clean up old markers outside the window
+        self.cleanup_old_markers(time_stamp)
+    
+    def cleanup_old_markers(self, current_time):
+        """Remove markers that are outside the current time window"""
+        win = self.window_seconds
+        markers_to_remove = []
+        
+        for line, text, timestamp in self.change_markers:
+            if current_time - timestamp > win:
+                self.plot_topo.removeItem(line)
+                self.plot_topo.removeItem(text)
+                markers_to_remove.append((line, text, timestamp))
+        
+        # Remove from list
+        for marker in markers_to_remove:
+            self.change_markers.remove(marker)
     def clear_trace(self):
+        # Clear existing markers
+        for line, text, _ in self.change_markers:
+            self.plot_topo.removeItem(line)
+            self.plot_topo.removeItem(text)
+        self.change_markers.clear()
+        
         self.t_stamps.clear()
         self.z_hist.clear()
         self.curve_topo.setData([], [])
@@ -297,7 +495,20 @@ class ZConstAcquisition(QtWidgets.QWidget):
         try:
             if self.live_mode and self.driver:
                 z = float(self.driver.read_scaled("Topo"))
+                
+                # Calculate change from previous reading
+                change = z - self.previous_z
+                
+                # Update positions
+                self.previous_z = self.last_z
                 self.last_z = z
+                
+                # Show overlay if change is significant
+                if abs(change) >= self.change_threshold:
+                    self.change_overlay.show_change(change, z)
+                    # Add vertical marker at this time point
+                    self.add_change_marker(t_now, z, change)
+                
                 if self.feedback_enabled:
                     self.z_spin.blockSignals(True)
                     self.z_spin.setValue(z)
@@ -357,6 +568,11 @@ class ZConstAcquisition(QtWidgets.QWidget):
                 pad = 0.1 * (y_max - y_min)
                 self.plot_aux.setYRange(y_min - pad, y_max + pad)
 
+    def resizeEvent(self, event):
+        """Handle window resize to reposition overlay"""
+        super().resizeEvent(event)
+        # The overlay will reposition itself when next shown
+
     # ---------- Qt ----------
     def closeEvent(self, event):
         try:
@@ -366,26 +582,26 @@ class ZConstAcquisition(QtWidgets.QWidget):
         event.accept()
 
 
-def run(dde=None, driver=None):
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-    w = ZConstAcquisition(dde=dde, driver=driver)
-    w.show()
-    return app.exec_()
+# def run(dde=None, driver=None):
+#     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+#     w = ZConstAcquisition(dde=dde, driver=driver)
+#     w.show()
+#     return app.exec_()
 
 
-if __name__ == "__main__":
-    # Expect caller to pass a real driver with read_scaled(name).
-    # If you want to test without hardware, define a stub here.
-    class _StubDriver:
-        def __init__(self):
-            self._t0 = datetime.datetime.now()
+# if __name__ == "__main__":
+#     # Expect caller to pass a real driver with read_scaled(name).
+#     # If you want to test without hardware, define a stub here.
+#     class _StubDriver:
+#         def __init__(self):
+#             self._t0 = datetime.datetime.now()
 
-        def read_scaled(self, name):
-            dt = (datetime.datetime.now() - self._t0).total_seconds()
-            if name == "Topo":
-                return 100.0 + 2.0 * pg.np.sin(0.8 * dt)
-            # generic aux
-            return 1.0 * pg.np.sin(2.0 * dt) + 5.0
+#         def read_scaled(self, name):
+#             dt = (datetime.datetime.now() - self._t0).total_seconds()
+#             if name == "Topo":
+#                 return 100.0 + 2.0 * pg.np.sin(0.8 * dt)
+#             # generic aux
+#             return 1.0 * pg.np.sin(2.0 * dt) + 5.0
 
-    # Comment out the stub when wiring to your stack.
-    sys.exit(run(driver=_StubDriver()))
+#     # Comment out the stub when wiring to your stack.
+#     sys.exit(run(driver=_StubDriver()))
