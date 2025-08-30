@@ -83,6 +83,7 @@ NC-AFM Control GUI showing the tabbed interface for parameter control and monito
 
 ### Constant height
 This tab gives direct control of the piezo absolute position. You can enable or disable the feedback loop and move closer or further from the sample manually using the keyboard, mouse, or by entering numbers. This control is essential for precise adjustment of the tip–sample distance and for accessing different regimes in high-resolution nc-AFM. (Image in OFFLINE mode - a.k.a no microscope, but I will add soon one with the microscope engaged.)
+
 ![constant_height](screenshots/constant_height.gif)
 
 ### Scope Tab
@@ -92,6 +93,7 @@ Real-time channel monitoring with direct driver communication. You can track in 
 
 ### Step Test Tab
 Square step tests for ncAFM channels parameters. In this tab, you can define a train of step changes in a given parameter for the different PIDs controlling the ncAFM loop.
+
 ![Step Test Tab](screenshots/step_test_tab.png)
 
 ### Suggested setup Tab
@@ -101,6 +103,7 @@ Calculator of PLL parameters. You can also add a .txt or .csv with freq | phase 
 
 ### (Basic) Amplitude calibration
 Get an idea of the calibration between the excitation signal you provide to the qplus in mV and the physical amplitude of oscillation. It uses STM constant current to see how much of a change of excitation corresponds to a topographycal STM change. 
+
 ![suggested step](screenshots/calibration.png)
 
 ### Operation
