@@ -238,6 +238,10 @@ class ZConstAcquisition(QtWidgets.QWidget):
 
         # Change event markers
         self.change_markers = []  # Store reference lines for changes
+        
+        # Font scaling for accessibility
+        self.font_scale = 1.0
+        self.base_font_size = QtWidgets.QApplication.font().pointSize() or 10
 
         # topography trace
         self.t_stamps = []
@@ -282,6 +286,22 @@ class ZConstAcquisition(QtWidgets.QWidget):
         self.btn_clear = QtWidgets.QPushButton("Clear Trace")
         self.btn_clear.clicked.connect(self.clear_trace)
         ctrl.addWidget(self.btn_clear)
+
+        self.btn_clear_markers = QtWidgets.QPushButton("Clear Markers")
+        self.btn_clear_markers.clicked.connect(self.clear_markers_only)
+        self.btn_clear_markers.setToolTip("Clear change markers and overlays without affecting trace data")
+        ctrl.addWidget(self.btn_clear_markers)
+
+        ctrl.addSpacing(20)
+        
+        # Font scaling controls for accessibility
+        ctrl.addWidget(QtWidgets.QLabel("Font Size:"))
+        self.font_scale_combo = QtWidgets.QComboBox()
+        self.font_scale_combo.addItems(["Small", "Normal", "Large", "Extra Large"])
+        self.font_scale_combo.setCurrentText("Normal")
+        self.font_scale_combo.currentTextChanged.connect(self.change_font_scale)
+        self.font_scale_combo.setToolTip("Adjust font size for better accessibility")
+        ctrl.addWidget(self.font_scale_combo)
 
         ctrl.addStretch(1)
         main.addLayout(ctrl)
@@ -353,8 +373,9 @@ class ZConstAcquisition(QtWidgets.QWidget):
         self.timer.timeout.connect(self.poll)
         self.timer.start(100)
 
-        # initial sync
+        # initial sync and font setup
         self.initialize_z_position()
+        self.apply_font_scaling()  # Apply initial font scaling
 
     # ---------- actions ----------
     def initialize_z_position(self):
@@ -398,6 +419,82 @@ class ZConstAcquisition(QtWidgets.QWidget):
                 current_time = self.t_stamps[-1] if self.t_stamps else 0
                 self.add_change_marker(current_time, self.last_z, change)
 
+    def change_font_scale(self, scale_text):
+        """Change font scale for accessibility"""
+        scale_map = {
+            "Small": 0.8,
+            "Normal": 1.0,
+            "Large": 1.3,
+            "Extra Large": 1.6
+        }
+        
+        self.font_scale = scale_map.get(scale_text, 1.0)
+        self.apply_font_scaling()
+        
+        print(f"Font scale changed to: {scale_text} ({self.font_scale}x)")
+    
+    def apply_font_scaling(self):
+        """Apply font scaling to all UI elements"""
+        scaled_size = int(self.base_font_size * self.font_scale)
+        font = QtGui.QFont()
+        font.setPointSize(scaled_size)
+        
+        # Apply to main widget and all children
+        self.setFont(font)
+        for child in self.findChildren(QtWidgets.QWidget):
+            if not isinstance(child, (pg.PlotWidget, pg.GraphicsLayoutWidget)):
+                child.setFont(font)
+        
+        # Scale plot labels and axes
+        self.scale_plot_fonts()
+        
+        # Update overlay font size
+        self.update_overlay_font_size()
+        
+        # Update change marker text sizes
+        self.update_marker_text_sizes()
+    
+    def scale_plot_fonts(self):
+        """Scale fonts for plot elements"""
+        label_font_size = max(8, int(10 * self.font_scale))
+        tick_font_size = max(7, int(9 * self.font_scale))
+        
+        # Style for plot labels and ticks
+        label_style = {'font-size': f'{label_font_size}pt', 'color': 'black'}
+        tick_style = {'font-size': f'{tick_font_size}pt', 'color': 'black'}
+        
+        # Update topography plot
+        self.plot_topo.setLabel('bottom', 'Time', units='s', **label_style)
+        self.plot_topo.setLabel('left', 'Z Position', units='nm', **label_style)
+        self.plot_topo.getAxis('bottom').setTickFont(QtGui.QFont('', tick_font_size))
+        self.plot_topo.getAxis('left').setTickFont(QtGui.QFont('', tick_font_size))
+        
+        # Update aux plot
+        self.plot_aux.setLabel('bottom', 'Time', units='s', **label_style)
+        self.plot_aux.setLabel('left', self.aux_channel, units=self.aux_unit, **label_style)
+        self.plot_aux.getAxis('bottom').setTickFont(QtGui.QFont('', tick_font_size))
+        self.plot_aux.getAxis('left').setTickFont(QtGui.QFont('', tick_font_size))
+    
+    def update_overlay_font_size(self):
+        """Update the change overlay font size"""
+        overlay_font_size = max(12, int(14 * self.font_scale))
+        current_style = self.change_overlay.styleSheet()
+        
+        # Update font-size in the stylesheet
+        import re
+        new_style = re.sub(r'font-size:\s*\d+px', f'font-size: {overlay_font_size}px', current_style)
+        self.change_overlay.setStyleSheet(new_style)
+    
+    def update_marker_text_sizes(self):
+        """Update existing marker text sizes"""
+        marker_font_size = max(8, int(10 * self.font_scale))
+        
+        for line, text_item, timestamp in self.change_markers:
+            if hasattr(text_item, 'setFont'):
+                font = QtGui.QFont()
+                font.setPointSize(marker_font_size)
+                text_item.setFont(font)
+
     def add_change_marker(self, time_stamp, z_value, change_value):
         """Add a vertical line marker at the change event"""
         if abs(change_value) < self.change_threshold:
@@ -416,7 +513,8 @@ class ZConstAcquisition(QtWidgets.QWidget):
             pen=pg.mkPen(color, width=1, style=QtCore.Qt.DashLine)
         )
         
-        # Create text label with the change value
+        # Create text label with the change value and proper font size
+        marker_font_size = max(8, int(10 * self.font_scale))
         if abs(change_value) >= 1.0:
             change_text = f"{change_value:+.2f}"
         elif abs(change_value) >= 0.01:
@@ -430,6 +528,12 @@ class ZConstAcquisition(QtWidgets.QWidget):
             color=color[:3],  # RGB only for text
             anchor=(0.5, 1.1)  # Center horizontally, above the line
         )
+        
+        # Set font size for the text item
+        font = QtGui.QFont()
+        font.setPointSize(marker_font_size)
+        text_item.setFont(font)
+        
         text_item.setPos(time_stamp, z_value)
         
         # Add to plot
@@ -456,6 +560,19 @@ class ZConstAcquisition(QtWidgets.QWidget):
         # Remove from list
         for marker in markers_to_remove:
             self.change_markers.remove(marker)
+    def clear_markers_only(self):
+        """Clear only the change markers and overlay, keep trace data"""
+        # Clear existing markers
+        for line, text, _ in self.change_markers:
+            self.plot_topo.removeItem(line)
+            self.plot_topo.removeItem(text)
+        self.change_markers.clear()
+        
+        # Hide the overlay
+        self.change_overlay.hide()
+        
+        print("Change markers and overlay cleared")
+
     def clear_trace(self):
         # Clear existing markers
         for line, text, _ in self.change_markers:
@@ -481,6 +598,7 @@ class ZConstAcquisition(QtWidgets.QWidget):
         self.aux_unit = unit
         self.lbl_aux_unit.setText(f"[{unit}]")
         self.plot_aux.setLabel("left", name, units=unit)
+        self.scale_plot_fonts()  # Reapply font scaling to new label
         self.aux_hist.clear()
         self.curve_aux.setData([], [])
 
