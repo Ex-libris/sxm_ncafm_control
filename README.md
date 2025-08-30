@@ -4,7 +4,6 @@ A simple GUI for controlling NC-AFM parameters on Anfatec SXM controllers (Omicr
 
 **Author**: Benjamin Mallada  
 **Contact**: [benjamin.mallada@bioch.ox.ac.uk](mailto:benjamin.mallada@bioch.ox.ac.uk)  
-**ORCID**: [0000-0002-8209-9977](https://orcid.org/0000-0002-8209-9977)  
 **Website**: [benjaminmallada.com](https://www.benjaminmallada.com/)
 
 **Acknowledgments**: This software builds heavily upon the scripts and documentation generously provided by Anfatec for interfacing with their SXM controllers. For additional SXM software support, see: https://www.anfatec.de/support/02_spm/sxm_softwaresupport.html
