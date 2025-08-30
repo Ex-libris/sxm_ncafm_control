@@ -1,13 +1,11 @@
 """
 Qplus Calibration Tab GUI
 
-This module provides a PyQt5-based interface to perform amplitude calibration
-for Q+ mode AFM operation. It controls a sweep of amplitude setpoints (Edit23),
-measures resulting changes in topography, fits a linear model, and computes
-the calibration slope in pm/mV. It also supports plotting and exporting data.
-
-Author: Your Name
-Date: 2025-08-28
+Provides a PyQt5-based interface to perform amplitude calibration
+for Q+ mode AFM operation. It controls a sweep of amplitude setpoints
+(Edit23), measures resulting changes in topography, fits a linear model,
+and computes the calibration slope in pm/mV. It also supports plotting
+and exporting data.
 """
 
 import datetime
@@ -17,44 +15,51 @@ from PyQt5 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 from scipy import stats
 
-from .common import confirm_high_voltage
+from ..common import confirm_high_voltage
 
 
 class QplusCalibrationTab(QtWidgets.QWidget):
-    """A PyQt5 widget for performing Q+ amplitude calibration.
+    """
+    A PyQt5 widget for performing Q+ amplitude calibration.
 
-    This tab allows users to:
-    - Define a sweep of amplitude setpoints (Edit23),
-    - Measure corresponding topography changes,
-    - Fit a linear regression to compute a calibration slope (pm/mV),
-    - Visualize results in a plot, and
-    - Export results to a CSV file.
+    Parameters
+    ----------
+    dde : object
+        DDE client handle (real or mock), provided by SXMConnection.
+    driver : object or None, optional
+        IOCTL driver handle (SXMIOCTL) or None if unavailable.
+    parent : QWidget, optional
+        Parent widget.
 
-    Attributes:
-        dde (object): DDE client used to interface with the microscope control system.
-        layout (QVBoxLayout): Main layout of the tab.
-        controls_group (QGroupBox): Group box for calibration setup controls.
-        plot_widget (PlotWidget): Plot area showing topography change vs. amplitude.
-        log (QTextEdit): Log output display.
-        measurement_data (List[Tuple[float, float]]): List of (amplitude, delta_topography) points.
-        amplitude_points (List[float]): List of amplitude setpoints to sweep.
-        current_point (int): Index of the current amplitude point in the sweep.
-        baseline_topo (Optional[float]): Reference topography at the start of calibration.
-        calibration_factor (Optional[float]): Calculated slope from linear regression in pm/mV.
+    Attributes
+    ----------
+    dde : object
+        DDE client used to interface with the microscope control system.
+    driver : object or None
+        IOCTL driver for fallback reads (may be None).
+    measurement_data : list of tuple
+        Recorded (amplitude_mV, delta_topography_pm) points.
+    amplitude_points : list of float
+        List of amplitude setpoints to sweep.
+    current_point : int
+        Index of the current amplitude point in the sweep.
+    baseline_topo : float or None
+        Reference topography at the start of calibration.
+    calibration_factor : float or None
+        Slope from linear regression in pm/mV.
     """
 
-    def __init__(self, dde_client):
-        """Initializes the calibration tab UI and binds signals.
+    def __init__(self, dde, driver=None, parent=None):
+        super().__init__(parent)
+        self.dde = dde
+        self.driver = driver
 
-        Args:
-            dde_client (object): DDE client object providing access to microscope parameters.
-        """
-        super().__init__()
-        self.dde = dde_client
         self.setWindowTitle("Q+ Amplitude Calibration")
         self.layout = QtWidgets.QVBoxLayout(self)
 
-        # UI elements
+        # ----------------------------
+        # Setup controls
+        # ----------------------------
         self.controls_group = QtWidgets.QGroupBox("Setup")
         self.controls_layout = QtWidgets.QGridLayout(self.controls_group)
 
@@ -81,7 +86,7 @@ class QplusCalibrationTab(QtWidgets.QWidget):
         self.stop_btn = QtWidgets.QPushButton("Stop")
         self.stop_btn.setEnabled(False)
 
-        # Labels reflect that we sweep Amplitude setpoint (Edit23)
+        # Layout
         self.controls_layout.addWidget(QtWidgets.QLabel("Setpoint start (Edit23):"), 0, 0)
         self.controls_layout.addWidget(self.amp_start, 0, 1)
         self.controls_layout.addWidget(QtWidgets.QLabel("Setpoint end (Edit23):"), 1, 0)
@@ -95,19 +100,25 @@ class QplusCalibrationTab(QtWidgets.QWidget):
 
         self.layout.addWidget(self.controls_group)
 
+        # ----------------------------
         # Plot
+        # ----------------------------
         self.plot_widget = pg.PlotWidget(title="Topography change vs amplitude setpoint (Edit23)")
         self.plot_widget.setLabel("left", "ΔTopography", units="pm")
         self.plot_widget.setLabel("bottom", "Amplitude setpoint", units="mV")
         self.plot_data = self.plot_widget.plot([], [], pen=None, symbol="o")
         self.layout.addWidget(self.plot_widget)
 
+        # ----------------------------
         # Log
+        # ----------------------------
         self.log = QtWidgets.QTextEdit()
         self.log.setReadOnly(True)
         self.layout.addWidget(self.log)
 
+        # ----------------------------
         # Data
+        # ----------------------------
         self.measurement_data: List[Tuple[float, float]] = []
         self.amplitude_points: List[float] = []
         self.current_point: int = 0
@@ -118,17 +129,25 @@ class QplusCalibrationTab(QtWidgets.QWidget):
         self.start_btn.clicked.connect(self.start_calibration)
         self.stop_btn.clicked.connect(self.stop_calibration)
 
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
     def _read_topography_nm(self) -> float:
-        """Reads one topography sample in nanometers.
+        """
+        Read one topography sample in nanometers.
 
         Tries DDE methods (`read_topography()` or `read_channel(0)`) first.
-        Falls back to using the IOCTL driver if needed.
+        Falls back to the IOCTL driver if available.
 
-        Returns:
-            float: Measured topography value in nanometers.
+        Returns
+        -------
+        float
+            Measured topography value in nanometers.
 
-        Raises:
-            RuntimeError: If unable to read topography from any source.
+        Raises
+        ------
+        RuntimeError
+            If unable to read topography from any source.
         """
         try:
             if hasattr(self.dde, "read_topography"):
@@ -137,37 +156,25 @@ class QplusCalibrationTab(QtWidgets.QWidget):
                 return float(self.dde.read_channel(0))
         except Exception:
             pass
-        try:
+
+        if self.driver:
             try:
-                from sxm_ncafm_control.device_driver import SXMIOCTL, CHANNELS
-            except Exception:
-                from device_driver import SXMIOCTL, CHANNELS
-            if not hasattr(self, "_ioctl"):
-                self._ioctl = SXMIOCTL()
-            idx, _short, _unit, scale = CHANNELS["Topo"]
-            raw = self._ioctl.read_raw(idx)
-            return float(raw) * float(scale)
-        except Exception as e:
-            raise RuntimeError(f"Cannot read topography: {e}")
+                from sxm_ncafm_control.device_driver import CHANNELS
+                idx, _short, _unit, scale = CHANNELS["Topo"]
+                raw = self.driver.read_raw(idx)
+                return float(raw) * float(scale)
+            except Exception as e:
+                raise RuntimeError(f"IOCTL read failed: {e}")
+
+        raise RuntimeError("Cannot read topography: no DDE or driver available")
 
     def _log(self, text: str) -> None:
-        """Appends a line to the log display.
-
-        Args:
-            text (str): Message to append.
-        """
+        """Append a line to the log display."""
         self.log.append(text)
         self.log.moveCursor(QtGui.QTextCursor.End)
 
     def _build_amplitude_points(self) -> None:
-        """Generates amplitude sweep points and reads baseline topography.
-
-        Clears previous data, sets up new sweep range, and triggers the
-        first measurement step.
-
-        Raises:
-            ValueError: If sweep range or number of points is invalid.
-        """
+        """Generate sweep points and read baseline topography."""
         start_amp = self.amp_start.value()
         end_amp = self.amp_end.value()
         num_points = self.num_points.value()
@@ -192,11 +199,11 @@ class QplusCalibrationTab(QtWidgets.QWidget):
             self._log(f"Failed to read baseline topography: {e}")
             self.stop_calibration()
 
+    # ------------------------------------------------------------------
+    # Calibration control
+    # ------------------------------------------------------------------
     def start_calibration(self) -> None:
-        """Starts the calibration process.
-        Shows a warning message if setup is invalid.
-        """
-
+        """Start the calibration process."""
         try:
             self._build_amplitude_points()
             self.start_btn.setEnabled(False)
@@ -205,18 +212,12 @@ class QplusCalibrationTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "Setup error", str(e))
 
     def stop_calibration(self) -> None:
-        """Stops the calibration process and resets UI state."""
+        """Stop the calibration process and reset UI state."""
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
 
     def next_measurement(self) -> None:
-        """Performs the next amplitude sweep step.
-
-        Sends the next Edit23 setpoint and schedules topography sampling
-        after a stabilization delay.
-
-        If all points are measured, proceeds to final calibration.
-        """
+        """Send the next amplitude setpoint and schedule topography sampling."""
         if self.current_point >= len(self.amplitude_points):
             self.finish_calibration()
             return
@@ -234,15 +235,8 @@ class QplusCalibrationTab(QtWidgets.QWidget):
             self._log(f"Error setting Edit23: {e}")
             self.stop_calibration()
 
-    def read_topography(self):
-        """Reads stabilized topography and records the result.
-
-        Calculates change from baseline in picometers, updates the plot,
-        and logs the result. Triggers the next sweep point or finishes
-        the calibration if all points are completed.
-
-        On failure, stops the calibration process.
-        """
+    def read_topography(self) -> None:
+        """Read stabilized topography and record the result."""
         try:
             current_topo = self._read_topography_nm()
             topo_change_pm = (current_topo - self.baseline_topo) * 1000.0
@@ -266,14 +260,7 @@ class QplusCalibrationTab(QtWidgets.QWidget):
             self.stop_calibration()
 
     def finish_calibration(self) -> None:
-        """Finalizes the calibration process.
-
-        Performs a linear regression on the recorded data to determine
-        the slope (pm/mV) and R² value. Logs the fit results and
-        displays them in a dialog.
-
-        If insufficient data is available, notifies the user and aborts.
-        """
+        """Perform regression and finalize calibration."""
         if len(self.measurement_data) < 2:
             self._log("Not enough data to fit a line.")
             self.stop_calibration()
@@ -297,13 +284,7 @@ class QplusCalibrationTab(QtWidgets.QWidget):
             self.stop_calibration()
 
     def export_results(self) -> None:
-        """Exports calibration results to a CSV file.
-
-        Prompts the user for a file location, then writes metadata and
-        measurement data to a CSV.
-
-        Shows confirmation or error dialogs based on success.
-        """
+        """Export calibration results to a CSV file."""
         if not self.measurement_data:
             QtWidgets.QMessageBox.information(self, "No data", "Run a calibration first.")
             return
@@ -338,7 +319,6 @@ class QplusCalibrationTab(QtWidgets.QWidget):
 
             QtWidgets.QMessageBox.information(self, "Export Complete",
                                               f"Calibration results exported to:\n{path}")
-
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Export Error",
                                           f"Failed to export data:\n{e}")

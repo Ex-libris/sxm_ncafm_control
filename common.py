@@ -5,21 +5,21 @@ from PyQt5 import QtWidgets, QtGui
 
 # ---------------- Parameter registry ----------------
 PARAMS_BASE = [
+    ("amp_ref", "EDIT", "Edit23", "Amplitude Ref", True), #guarded
     ("amp_ki", "EDIT", "Edit24", "Amplitude Ki", False),
     ("amp_kp", "EDIT", "Edit32", "Amplitude Kp", False),
     ("pll_kp", "EDIT", "Edit27", "PLL Kp", False),
     ("pll_ki", "EDIT", "Edit22", "PLL Ki", False),
-    ("amp_ref", "EDIT", "Edit23", "Amplitude Ref", True),   # guarded
     ("used_freq", "DNC", 3, "Used Frequency (f₀)", False),
     ("drive", "DNC", 4, "Drive", True),                    # guarded
 ]
 
 PARAM_TOOLTIPS = {
+    "amp_ref": "Target oscillation amplitude (units follow SXM).",
     "amp_ki": "Amplitude loop integral gain...",
     "amp_kp": "Amplitude loop proportional gain...",
     "pll_kp": "PLL proportional gain...",
     "pll_ki": "PLL integral gain...",
-    "amp_ref": "Target oscillation amplitude (units follow SXM).",
     "used_freq": "PLL used frequency (actual f₀, SXM units).",
     "drive": "Drive amplitude to sustain oscillation (SXM units).",
 }
@@ -141,3 +141,23 @@ class NumericItemDelegate(QtWidgets.QStyledItemDelegate):
         validator.setNotation(QtGui.QDoubleValidator.StandardNotation)
         editor.setValidator(validator)
         return editor
+    
+def offline_message(component: str, error: Exception, mock_name: str):
+    """
+    Print a clear, consistent offline-mode message.
+
+    Parameters
+    ----------
+    component : str
+        Which subsystem failed ("Microscope driver", "DDE connection", etc.)
+    error : Exception
+        The caught exception object (or string)
+    mock_name : str
+        What we will fall back to ("mock driver", "MockDDEClient", etc.)
+    """
+    err_msg = str(error)
+    print(
+        f"\n[OFFLINE MODE] {component} is not available.\n"
+        f"→ Cause: {err_msg}\n"
+        f"→ Action: Switching to {mock_name} (no hardware connected).\n"
+    )
