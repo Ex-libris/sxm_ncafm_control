@@ -101,7 +101,7 @@ Calculator of PLL parameters. You can also add a .txt or .csv with freq | phase 
 ![suggested step](screenshots/suggested_setup.png)
 
 ### (Basic) Amplitude calibration
-Get an idea of the calibration between the excitation signal you provide to the qplus in mV and the physical amplitude of oscillation. It uses STM constant current to see how much of a change of excitation corresponds to a topographycal STM change. 
+Get an idea of the calibration between the excitation signal you provide to the qplus (in mV), and the physical amplitude of oscillation. It uses STM constant current to see how much of a change of excitation corresponds to a topographycal STM change. 
 
 ![suggested step](screenshots/calibration.png)
 
