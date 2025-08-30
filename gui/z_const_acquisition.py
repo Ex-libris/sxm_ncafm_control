@@ -1,6 +1,141 @@
 import datetime
-from PyQt5 import QtWidgets, QtCore
+from PyQt5 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
+
+
+class FlexibleDoubleSpinBox(QtWidgets.QDoubleSpinBox):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setKeyboardTracking(False)  # Only emit valueChanged when editing is finished
+        self.custom_step_enabled = True
+        
+    def stepBy(self, steps):
+        if not self.custom_step_enabled:
+            super().stepBy(steps)
+            return
+            
+        # Get current cursor position in the line edit
+        line_edit = self.lineEdit()
+        cursor_pos = line_edit.cursorPosition()
+        text = line_edit.text()
+        
+        # Remove suffix for position calculation
+        suffix = self.suffix()
+        if suffix and text.endswith(suffix):
+            text = text[:-len(suffix)]
+        
+        # Find decimal point position
+        decimal_pos = text.find('.')
+        
+        # Determine step size based on cursor position
+        step_size = self.determine_step_size(cursor_pos, text, decimal_pos)
+        
+        # Apply the step with strict boundary checking
+        current_value = self.value()
+        new_value = current_value + (steps * step_size)
+        
+        # CRITICAL: Additional safety check - prevent large jumps
+        max_single_jump = 100.0  # Maximum allowed change in one step
+        if abs(new_value - current_value) > max_single_jump:
+            if steps > 0:
+                new_value = current_value + max_single_jump
+            else:
+                new_value = current_value - max_single_jump
+            print(f"Warning: Large step prevented. Limited change to ±{max_single_jump}")
+        
+        # CRITICAL: Prevent wraparound by strictly enforcing boundaries
+        if new_value > self.maximum():
+            new_value = self.maximum()
+            print(f"Warning: Clamped to maximum value {self.maximum()}")
+        elif new_value < self.minimum():
+            new_value = self.minimum()
+            print(f"Warning: Clamped to minimum value {self.minimum()}")
+        
+        # Only set value if it actually changed to prevent unnecessary signals
+        if abs(new_value - current_value) > 1e-10:  # Account for floating point precision
+            self.setValue(new_value)
+            print(f"Step: {current_value:.3f} → {new_value:.3f} (step size: {step_size}, change: {new_value-current_value:+.3f})")
+        
+        # Restore cursor position (approximately)
+        QtCore.QTimer.singleShot(0, lambda: line_edit.setCursorPosition(cursor_pos))
+    
+    def determine_step_size(self, cursor_pos, text, decimal_pos):
+        """Determine step size based on cursor position with safety limits"""
+        # Remove any minus sign for position calculation
+        clean_text = text.lstrip('-')
+        sign_offset = len(text) - len(clean_text)
+        adjusted_cursor = cursor_pos - sign_offset
+        adjusted_decimal = (decimal_pos - sign_offset) if decimal_pos != -1 else -1
+        
+        # Ensure cursor is within valid range
+        if adjusted_cursor < 0:
+            adjusted_cursor = 0
+        
+        if adjusted_decimal == -1:  # No decimal point
+            # Count digits from right to cursor position
+            digits_from_right = len(clean_text) - adjusted_cursor
+            if digits_from_right <= 0:
+                return 1.0
+            step_power = digits_from_right - 1
+        else:
+            if adjusted_cursor <= adjusted_decimal:
+                # Before decimal point
+                digits_from_right = adjusted_decimal - adjusted_cursor
+                step_power = digits_from_right
+            else:
+                # After decimal point
+                decimal_places = adjusted_cursor - adjusted_decimal - 1
+                step_power = -decimal_places - 1
+        
+        # CRITICAL SAFETY: Limit maximum step size to prevent dangerous jumps
+        max_safe_step_power = 2  # Maximum step of 100
+        min_safe_step_power = -3  # Minimum step of 0.001 (matching spinbox decimals)
+        
+        step_power = max(min_safe_step_power, min(max_safe_step_power, step_power))
+        step_size = 10 ** step_power
+        
+        # Additional safety: never allow steps larger than 1/10 of the total range
+        total_range = abs(self.maximum() - self.minimum())
+        max_allowed_step = total_range / 10.0
+        
+        return min(step_size, max_allowed_step)
+    
+    def wheelEvent(self, event):
+        """Enhanced wheel event with position-aware stepping"""
+        if not self.custom_step_enabled:
+            super().wheelEvent(event)
+            return
+            
+        # Get the number of steps (usually +1 or -1)
+        steps = event.angleDelta().y() // 120
+        
+        # Check for modifier keys for different behaviors
+        modifiers = QtWidgets.QApplication.keyboardModifiers()
+        
+        if modifiers == QtCore.Qt.ControlModifier:
+            # Ctrl+wheel: use the default single step
+            self.custom_step_enabled = False
+            super().wheelEvent(event)
+            self.custom_step_enabled = True
+        elif modifiers == QtCore.Qt.ShiftModifier:
+            # Shift+wheel: larger steps (10x current position step)
+            self.stepBy(steps * 10)
+        else:
+            # Normal wheel: position-aware stepping
+            self.stepBy(steps)
+            
+        event.accept()
+    
+    def keyPressEvent(self, event):
+        """Enhanced key press event for better navigation"""
+        if event.key() == QtCore.Qt.Key_Up:
+            self.stepBy(1)
+            event.accept()
+        elif event.key() == QtCore.Qt.Key_Down:
+            self.stepBy(-1)
+            event.accept()
+        else:
+            super().keyPressEvent(event)
 
 
 class ZConstAcquisition(QtWidgets.QWidget):
@@ -27,16 +162,29 @@ class ZConstAcquisition(QtWidgets.QWidget):
         self.btn_toggle.toggled.connect(self.toggle_feedback)
         ctrl.addWidget(self.btn_toggle)
 
-        # Z position spinbox
-        self.z_spin = QtWidgets.QDoubleSpinBox()
-        self.z_spin.setDecimals(6)
-        self.z_spin.setSingleStep(0.001)
+        # Enhanced Z position spinbox
+        self.z_spin = FlexibleDoubleSpinBox()
+        self.z_spin.setDecimals(3)
+        self.z_spin.setSingleStep(0.001)  # This is now the fallback step
         self.z_spin.setRange(-1000.0, 1000.0)
         self.z_spin.setSuffix(" nm")
         self.z_spin.setEnabled(False)
         self.z_spin.valueChanged.connect(self.manual_update)
+        
+        # Set up the spinbox for better editing
+        self.z_spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.UpDownArrows)
+        self.z_spin.setAccelerated(True)  # Faster stepping when holding buttons
+        
+        # CRITICAL SAFETY: Disable wraparound behavior
+        self.z_spin.setWrapping(False)  # Prevent wraparound from max to min
+        
         ctrl.addWidget(QtWidgets.QLabel("Z Position:"))
         ctrl.addWidget(self.z_spin)
+
+        # Add usage hint label
+        hint_label = QtWidgets.QLabel("Tip: Click on digit → Arrow keys/Mouse wheel to adjust")
+        hint_label.setStyleSheet("QLabel { color: gray; font-size: 10px; }")
+        ctrl.addWidget(hint_label)
 
         # Time window selection
         self.combo_window = QtWidgets.QComboBox()
@@ -54,6 +202,17 @@ class ZConstAcquisition(QtWidgets.QWidget):
         ctrl.addWidget(self.btn_clear)
 
         layout.addLayout(ctrl)
+
+        # ---- Controls Help ----
+        help_layout = QtWidgets.QHBoxLayout()
+        help_text = QtWidgets.QLabel(
+            "Controls: Mouse wheel = position-aware step | Shift+wheel = 10x step | "
+            "Ctrl+wheel = fixed step | ↑↓ arrows = position-aware step"
+        )
+        help_text.setStyleSheet("QLabel { color: #666; font-size: 9px; }")
+        help_text.setWordWrap(True)
+        help_layout.addWidget(help_text)
+        layout.addLayout(help_layout)
 
         # ---- Status Display ----
         status_layout = QtWidgets.QHBoxLayout()
@@ -85,7 +244,7 @@ class ZConstAcquisition(QtWidgets.QWidget):
                 current_z = self.driver.read_scaled("Topo")
                 self.last_z = current_z
                 self.z_spin.setValue(current_z)
-                print(f"Initialized Z position: {current_z:.6f} nm")
+                print(f"Initialized Z position: {current_z:.3f} nm")
             else:
                 print("No driver available - using mock initialization")
                 self.last_z = 0.0
@@ -103,7 +262,7 @@ class ZConstAcquisition(QtWidgets.QWidget):
                     self.base_z = current_z
                     self.last_z = current_z
                     self.z_spin.setValue(current_z)
-                    print(f"Feedback disabled. Base Z: {current_z:.6f} nm")
+                    print(f"Feedback disabled. Base Z: {current_z:.3f} nm")
 
                 # Disable feedback via DDE
                 self.dde.feed_para("enable", 1)
@@ -133,10 +292,10 @@ class ZConstAcquisition(QtWidgets.QWidget):
         if self.live_mode:
             return
         try:
-            delta = self.base_z -value 
+            delta = self.base_z - value 
             self.dde.set_channel(0, delta)
             self.last_z = value
-            print(f"Manual Z update: target {value:.6f} nm (Δ {delta:+.6f} nm from base)")
+            print(f"Manual Z update: target {value:.3f} nm (Δ {delta:+.3f} nm from base)")
         except Exception as e:
             print(f"Manual Z write error: {e}")
             self.z_spin.setValue(self.last_z)
