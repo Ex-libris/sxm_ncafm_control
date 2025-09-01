@@ -87,7 +87,7 @@ class MainWindow(QtWidgets.QWidget):
         """
         super().__init__()
         self.setWindowTitle("NC-AFM Control Suite")
-        self.resize(1000, 700)
+        self.resize(768,768)
 
         # Initialize accessibility manager
         self.setup_accessibility()
