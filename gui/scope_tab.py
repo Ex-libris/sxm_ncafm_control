@@ -1,6 +1,7 @@
 # scope_tab.py
 """
-Scope tab (dual-channel oscilloscope view).
+Scope tab (dual-channel oscilloscope view) - HYBRID VERSION
+Uses the EXACT working mechanics from the old version with minimal changes.
 
 Provides live capture of two SXM channels, plotting them against a shared
 time axis. Supports export of data to CSV/NumPy, and overlay of event
@@ -13,12 +14,14 @@ from PyQt5 import QtWidgets, QtCore
 import pyqtgraph as pg
 import pyqtgraph.exporters
 
+# CRITICAL: Use exact same import pattern as old working version
 from sxm_ncafm_control.device_driver import CHANNELS
 
 
 class CaptureThread(QtCore.QThread):
     """
     Background capture thread for two SXM channels.
+    KEEPING EXACT SAME LOGIC AS OLD WORKING VERSION
 
     Reads raw values from the IOCTL driver at maximum speed until the
     requested number of points is acquired or the thread is stopped.
@@ -33,6 +36,7 @@ class CaptureThread(QtCore.QThread):
 
     def __init__(self, driver, chan_idx1, chan_idx2, npoints=50000):
         super().__init__()
+        # PRESERVE EXACT SAME INITIALIZATION
         self.driver = driver
         self.chan_idx1 = chan_idx1
         self.chan_idx2 = chan_idx2
@@ -40,31 +44,36 @@ class CaptureThread(QtCore.QThread):
         self._stop = False
 
     def run(self):
-        """Acquire raw values from both channels in a tight loop."""
+        """Acquire raw values from both channels in a tight loop.
+        KEEPING EXACT SAME LOGIC AS OLD WORKING VERSION"""
         vals1 = np.zeros(self.npoints, dtype=np.float64)
         vals2 = np.zeros(self.npoints, dtype=np.float64)
         t0 = QtCore.QTime.currentTime()
 
-        # Get scaling factors for both channels
+        # CRITICAL: Get scaling factors for both channels - SAME AS OLD VERSION
         _, _, _, scale1 = [c for c in CHANNELS.values() if c[0] == self.chan_idx1][0]
         _, _, _, scale2 = [c for c in CHANNELS.values() if c[0] == self.chan_idx2][0]
 
+        # PRESERVE EXACT SAME ACQUISITION LOOP
         for i in range(self.npoints):
             if self._stop:
                 vals1 = vals1[:i]
                 vals2 = vals2[:i]
                 break
             try:
+                # CRITICAL: Use same driver calls as old version
                 raw1 = self.driver.read_raw(self.chan_idx1)
                 raw2 = self.driver.read_raw(self.chan_idx2)
             except Exception:
-                # Offline fallback: generate dummy signals
+                # PRESERVE EXACT SAME FALLBACK
                 raw1 = np.random.randn() * 0.01
                 raw2 = np.random.randn() * 0.01 + 0.5
 
+            # PRESERVE EXACT SAME SCALING
             vals1[i] = raw1 * scale1
             vals2[i] = raw2 * scale2
 
+        # PRESERVE EXACT SAME RATE CALCULATION
         elapsed_ms = t0.msecsTo(QtCore.QTime.currentTime())
         rate = len(vals1) / max(elapsed_ms / 1000.0, 1e-9)
         self.finished.emit(vals1, vals2, rate)
@@ -77,7 +86,8 @@ class CaptureThread(QtCore.QThread):
 class ScopeTab(QtWidgets.QWidget):
     """
     Dual-channel scope for SXM channels with shared time axis.
-
+    HYBRID VERSION: Preserves exact working mechanics from old version
+    
     Parameters
     ----------
     dde : object
@@ -88,6 +98,7 @@ class ScopeTab(QtWidgets.QWidget):
 
     def __init__(self, dde, driver=None):
         super().__init__()
+        # PRESERVE EXACT SAME INITIALIZATION ORDER AND VALUES
         self.dde = dde
         self.driver = driver
 
@@ -98,185 +109,324 @@ class ScopeTab(QtWidgets.QWidget):
         self.last_chan1 = None
         self.last_chan2 = None
 
-        # Time + markers state
+        # Time + markers state - SAME AS OLD VERSION
         self.capture_start_dt = None
         self._event_markers = []
         self._marker_items1 = []  # markers for plot1
         self._marker_items2 = []  # markers for plot2
 
-        # Reference to test tab for repeat functionality
+        # Reference to test tab for repeat functionality - SAME AS OLD VERSION
         self.test_tab = None
 
-        # Remember last export path
+        # Remember last export path - SAME AS OLD VERSION
         self.last_export_path = None
 
         # ----------------------------
-        # Layout and controls
+        # Layout and controls - ENHANCED UI FROM NEW VERSION
         # ----------------------------
         vbox = QtWidgets.QVBoxLayout(self)
 
-        hbox = QtWidgets.QHBoxLayout()
+        # ENHANCED: Top control bar with better styling
+        ctrl_frame = QtWidgets.QFrame()
+        ctrl_frame.setFrameStyle(QtWidgets.QFrame.StyledPanel)
+        ctrl_frame.setStyleSheet("""
+            QFrame {
+                background-color: #f8f9fa;
+                border: 1px solid #dee2e6;
+                border-radius: 8px;
+                padding: 8px;
+            }
+        """)
+        hbox = QtWidgets.QHBoxLayout(ctrl_frame)
 
-        # Channel 1 selection - default to QPlusAmpl
-        hbox.addWidget(QtWidgets.QLabel("Channel 1:"))
+        # Channel 1 selection - PRESERVE EXACT SAME LOGIC
+        channel1_group = QtWidgets.QGroupBox("Channel 1")
+        channel1_layout = QtWidgets.QVBoxLayout(channel1_group)
+        
         self.chan1_combo = QtWidgets.QComboBox()
         self.chan1_combo.addItems(list(CHANNELS.keys()))
+        # PRESERVE EXACT SAME DEFAULT SELECTION LOGIC
         if "QPlusAmpl" in CHANNELS:
             idx = list(CHANNELS.keys()).index("QPlusAmpl")
             self.chan1_combo.setCurrentIndex(idx)
-        hbox.addWidget(self.chan1_combo)
+        channel1_layout.addWidget(self.chan1_combo)
+        hbox.addWidget(channel1_group)
 
-        # Channel 2 selection - default to Drive
-        hbox.addWidget(QtWidgets.QLabel("Channel 2:"))
+        # Channel 2 selection - PRESERVE EXACT SAME LOGIC  
+        channel2_group = QtWidgets.QGroupBox("Channel 2")
+        channel2_layout = QtWidgets.QVBoxLayout(channel2_group)
+        
         self.chan2_combo = QtWidgets.QComboBox()
         self.chan2_combo.addItems(list(CHANNELS.keys()))
+        # PRESERVE EXACT SAME DEFAULT SELECTION LOGIC
         if "Drive" in CHANNELS:
             idx = list(CHANNELS.keys()).index("Drive")
             self.chan2_combo.setCurrentIndex(idx)
         elif len(CHANNELS) > 1:
             self.chan2_combo.setCurrentIndex(1)
-        hbox.addWidget(self.chan2_combo)
+        channel2_layout.addWidget(self.chan2_combo)
+        hbox.addWidget(channel2_group)
 
-        # Number of samples
+        # ENHANCED: Samples control with better styling
+        samples_group = QtWidgets.QGroupBox("Samples")
+        samples_layout = QtWidgets.QVBoxLayout(samples_group)
+        
         self.npoints_spin = QtWidgets.QSpinBox()
+        # PRESERVE EXACT SAME RANGE AND DEFAULT
         self.npoints_spin.setRange(1000, 2_000_000)
         self.npoints_spin.setValue(2_000_000)  # default 2M samples
-        hbox.addWidget(QtWidgets.QLabel("Samples:"))
-        hbox.addWidget(self.npoints_spin)
+        self.npoints_spin.setGroupSeparatorShown(True)  # NEW: Better number display
+        samples_layout.addWidget(self.npoints_spin)
+        hbox.addWidget(samples_group)
 
-        # Control buttons
+        hbox.addSpacing(20)  # NEW: Better spacing
+
+        # ENHANCED: Control buttons with better styling
+        buttons_group = QtWidgets.QGroupBox("Control")
+        buttons_layout = QtWidgets.QGridLayout(buttons_group)
+        
+        # Row 1: Start/Stop
         self.start_btn = QtWidgets.QPushButton("Start Capture")
-        self.start_btn.clicked.connect(self.start_capture)
-        hbox.addWidget(self.start_btn)
+        self.start_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #218838;
+            }
+            QPushButton:disabled {
+                background-color: #6c757d;
+            }
+        """)
+        self.start_btn.clicked.connect(self.start_capture)  # PRESERVE EXACT SAME CONNECTION
+        buttons_layout.addWidget(self.start_btn, 0, 0)
 
         self.stop_btn = QtWidgets.QPushButton("Stop")
-        self.stop_btn.setEnabled(False)
-        self.stop_btn.clicked.connect(self.stop_capture)
-        hbox.addWidget(self.stop_btn)
+        self.stop_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #dc3545;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #c82333;
+            }
+            QPushButton:disabled {
+                background-color: #6c757d;
+            }
+        """)
+        self.stop_btn.setEnabled(False)  # PRESERVE EXACT SAME INITIAL STATE
+        self.stop_btn.clicked.connect(self.stop_capture)  # PRESERVE EXACT SAME CONNECTION
+        buttons_layout.addWidget(self.stop_btn, 0, 1)
 
+        # Row 2: Export/Utility buttons
         self.export_btn = QtWidgets.QPushButton("Export Data")
-        self.export_btn.setEnabled(False)
-        self.export_btn.clicked.connect(self.export_data)
-        hbox.addWidget(self.export_btn)
+        self.export_btn.setEnabled(False)  # PRESERVE EXACT SAME INITIAL STATE
+        self.export_btn.clicked.connect(self.export_data)  # PRESERVE EXACT SAME CONNECTION
+        buttons_layout.addWidget(self.export_btn, 1, 0)
 
         self.repeat_test_btn = QtWidgets.QPushButton("Repeat Test")
-        self.repeat_test_btn.setEnabled(False)
-        self.repeat_test_btn.clicked.connect(self.repeat_test)
-        hbox.addWidget(self.repeat_test_btn)
+        self.repeat_test_btn.setEnabled(False)  # PRESERVE EXACT SAME INITIAL STATE
+        self.repeat_test_btn.clicked.connect(self.repeat_test)  # PRESERVE EXACT SAME CONNECTION
+        buttons_layout.addWidget(self.repeat_test_btn, 1, 1)
 
         self.clear_btn = QtWidgets.QPushButton("Clear")
-        self.clear_btn.clicked.connect(self.clear_plots)
-        hbox.addWidget(self.clear_btn)
+        self.clear_btn.clicked.connect(self.clear_plots)  # PRESERVE EXACT SAME CONNECTION
+        buttons_layout.addWidget(self.clear_btn, 1, 2)
 
-        vbox.addLayout(hbox)
+        hbox.addWidget(buttons_group)
+
+        vbox.addWidget(ctrl_frame)
+
+        # NEW: Status bar
+        self.status_bar = QtWidgets.QLabel("Ready")
+        self.status_bar.setStyleSheet("""
+            QLabel {
+                background-color: #e9ecef;
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-weight: bold;
+            }
+        """)
+        vbox.addWidget(self.status_bar)
 
         # ----------------------------
-        # Plotting widgets
+        # Plotting widgets - PRESERVE EXACT SAME STRUCTURE
         # ----------------------------
         self.plot_widget = pg.GraphicsLayoutWidget()
-        self.plot_widget.setBackground("white")
+        self.plot_widget.setBackground("white")  # PRESERVE EXACT SAME BACKGROUND
         vbox.addWidget(self.plot_widget)
 
+        # PRESERVE EXACT SAME PLOT SETUP
         # First plot
         self.plot1 = self.plot_widget.addPlot(row=0, col=0)
         self.plot1.setLabel("left", "Channel 1")
         self.plot1.showGrid(x=True, y=True, alpha=0.3)
 
-        # Second plot, linked X-axis
+        # Second plot, linked X-axis - PRESERVE EXACT SAME SETUP
         self.plot2 = self.plot_widget.addPlot(row=1, col=0)
         self.plot2.setLabel("bottom", "Time (s)")
         self.plot2.setLabel("left", "Channel 2")
         self.plot2.showGrid(x=True, y=True, alpha=0.3)
-        self.plot2.setXLink(self.plot1)
+        self.plot2.setXLink(self.plot1)  # CRITICAL: Preserve exact same linking
 
-        # Style axes
+        # PRESERVE EXACT SAME STYLING
         for plot in [self.plot1, self.plot2]:
             grid_pen = pg.mkPen(color=(70, 70, 70), width=0.5)
             plot.getAxis('bottom').setPen(grid_pen)
             plot.getAxis('left').setPen(grid_pen)
 
     # ------------------------------------------------------------------
-    # Capture and plotting
+    # Capture and plotting - PRESERVE EXACT SAME LOGIC
     # ------------------------------------------------------------------
     def start_capture(self):
-        """Start capturing from the selected two channels."""
+        """Start capturing from the selected two channels.
+        PRESERVE EXACT SAME LOGIC AS OLD WORKING VERSION"""
+        
+        # Update status
+        self.status_bar.setText("Initializing capture...")
+        self.status_bar.setStyleSheet("""
+            QLabel {
+                background-color: #fff3cd;
+                border: 1px solid #ffeaa7;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-weight: bold;
+                color: #856404;
+            }
+        """)
+        
+        # PRESERVE EXACT SAME CHANNEL SELECTION LOGIC
         chan1_name = self.chan1_combo.currentText()
         chan2_name = self.chan2_combo.currentText()
         idx1, _, unit1, _ = CHANNELS[chan1_name]
         idx2, _, unit2, _ = CHANNELS[chan2_name]
         npts = self.npoints_spin.value()
 
+        # PRESERVE EXACT SAME PLOT INITIALIZATION
         self.plot1.clear()
         self.plot2.clear()
         self.plot1.setLabel("left", f"{chan1_name} ({unit1})")
         self.plot2.setLabel("left", f"{chan2_name} ({unit2})")
 
+        # PRESERVE EXACT SAME MARKER AND STATE MANAGEMENT
         self._clear_markers()
         self.capture_start_dt = QtCore.QDateTime.currentDateTime()
 
+        # PRESERVE EXACT SAME BUTTON STATES
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.export_btn.setEnabled(False)
 
+        # PRESERVE EXACT SAME DATA RESET
         self.last_data1 = None
         self.last_data2 = None
         self.last_rate = None
         self.last_chan1 = chan1_name
         self.last_chan2 = chan2_name
 
+        # PRESERVE EXACT SAME THREAD LOGIC
         if self.driver is not None:
+            self.status_bar.setText(f"Capturing {npts:,} samples from {chan1_name} and {chan2_name}...")
             self.capture_thread = CaptureThread(self.driver, idx1, idx2, npoints=npts)
             self.capture_thread.finished.connect(self.show_data)
             self.capture_thread.start()
         else:
-            # Offline fallback signals
+            # PRESERVE EXACT SAME OFFLINE FALLBACK
+            self.status_bar.setText("No driver - generating test signals...")
             t = np.linspace(0, 1, npts)
             arr1 = np.sin(2 * np.pi * 5 * t) + 0.1 * np.random.randn(npts)
             arr2 = np.cos(2 * np.pi * 3 * t) * 2 + 0.2 * np.random.randn(npts)
             self.show_data(arr1, arr2, rate=npts)
 
     def stop_capture(self):
-        """Stop capture if a thread is running."""
+        """Stop capture if a thread is running.
+        PRESERVE EXACT SAME LOGIC AS OLD WORKING VERSION"""
         if self.capture_thread is not None:
             self.capture_thread.stop()
+            self.status_bar.setText("Stopping capture...")
 
     def show_data(self, arr1, arr2, rate):
-        """Display acquired or simulated data on the plots."""
+        """Display acquired or simulated data on the plots.
+        PRESERVE EXACT SAME LOGIC AS OLD WORKING VERSION"""
         try:
+            # PRESERVE EXACT SAME PLOT CLEARING
             self.plot1.clear()
             self.plot2.clear()
 
+            # PRESERVE EXACT SAME DATA HANDLING
             self.last_data1 = np.asarray(arr1)
             self.last_data2 = np.asarray(arr2)
             self.last_rate = float(rate) if rate else 0.0
 
+            # PRESERVE EXACT SAME TIME AXIS CALCULATION
             if self.last_rate > 0:
                 t = np.arange(len(self.last_data1), dtype=float) / self.last_rate
             else:
                 t = np.arange(len(self.last_data1), dtype=float)
 
+            # PRESERVE EXACT SAME PLOTTING
             self.plot1.plot(t, self.last_data1, pen=pg.mkPen('b', width=1))
             self.plot2.plot(t, self.last_data2, pen=pg.mkPen('r', width=1))
 
+            # PRESERVE EXACT SAME BUTTON STATE CHANGES
             self.export_btn.setEnabled(True)
             self.start_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
 
+            # PRESERVE EXACT SAME MARKER UPDATE
             self._update_markers()
 
+            # NEW: Enhanced status update
+            self.status_bar.setText(f"Captured {len(self.last_data1):,} samples at {self.last_rate:.1f} Hz")
+            self.status_bar.setStyleSheet("""
+                QLabel {
+                    background-color: #d4edda;
+                    border: 1px solid #c3e6cb;
+                    border-radius: 4px;
+                    padding: 4px 8px;
+                    font-weight: bold;
+                    color: #155724;
+                }
+            """)
+
         except Exception as e:
+            # PRESERVE EXACT SAME ERROR HANDLING
             QtWidgets.QMessageBox.warning(self, "Plot error", str(e))
+            self.status_bar.setText(f"Error: {str(e)}")
+            self.status_bar.setStyleSheet("""
+                QLabel {
+                    background-color: #f8d7da;
+                    border: 1px solid #f5c6cb;
+                    border-radius: 4px;
+                    padding: 4px 8px;
+                    font-weight: bold;
+                    color: #721c24;
+                }
+            """)
 
     def export_data(self):
-        """Export last captured data and a screenshot of the plots."""
+        """Export last captured data and a screenshot of the plots.
+        PRESERVE EXACT SAME LOGIC AS OLD WORKING VERSION"""
         if self.last_data1 is None or self.last_data2 is None:
             return
 
+        # PRESERVE EXACT SAME FILE NAMING
         default_name = f"{self.last_chan1}_{self.last_chan2}_capture.csv"
         if self.last_export_path:
             import os
             default_name = os.path.join(os.path.dirname(self.last_export_path), default_name)
 
+        # PRESERVE EXACT SAME FILE DIALOG
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, "Export Data", default_name,
             "CSV Files (*.csv);;NumPy Files (*.npy)"
@@ -287,6 +437,7 @@ class ScopeTab(QtWidgets.QWidget):
         self.last_export_path = path
 
         try:
+            # PRESERVE EXACT SAME EXPORT LOGIC
             if path.endswith(".npy"):
                 data = np.column_stack((self.last_data1, self.last_data2))
                 np.save(path, data)
@@ -301,7 +452,7 @@ class ScopeTab(QtWidgets.QWidget):
                     comments="",
                 )
 
-            # Save PNG screenshot
+            # PRESERVE EXACT SAME PNG EXPORT
             png_path = path.rsplit('.', 1)[0] + '.png'
             try:
                 exporter = pg.exporters.ImageExporter(self.plot_widget.scene())
@@ -318,14 +469,16 @@ class ScopeTab(QtWidgets.QWidget):
                 )
 
         except Exception as e:
+            # PRESERVE EXACT SAME ERROR HANDLING
             QtWidgets.QMessageBox.warning(self, "Export error", str(e))
 
     # ------------------------------------------------------------------
-    # Marker utilities
+    # Marker utilities - PRESERVE EXACT SAME LOGIC AS OLD VERSION
     # ------------------------------------------------------------------
     def set_event_markers(self, events):
         """
         Overlay vertical lines with labels on both plots.
+        PRESERVE EXACT SAME LOGIC AS OLD VERSION
 
         Parameters
         ----------
@@ -337,6 +490,7 @@ class ScopeTab(QtWidgets.QWidget):
         self._update_markers()
 
     def _clear_markers(self):
+        """PRESERVE EXACT SAME LOGIC AS OLD VERSION"""
         for it in self._marker_items1 + self._marker_items2:
             try:
                 if it in self._marker_items1:
@@ -349,7 +503,8 @@ class ScopeTab(QtWidgets.QWidget):
         self._marker_items2 = []
 
     def _update_markers(self):
-        """Rebuild markers on both plots from stored events."""
+        """Rebuild markers on both plots from stored events.
+        PRESERVE EXACT SAME LOGIC AS OLD VERSION"""
         if (
             self.last_data1 is None
             or self.last_data2 is None
@@ -357,11 +512,13 @@ class ScopeTab(QtWidgets.QWidget):
         ):
             return
 
+        # PRESERVE EXACT SAME TIME CALCULATION
         if self.last_rate and self.last_rate > 0:
             tmax = (len(self.last_data1) - 1) / self.last_rate if len(self.last_data1) else 0.0
         else:
             tmax = float(len(self.last_data1) - 1) if len(self.last_data1) else 0.0
 
+        # PRESERVE EXACT SAME Y-MAX CALCULATION
         try:
             ymax1 = float(np.nanmax(self.last_data1)) if len(self.last_data1) else 0.0
             ymax2 = float(np.nanmax(self.last_data2)) if len(self.last_data2) else 0.0
@@ -370,6 +527,7 @@ class ScopeTab(QtWidgets.QWidget):
 
         self._clear_markers()
 
+        # PRESERVE EXACT SAME MARKER CREATION LOOP
         for dt, label in self._event_markers:
             try:
                 secs = max(0.0, self.capture_start_dt.msecsTo(dt) / 1000.0)
@@ -378,7 +536,7 @@ class ScopeTab(QtWidgets.QWidget):
 
             x = min(secs, tmax)
 
-            # Plot 1 marker
+            # PRESERVE EXACT SAME PLOT 1 MARKER
             line1 = pg.InfiniteLine(pos=x, angle=90,
                                     pen=pg.mkPen('r', width=1, style=QtCore.Qt.DashLine))
             self.plot1.addItem(line1)
@@ -387,7 +545,7 @@ class ScopeTab(QtWidgets.QWidget):
             self.plot1.addItem(txt1)
             self._marker_items1.extend([line1, txt1])
 
-            # Plot 2 marker
+            # PRESERVE EXACT SAME PLOT 2 MARKER
             line2 = pg.InfiniteLine(pos=x, angle=90,
                                     pen=pg.mkPen('r', width=1, style=QtCore.Qt.DashLine))
             self.plot2.addItem(line2)
@@ -397,15 +555,17 @@ class ScopeTab(QtWidgets.QWidget):
             self._marker_items2.extend([line2, txt2])
 
     # ------------------------------------------------------------------
-    # Integration with test tab
+    # Integration with test tab - PRESERVE EXACT SAME LOGIC AS OLD VERSION
     # ------------------------------------------------------------------
     def set_test_tab_reference(self, test_tab):
-        """Set reference to a test tab for repeat functionality."""
+        """Set reference to a test tab for repeat functionality.
+        PRESERVE EXACT SAME LOGIC AS OLD VERSION"""
         self.test_tab = test_tab
         self.repeat_test_btn.setEnabled(test_tab is not None)
 
     def repeat_test(self):
-        """Trigger the test tab to repeat the last test configuration."""
+        """Trigger the test tab to repeat the last test configuration.
+        PRESERVE EXACT SAME LOGIC AS OLD VERSION"""
         if self.test_tab is None:
             QtWidgets.QMessageBox.warning(
                 self, "No Test Tab",
@@ -440,7 +600,8 @@ class ScopeTab(QtWidgets.QWidget):
             )
 
     def clear_plots(self):
-        """Clear both plots and reset data."""
+        """Clear both plots and reset data.
+        PRESERVE EXACT SAME LOGIC AS OLD VERSION"""
         self.plot1.clear()
         self.plot2.clear()
         self._clear_markers()
@@ -448,3 +609,15 @@ class ScopeTab(QtWidgets.QWidget):
         self.last_data2 = None
         self.last_rate = None
         self.export_btn.setEnabled(False)
+        
+        # NEW: Reset status
+        self.status_bar.setText("Ready")
+        self.status_bar.setStyleSheet("""
+            QLabel {
+                background-color: #e9ecef;
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-weight: bold;
+            }
+        """)
