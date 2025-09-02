@@ -1,16 +1,10 @@
-# z_const_acquisition.py
-# Full script with elegant change overlay and color-coded feedback
-
-import sys
 import datetime
 from PyQt5 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 
-# Uses your mapping. CHANNELS[name] -> (idx, short, unit, scale) or similar.
-from ..device_driver import CHANNELS
-
 
 class FlexibleDoubleSpinBox(QtWidgets.QDoubleSpinBox):
+    """Enhanced spinbox with position-aware stepping from new version"""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setKeyboardTracking(False)  # Only emit valueChanged when editing is finished
@@ -113,7 +107,7 @@ class FlexibleDoubleSpinBox(QtWidgets.QDoubleSpinBox):
 
 
 class ChangeOverlay(QtWidgets.QLabel):
-    """Elegant text overlay for displaying z-position changes"""
+    """Elegant text overlay for displaying z-position changes from new version"""
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -121,11 +115,11 @@ class ChangeOverlay(QtWidgets.QLabel):
         self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
         self.setStyleSheet("""
             QLabel {
-                background-color: rgba(255, 255, 255, 200);
-                border: 2px solid rgba(100, 100, 100, 150);
-                border-radius: 15px;
-                padding: 8px 16px;
-                font-size: 16px;
+                background-color: rgba(255, 255, 255, 240);
+                border: 1px solid rgba(150, 150, 150, 120);
+                border-radius: 12px;
+                padding: 6px 12px;
+                font-size: 14px;
                 font-weight: bold;
                 color: #333;
             }
@@ -164,14 +158,9 @@ class ChangeOverlay(QtWidgets.QLabel):
         # Color coding
         if change_value > 0:
             color = "#2E8B57"  # Sea green for positive changes
-            bg_color = "rgba(200, 255, 200, 220)"
-            border_color = "rgba(46, 139, 87, 180)"
         else:
             color = "#DC143C"  # Crimson for negative changes
-            bg_color = "rgba(255, 200, 200, 220)"
-            border_color = "rgba(220, 20, 60, 180)"
         
-        # Background with no color, only text colored
         self.setStyleSheet(f"""
             QLabel {{
                 background-color: rgba(255, 255, 255, 240);
@@ -198,7 +187,7 @@ class ChangeOverlay(QtWidgets.QLabel):
         # Show with fade in
         self.fade_in()
         
-        # Auto-hide after 4 seconds (increased duration)
+        # Auto-hide after 4 seconds
         self.hide_timer.stop()
         self.hide_timer.start(4000)
     
@@ -220,73 +209,71 @@ class ChangeOverlay(QtWidgets.QLabel):
 
 
 class ZConstAcquisition(QtWidgets.QWidget):
-    def __init__(self, dde=None, driver=None):
+    def __init__(self, dde, driver):
         super().__init__()
         self.setWindowTitle("Z-Const Acquisition")
         self.resize(1000, 700)
-
-        self.dde = dde
-        self.driver = driver
-
-        # state
+        
+        # KEEP OLD WORKING CORE VARIABLES AND LOGIC
+        self.dde = dde  # For DDE read/write
+        self.driver = driver  # For IOCTL read
         self.live_mode = True
-        self.feedback_enabled = True
         self.last_z = 0.0
-        self.previous_z = 0.0  # For change calculation
+        self.previous_z = 0.0  # For change calculation (NEW)
+        self.base_z = 0.0
+        self.z_history = []
+        self.timestamps = []
         self.window_seconds = 10
-        self.change_threshold = 0.001  # Minimum change to display overlay
-
-        # Change event markers
+        self.feedback_enabled = True
+        self.change_threshold = 0.001  # Minimum change to display overlay (NEW)
+        
+        # NEW: Change event markers
         self.change_markers = []  # Store reference lines for changes
         
-        # Font scaling for accessibility
+        # NEW: Font scaling for accessibility
         self.font_scale = 1.0
         self.base_font_size = QtWidgets.QApplication.font().pointSize() or 10
 
-        # topography trace
-        self.t_stamps = []
-        self.z_hist = []
+        layout = QtWidgets.QVBoxLayout(self)
 
-        # aux trace
-        default_aux = "df" if "df" in CHANNELS else list(CHANNELS.keys())[0]
-        self.aux_channel = default_aux
-        self.aux_unit = CHANNELS[self.aux_channel][2]
-        self.aux_hist = []
-
-        # ui
-        main = QtWidgets.QVBoxLayout(self)
-
-        # --- top controls ---
+        # ---- Top Controls (ENHANCED UI) ----
         ctrl = QtWidgets.QHBoxLayout()
 
+        # Feedback toggle (KEEP OLD LOGIC)
         self.btn_toggle = QtWidgets.QPushButton("Disable Feedback")
         self.btn_toggle.setCheckable(True)
         self.btn_toggle.toggled.connect(self.toggle_feedback)
         ctrl.addWidget(self.btn_toggle)
 
+        # Z position spinbox (NEW ENHANCED SPINBOX)
         ctrl.addWidget(QtWidgets.QLabel("Z Position:"))
-        self.z_spin = FlexibleDoubleSpinBox()
-        self.z_spin.setRange(-250.0, 250.0)
-        self.z_spin.setDecimals(3)            
+        self.z_spin = FlexibleDoubleSpinBox()  # NEW: Enhanced spinbox
+        self.z_spin.setDecimals(6)  # Keep old precision
+        self.z_spin.setSingleStep(0.001)  # Keep old step
+        self.z_spin.setRange(-1000.0, 1000.0)  # Keep old range
         self.z_spin.setSuffix(" nm")
-        self.z_spin.setEnabled(False)  # enabled only if manual
-        self.z_spin.valueChanged.connect(self.manual_update)
+        self.z_spin.setEnabled(False)
+        self.z_spin.valueChanged.connect(self.manual_update)  # KEEP OLD LOGIC
         ctrl.addWidget(self.z_spin)
 
-        ctrl.addSpacing(12)
+        ctrl.addSpacing(12)  # NEW: Better spacing
+        
+        # Time window selection
         ctrl.addWidget(QtWidgets.QLabel("Window (s):"))
         self.combo_window = QtWidgets.QComboBox()
         self.combo_window.addItems(["2", "5", "10", "30", "60", "120"])
         self.combo_window.setCurrentText("10")
         self.combo_window.currentTextChanged.connect(
-            lambda v: setattr(self, "window_seconds", int(v))
+            lambda val: setattr(self, "window_seconds", int(val))
         )
         ctrl.addWidget(self.combo_window)
 
+        # Clear trace button
         self.btn_clear = QtWidgets.QPushButton("Clear Trace")
         self.btn_clear.clicked.connect(self.clear_trace)
         ctrl.addWidget(self.btn_clear)
 
+        # NEW: Clear markers button
         self.btn_clear_markers = QtWidgets.QPushButton("Clear Markers")
         self.btn_clear_markers.clicked.connect(self.clear_markers_only)
         self.btn_clear_markers.setToolTip("Clear change markers and overlays without affecting trace data")
@@ -294,7 +281,7 @@ class ZConstAcquisition(QtWidgets.QWidget):
 
         ctrl.addSpacing(20)
         
-        # Font scaling controls for accessibility
+        # NEW: Font scaling controls for accessibility
         ctrl.addWidget(QtWidgets.QLabel("Font Size:"))
         self.font_scale_combo = QtWidgets.QComboBox()
         self.font_scale_combo.addItems(["Small", "Normal", "Large", "Extra Large"])
@@ -303,10 +290,10 @@ class ZConstAcquisition(QtWidgets.QWidget):
         self.font_scale_combo.setToolTip("Adjust font size for better accessibility")
         ctrl.addWidget(self.font_scale_combo)
 
-        ctrl.addStretch(1)
-        main.addLayout(ctrl)
+        ctrl.addStretch()
+        layout.addLayout(ctrl)
 
-        # help row
+        # NEW: Help row with keyboard shortcuts
         help_row = QtWidgets.QHBoxLayout()
         help_lbl = QtWidgets.QLabel(
             "Wheel = pos-aware step | Shift+wheel = 10× | Ctrl+wheel = fixed step | ↑↓ = pos-aware step"
@@ -314,111 +301,194 @@ class ZConstAcquisition(QtWidgets.QWidget):
         help_lbl.setStyleSheet("QLabel { color: #666; font-size: 11px; }")
         help_lbl.setWordWrap(True)
         help_row.addWidget(help_lbl)
-        main.addLayout(help_row)
+        layout.addLayout(help_row)
 
-        # status row
-        status = QtWidgets.QHBoxLayout()
-        self.status_lbl = QtWidgets.QLabel("Status: Live mode, Feedback ON")
-        self.status_lbl.setStyleSheet("QLabel { color: green; font-weight: bold; }")
-        status.addWidget(self.status_lbl)
-        status.addStretch(1)
-        main.addLayout(status)
+        # ---- Status Display ----
+        status_layout = QtWidgets.QHBoxLayout()
+        self.status_label = QtWidgets.QLabel("Status: Live mode, Feedback ON")
+        self.status_label.setStyleSheet("QLabel { color: green; font-weight: bold; }")
+        status_layout.addWidget(self.status_label)
+        status_layout.addStretch()
+        layout.addLayout(status_layout)
 
-        # --- topography plot with overlay ---
+        # ---- Plot with Change Overlay (NEW ENHANCED PLOT) ----
         plot_container = QtWidgets.QWidget()
         plot_layout = QtWidgets.QVBoxLayout(plot_container)
         plot_layout.setContentsMargins(0, 0, 0, 0)
         
-        self.plot_topo = pg.PlotWidget()
-        self.plot_topo.setBackground("w")
-        self.curve_topo = self.plot_topo.plot([], [], pen=pg.mkPen('b', width=2))
-        self.plot_topo.setLabel("bottom", "Time", units="s")
-        self.plot_topo.setLabel("left", "Z Position", units="nm")
-        self.plot_topo.showGrid(x=True, y=True, alpha=0.3)
-        plot_layout.addWidget(self.plot_topo)
+        self.plot = pg.PlotWidget()
+        self.plot.setBackground('w')
+        self.curve = self.plot.plot([], [], pen=pg.mkPen('b', width=2))
+        self.plot.setLabel("bottom", "Time", units="s")
+        self.plot.setLabel("left", "Z Position", units="nm")
+        self.plot.showGrid(x=True, y=True, alpha=0.3)
+        plot_layout.addWidget(self.plot)
         
-        # Create change overlay
-        self.change_overlay = ChangeOverlay(self.plot_topo)
+        # NEW: Create change overlay
+        self.change_overlay = ChangeOverlay(self.plot)
         
-        main.addWidget(plot_container)
+        layout.addWidget(plot_container)
 
-        # --- aux controls + plot ---
-        aux_ctrl = QtWidgets.QHBoxLayout()
-        aux_ctrl.addWidget(QtWidgets.QLabel("Aux channel:"))
-
-        self.combo_channel = QtWidgets.QComboBox()
-        self.combo_channel.addItems(sorted(CHANNELS.keys()))
-        i_def = self.combo_channel.findText(self.aux_channel)
-        if i_def >= 0:
-            self.combo_channel.setCurrentIndex(i_def)
-        self.combo_channel.currentTextChanged.connect(self.on_channel_changed)
-        aux_ctrl.addWidget(self.combo_channel)
-
-        self.lbl_aux_unit = QtWidgets.QLabel(f"[{self.aux_unit}]")
-        self.lbl_aux_unit.setStyleSheet("QLabel { color: #444; }")
-        aux_ctrl.addWidget(self.lbl_aux_unit)
-        aux_ctrl.addStretch(1)
-        main.addLayout(aux_ctrl)
-
-        self.plot_aux = pg.PlotWidget()
-        self.plot_aux.setBackground("w")
-        self.curve_aux = self.plot_aux.plot([], [], pen=pg.mkPen('b', width=2))
-        self.plot_aux.setLabel("bottom", "Time", units="s")
-        self.plot_aux.setLabel("left", self.aux_channel, units=self.aux_unit)
-        self.plot_aux.showGrid(x=True, y=True, alpha=0.3)
-        main.addWidget(self.plot_aux)
-
-        # timer
+        # ---- Timer for polling (KEEP OLD LOGIC) ----
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.poll)
         self.timer.start(100)
 
-        # initial sync and font setup
+        # Initialize (KEEP OLD LOGIC)
         self.initialize_z_position()
-        self.apply_font_scaling()  # Apply initial font scaling
+        # NEW: Apply initial font scaling
+        self.apply_font_scaling()
 
-    # ---------- actions ----------
+    # KEEP OLD WORKING INITIALIZATION LOGIC
     def initialize_z_position(self):
         try:
             if self.driver:
-                z = self.driver.read_scaled("Topo")
-                self.last_z = float(z)
-                self.previous_z = self.last_z
-                self.z_spin.setValue(self.last_z)
+                current_z = self.driver.read_scaled("Topo")
+                self.last_z = current_z
+                self.previous_z = current_z  # NEW: Track for changes
+                self.z_spin.setValue(current_z)
+                print(f"Initialized Z position: {current_z:.6f} nm")
+            else:
+                print("No driver available - using mock initialization")
+                self.last_z = 0.0
+                self.previous_z = 0.0
         except Exception as e:
-            print(f"Init error: {e}")
+            print(f"Error initializing Z position: {e}")
+            self.last_z = 0.0
+            self.previous_z = 0.0
 
+    # KEEP OLD WORKING FEEDBACK TOGGLE LOGIC
     def toggle_feedback(self, checked: bool):
-        # checked means button is pressed -> we *disable* feedback
-        self.feedback_enabled = not checked
-        if self.feedback_enabled:
-            self.btn_toggle.setText("Disable Feedback")
-            self.status_lbl.setText("Status: Live mode, Feedback ON")
-            self.status_lbl.setStyleSheet("QLabel { color: green; font-weight: bold; }")
-            self.z_spin.setEnabled(False)
-        else:
+        if checked:
+            # Disabling feedback
             self.btn_toggle.setText("Enable Feedback")
-            self.status_lbl.setText("Status: Manual mode, Feedback OFF")
-            self.status_lbl.setStyleSheet("QLabel { color: #c77; font-weight: bold; }")
+            try:
+                if self.driver:
+                    current_z = self.driver.read_scaled("Topo")
+                    self.base_z = current_z
+                    self.last_z = current_z
+                    self.previous_z = current_z  # NEW: Track for changes
+                    self.z_spin.setValue(current_z)
+                    print(f"Feedback disabled. Base Z: {current_z:.6f} nm")
+
+                # Disable feedback via DDE
+                self.dde.feed_para("enable", 1)
+                self.feedback_enabled = False
+
+            except Exception as e:
+                print(f"Error reading Z before disabling feedback: {e}")
+                self.z_spin.setValue(self.last_z)
+
+            self.live_mode = False
             self.z_spin.setEnabled(True)
+            self.status_label.setText("Status: Manual mode, Feedback OFF")
+            self.status_label.setStyleSheet("QLabel { color: red; font-weight: bold; }")
 
-    def manual_update(self, val: float):
-        if self.feedback_enabled:
+        else:
+            # Enabling feedback
+            self.btn_toggle.setText("Disable Feedback")
+            self.dde.feed_para("enable", 0)
+            self.feedback_enabled = True
+            self.live_mode = True
+            self.z_spin.setEnabled(False)
+            self.status_label.setText("Status: Live mode, Feedback ON")
+            self.status_label.setStyleSheet("QLabel { color: green; font-weight: bold; }")
+            print("Feedback enabled - returning to live mode")
+
+    # KEEP OLD WORKING MANUAL UPDATE LOGIC but add visual feedback
+    def manual_update(self, value: float):
+        if self.live_mode:
             return
-        
-        # Calculate change for manual updates
-        change = val - self.last_z
+            
+        # NEW: Calculate change for overlay
+        change = value - self.last_z
         self.previous_z = self.last_z
-        self.last_z = float(val)
         
-        # Show overlay for manual changes
-        if abs(change) >= self.change_threshold:
-            self.change_overlay.show_change(change, self.last_z)
-            # Add marker at current time if we have timestamp data
-            if self.t_stamps:
-                current_time = self.t_stamps[-1] if self.t_stamps else 0
-                self.add_change_marker(current_time, self.last_z, change)
+        try:
+            delta = self.base_z - value 
+            self.dde.set_channel(0, delta)
+            self.last_z = value
+            
+            # NEW: Show overlay for manual changes
+            if abs(change) >= self.change_threshold:
+                self.change_overlay.show_change(change, self.last_z)
+                # Add marker at current time if we have timestamp data
+                if self.timestamps:
+                    current_time = self.timestamps[-1] if self.timestamps else 0
+                    self.add_change_marker(current_time, self.last_z, change)
+            
+            print(f"Manual Z update: target {value:.6f} nm (Δ {delta:+.6f} nm from base)")
+        except Exception as e:
+            print(f"Manual Z write error: {e}")
+            self.z_spin.setValue(self.last_z)
 
+    # KEEP OLD WORKING POLL LOGIC but add change detection
+    def poll(self):
+        now = datetime.datetime.now()
+        elapsed = (now - now.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds()
+
+        try:
+            if self.live_mode and self.driver:
+                z = self.driver.read_scaled("Topo")
+                
+                # NEW: Calculate change from previous reading for overlay
+                change = z - self.previous_z
+                self.previous_z = self.last_z
+                self.last_z = z
+                
+                # NEW: Show overlay if change is significant and in live mode
+                if abs(change) >= self.change_threshold:
+                    self.change_overlay.show_change(change, z)
+                    self.add_change_marker(elapsed, z, change)
+                
+                self.z_spin.setValue(z)
+            else:
+                z = self.last_z
+        except Exception as e:
+            print(f"Polling error: {e}")
+            z = self.last_z if hasattr(self, 'last_z') else 0.0
+
+        self.timestamps.append(elapsed)
+        self.z_history.append(z)
+
+        # KEEP OLD WORKING WINDOW TRIMMING LOGIC
+        while (self.timestamps and 
+               len(self.timestamps) > 1 and 
+               self.timestamps[-1] - self.timestamps[0] > self.window_seconds):
+            self.timestamps.pop(0)
+            self.z_history.pop(0)
+
+        # KEEP OLD WORKING PLOT UPDATE LOGIC
+        if len(self.timestamps) > 0:
+            self.curve.setData(self.timestamps, self.z_history)
+            x_min = max(0, elapsed - self.window_seconds)
+            x_max = elapsed
+            self.plot.setXRange(x_min, x_max, padding=0.02)
+            if len(self.z_history) > 0:
+                y_min = min(self.z_history)
+                y_max = max(self.z_history)
+                y_range = y_max - y_min
+                if y_range > 0:
+                    padding = y_range * 0.1
+                    self.plot.setYRange(y_min - padding, y_max + padding)
+        
+        # NEW: Clean up old markers
+        self.cleanup_old_markers(elapsed)
+
+    # KEEP OLD WORKING CLEAR LOGIC
+    def clear_trace(self):
+        # NEW: Clear existing markers
+        for line, text, _ in self.change_markers:
+            self.plot.removeItem(line)
+            self.plot.removeItem(text)
+        self.change_markers.clear()
+        
+        self.z_history.clear()
+        self.timestamps.clear()
+        self.curve.setData([], [])
+        print("Trace cleared")
+
+    # NEW VISUAL ENHANCEMENT METHODS FROM NEW VERSION
     def change_font_scale(self, scale_text):
         """Change font scale for accessibility"""
         scale_map = {
@@ -450,9 +520,6 @@ class ZConstAcquisition(QtWidgets.QWidget):
         
         # Update overlay font size
         self.update_overlay_font_size()
-        
-        # Update change marker text sizes
-        self.update_marker_text_sizes()
     
     def scale_plot_fonts(self):
         """Scale fonts for plot elements"""
@@ -463,17 +530,11 @@ class ZConstAcquisition(QtWidgets.QWidget):
         label_style = {'font-size': f'{label_font_size}pt', 'color': 'black'}
         tick_style = {'font-size': f'{tick_font_size}pt', 'color': 'black'}
         
-        # Update topography plot
-        self.plot_topo.setLabel('bottom', 'Time', units='s', **label_style)
-        self.plot_topo.setLabel('left', 'Z Position', units='nm', **label_style)
-        self.plot_topo.getAxis('bottom').setTickFont(QtGui.QFont('', tick_font_size))
-        self.plot_topo.getAxis('left').setTickFont(QtGui.QFont('', tick_font_size))
-        
-        # Update aux plot
-        self.plot_aux.setLabel('bottom', 'Time', units='s', **label_style)
-        self.plot_aux.setLabel('left', self.aux_channel, units=self.aux_unit, **label_style)
-        self.plot_aux.getAxis('bottom').setTickFont(QtGui.QFont('', tick_font_size))
-        self.plot_aux.getAxis('left').setTickFont(QtGui.QFont('', tick_font_size))
+        # Update plot
+        self.plot.setLabel('bottom', 'Time', units='s', **label_style)
+        self.plot.setLabel('left', 'Z Position', units='nm', **label_style)
+        self.plot.getAxis('bottom').setTickFont(QtGui.QFont('', tick_font_size))
+        self.plot.getAxis('left').setTickFont(QtGui.QFont('', tick_font_size))
     
     def update_overlay_font_size(self):
         """Update the change overlay font size"""
@@ -484,16 +545,6 @@ class ZConstAcquisition(QtWidgets.QWidget):
         import re
         new_style = re.sub(r'font-size:\s*\d+px', f'font-size: {overlay_font_size}px', current_style)
         self.change_overlay.setStyleSheet(new_style)
-    
-    def update_marker_text_sizes(self):
-        """Update existing marker text sizes"""
-        marker_font_size = max(8, int(10 * self.font_scale))
-        
-        for line, text_item, timestamp in self.change_markers:
-            if hasattr(text_item, 'setFont'):
-                font = QtGui.QFont()
-                font.setPointSize(marker_font_size)
-                text_item.setFont(font)
 
     def add_change_marker(self, time_stamp, z_value, change_value):
         """Add a vertical line marker at the change event"""
@@ -513,7 +564,7 @@ class ZConstAcquisition(QtWidgets.QWidget):
             pen=pg.mkPen(color, width=1, style=QtCore.Qt.DashLine)
         )
         
-        # Create text label with the change value and proper font size
+        # Create text label with the change value
         marker_font_size = max(8, int(10 * self.font_scale))
         if abs(change_value) >= 1.0:
             change_text = f"{change_value:+.2f}"
@@ -537,14 +588,11 @@ class ZConstAcquisition(QtWidgets.QWidget):
         text_item.setPos(time_stamp, z_value)
         
         # Add to plot
-        self.plot_topo.addItem(line)
-        self.plot_topo.addItem(text_item)
+        self.plot.addItem(line)
+        self.plot.addItem(text_item)
         
         # Store references for cleanup
         self.change_markers.append((line, text_item, time_stamp))
-        
-        # Clean up old markers outside the window
-        self.cleanup_old_markers(time_stamp)
     
     def cleanup_old_markers(self, current_time):
         """Remove markers that are outside the current time window"""
@@ -553,19 +601,20 @@ class ZConstAcquisition(QtWidgets.QWidget):
         
         for line, text, timestamp in self.change_markers:
             if current_time - timestamp > win:
-                self.plot_topo.removeItem(line)
-                self.plot_topo.removeItem(text)
+                self.plot.removeItem(line)
+                self.plot.removeItem(text)
                 markers_to_remove.append((line, text, timestamp))
         
         # Remove from list
         for marker in markers_to_remove:
             self.change_markers.remove(marker)
+    
     def clear_markers_only(self):
         """Clear only the change markers and overlay, keep trace data"""
         # Clear existing markers
         for line, text, _ in self.change_markers:
-            self.plot_topo.removeItem(line)
-            self.plot_topo.removeItem(text)
+            self.plot.removeItem(line)
+            self.plot.removeItem(text)
         self.change_markers.clear()
         
         # Hide the overlay
@@ -573,153 +622,12 @@ class ZConstAcquisition(QtWidgets.QWidget):
         
         print("Change markers and overlay cleared")
 
-    def clear_trace(self):
-        # Clear existing markers
-        for line, text, _ in self.change_markers:
-            self.plot_topo.removeItem(line)
-            self.plot_topo.removeItem(text)
-        self.change_markers.clear()
-        
-        self.t_stamps.clear()
-        self.z_hist.clear()
-        self.curve_topo.setData([], [])
-        self.aux_hist.clear()
-        self.curve_aux.setData([], [])
-        print("Trace cleared")
-
-    def on_channel_changed(self, name: str):
-        try:
-            unit = CHANNELS[name][2]
-        except Exception:
-            # keep previous if missing
-            name = self.aux_channel
-            unit = self.aux_unit
-        self.aux_channel = name
-        self.aux_unit = unit
-        self.lbl_aux_unit.setText(f"[{unit}]")
-        self.plot_aux.setLabel("left", name, units=unit)
-        self.scale_plot_fonts()  # Reapply font scaling to new label
-        self.aux_hist.clear()
-        self.curve_aux.setData([], [])
-
-    # ---------- polling ----------
-    def poll(self):
-        now = datetime.datetime.now()
-        # time in seconds since midnight; stable increasing
-        t_now = (now - now.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds()
-
-        # read topo
-        z = self.last_z
-        try:
-            if self.live_mode and self.driver:
-                z = float(self.driver.read_scaled("Topo"))
-                
-                # Calculate change from previous reading
-                change = z - self.previous_z
-                
-                # Update positions
-                self.previous_z = self.last_z
-                self.last_z = z
-                
-                # Show overlay if change is significant
-                if abs(change) >= self.change_threshold:
-                    self.change_overlay.show_change(change, z)
-                    # Add vertical marker at this time point
-                    self.add_change_marker(t_now, z, change)
-                
-                if self.feedback_enabled:
-                    self.z_spin.blockSignals(True)
-                    self.z_spin.setValue(z)
-                    self.z_spin.blockSignals(False)
-        except Exception as e:
-            print(f"Polling Topo error: {e}")
-
-        # read aux
-        aux_val = None
-        try:
-            if self.driver:
-                aux_val = float(self.driver.read_scaled(self.aux_channel))
-        except Exception as e:
-            print(f"Polling Aux '{self.aux_channel}' error: {e}")
-
-        # push
-        self.t_stamps.append(t_now)
-        self.z_hist.append(z)
-        if aux_val is not None:
-            self.aux_hist.append(aux_val)
-
-        # trim to window
-        win = self.window_seconds
-        while (
-            self.t_stamps
-            and len(self.t_stamps) > 1
-            and self.t_stamps[-1] - self.t_stamps[0] > win
-        ):
-            self.t_stamps.pop(0)
-            self.z_hist.pop(0)
-            if self.aux_hist:
-                self.aux_hist.pop(0)
-
-        # redraw topo
-        if self.t_stamps:
-            self.curve_topo.setData(self.t_stamps, self.z_hist)
-            x_min = max(0.0, t_now - win)
-            x_max = t_now
-            self.plot_topo.setXRange(x_min, x_max, padding=0.02)
-            y_min = min(self.z_hist)
-            y_max = max(self.z_hist)
-            if y_max > y_min:
-                pad = 0.1 * (y_max - y_min)
-                self.plot_topo.setYRange(y_min - pad, y_max + pad)
-
-        # redraw aux
-        if self.t_stamps and self.aux_hist:
-            # align lengths if aux started later
-            n_aux = len(self.aux_hist)
-            self.curve_aux.setData(self.t_stamps[-n_aux:], self.aux_hist)
-            x_min = max(0.0, t_now - win)
-            x_max = t_now
-            self.plot_aux.setXRange(x_min, x_max, padding=0.02)
-            y_min = min(self.aux_hist)
-            y_max = max(self.aux_hist)
-            if y_max > y_min:
-                pad = 0.1 * (y_max - y_min)
-                self.plot_aux.setYRange(y_min - pad, y_max + pad)
-
-    def resizeEvent(self, event):
-        """Handle window resize to reposition overlay"""
-        super().resizeEvent(event)
-        # The overlay will reposition itself when next shown
-
-    # ---------- Qt ----------
+    # KEEP OLD WORKING CLOSE EVENT
     def closeEvent(self, event):
-        try:
-            self.timer.stop()
-        except Exception:
-            pass
+        self.timer.stop()
+        if hasattr(self, 'driver') and self.driver:
+            try:
+                self.driver.close()
+            except:
+                pass
         event.accept()
-
-
-# def run(dde=None, driver=None):
-#     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-#     w = ZConstAcquisition(dde=dde, driver=driver)
-#     w.show()
-#     return app.exec_()
-
-
-# if __name__ == "__main__":
-#     # Expect caller to pass a real driver with read_scaled(name).
-#     # If you want to test without hardware, define a stub here.
-#     class _StubDriver:
-#         def __init__(self):
-#             self._t0 = datetime.datetime.now()
-
-#         def read_scaled(self, name):
-#             dt = (datetime.datetime.now() - self._t0).total_seconds()
-#             if name == "Topo":
-#                 return 100.0 + 2.0 * pg.np.sin(0.8 * dt)
-#             # generic aux
-#             return 1.0 * pg.np.sin(2.0 * dt) + 5.0
-
-#     # Comment out the stub when wiring to your stack.
-#     sys.exit(run(driver=_StubDriver()))
