@@ -13,8 +13,6 @@ import numpy as np
 from PyQt5 import QtWidgets, QtCore
 import pyqtgraph as pg
 import pyqtgraph.exporters
-
-# CRITICAL: Use exact same import pattern as old working version
 from sxm_ncafm_control.device_driver import CHANNELS
 
 
@@ -49,10 +47,9 @@ class CaptureThread(QtCore.QThread):
         vals1 = np.zeros(self.npoints, dtype=np.float64)
         vals2 = np.zeros(self.npoints, dtype=np.float64)
         t0 = QtCore.QTime.currentTime()
-
         # CRITICAL: Get scaling factors for both channels - SAME AS OLD VERSION
-        _, _, _, scale1 = [c for c in CHANNELS.values() if c[0] == self.chan_idx1][0]
-        _, _, _, scale2 = [c for c in CHANNELS.values() if c[0] == self.chan_idx2][0]
+        vals1 = self.driver.read_scaled(self.chan_idx1)
+        vals2 = self.driver.read_scaled(self.chan_idx2)
 
         # PRESERVE EXACT SAME ACQUISITION LOOP
         for i in range(self.npoints):
@@ -62,17 +59,12 @@ class CaptureThread(QtCore.QThread):
                 break
             try:
                 # CRITICAL: Use same driver calls as old version
-                raw1 = self.driver.read_raw(self.chan_idx1)
-                raw2 = self.driver.read_raw(self.chan_idx2)
+                raw1 = self.driver.read_scaled(self.chan_idx1)
+                raw2 = self.driver.read_scaled(self.chan_idx2)
             except Exception:
                 # PRESERVE EXACT SAME FALLBACK
                 raw1 = np.random.randn() * 0.01
                 raw2 = np.random.randn() * 0.01 + 0.5
-
-            # PRESERVE EXACT SAME SCALING
-            vals1[i] = raw1 * scale1
-            vals2[i] = raw2 * scale2
-
         # PRESERVE EXACT SAME RATE CALCULATION
         elapsed_ms = t0.msecsTo(QtCore.QTime.currentTime())
         rate = len(vals1) / max(elapsed_ms / 1000.0, 1e-9)
@@ -96,7 +88,7 @@ class ScopeTab(QtWidgets.QWidget):
         IOCTL driver handle (SXMIOCTL) or None if unavailable.
     """
 
-    def __init__(self, dde, driver=None):
+    def __init__(self, dde, driver):
         super().__init__()
         # PRESERVE EXACT SAME INITIALIZATION ORDER AND VALUES
         self.dde = dde
