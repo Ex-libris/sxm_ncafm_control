@@ -88,7 +88,7 @@ class MainWindow(QtWidgets.QWidget):
         super().__init__()
         self.setWindowTitle("NC-AFM Control Suite")
         self.resize(768,768)
-
+        self.conn = conn
         # Initialize accessibility manager
         self.setup_accessibility()
 
@@ -111,7 +111,7 @@ class MainWindow(QtWidgets.QWidget):
         # Create all tabs, sharing the same connection handles
         self.params_tab = ParamsTab(conn.dde)
         self.step_tab = StepTestTab(conn.dde)
-        self.scope_tab = ScopeTab(conn.dde, conn.driver)
+        self.scope_tab = ScopeTab()
         self.suggest_tab = SuggestedTab(conn.dde, self.params_tab)
         self.qplus_tab = QplusCalibrationTab(conn.dde)
         self.topo_hold_tab = ZConstAcquisition(conn.dde, conn.driver)
