@@ -1,15 +1,8 @@
-# z_const_acquisition.py
-"""
-Z-Constant acquisition tab with ring buffer for stable memory usage.
-"""
-
 import datetime
-import numpy as np
-from PyQt5 import QtWidgets, QtCore
+from PyQt5 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 from sxm_ncafm_control.device_driver import CHANNELS
 
-<<<<<<< HEAD
 
 class FlexibleDoubleSpinBox(QtWidgets.QDoubleSpinBox):
     """Enhanced spinbox with position-aware stepping from new version"""
@@ -204,51 +197,9 @@ class ZConstAcquisition(QtWidgets.QWidget):
         self.change_markers = []
         self.font_scale = 1.0
         self.base_font_size = QtWidgets.QApplication.font().pointSize() or 10
-=======
-from sxm_ncafm_control.device_driver import CHANNELS
 
+        layout = QtWidgets.QVBoxLayout(self)
 
-class RingBuffer:
-    """Fixed-size circular buffer for numeric data."""
-    def __init__(self, capacity):
-        self.capacity = capacity
-        self.data = np.zeros(capacity, dtype=float)
-        self.index = 0
-        self.full = False
-
-    def append(self, value):
-        self.data[self.index] = value
-        self.index = (self.index + 1) % self.capacity
-        if self.index == 0:
-            self.full = True
-
-    def get_all(self):
-        if not self.full:
-            return self.data[:self.index]
-        return np.concatenate((self.data[self.index:], self.data[:self.index]))
-
-
-class ZConstAcquisition(QtWidgets.QWidget):
-    def __init__(self, dde, driver, parent=None):
-        super().__init__(parent)
-        self.dde = dde
-        self.driver = driver
-
-        self.timer_interval_ms = 100      # poll interval
-        self.window_seconds = 60          # visible window
-
-        # Ring buffers sized for maximum samples in window
-        max_samples = int(self.window_seconds * 1000 / self.timer_interval_ms)
-        self.timestamps = RingBuffer(max_samples)
-        self.z_history = RingBuffer(max_samples)
-
-        self.last_z = 0.0
->>>>>>> 7124424d1e6f2e4e448eb69ba4b41202465d3b32
-
-        # ---- UI ----
-        vbox = QtWidgets.QVBoxLayout(self)
-
-<<<<<<< HEAD
         # ---- Controls ----
         ctrl = QtWidgets.QHBoxLayout()
 
@@ -425,38 +376,11 @@ class ZConstAcquisition(QtWidgets.QWidget):
             print(f"Manual Z write error: {e}")
             self.z_spin.setValue(self.last_z)
 
-=======
-        # Plot
-        self.plot_widget = pg.PlotWidget()
-        self.plot_widget.setBackground("w")
-        self.plot = self.plot_widget.plot(pen=pg.mkPen("b", width=1))
-        self.plot_widget.setLabel("bottom", "Time (s)")
-        self.plot_widget.setLabel("left", "Topo (nm)")
-        self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
-        vbox.addWidget(self.plot_widget)
-
-        # Status
-        self.status_label = QtWidgets.QLabel("Ready")
-        vbox.addWidget(self.status_label)
-
-        # Timer
-        self._timer = QtCore.QTimer()
-        self._timer.timeout.connect(self.poll)
-
-    def start(self):
-        self._timer.start(self.timer_interval_ms)
-        self.status_label.setText("Running...")
-
-    def stop(self):
-        self._timer.stop()
-        self.status_label.setText("Stopped")
-
->>>>>>> 7124424d1e6f2e4e448eb69ba4b41202465d3b32
     def poll(self):
-        """Poll driver for Z value and update plot."""
         now = datetime.datetime.now()
+        elapsed = (now - now.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds()
+
         try:
-<<<<<<< HEAD
             if self.live_mode and self.driver:
                 z = self.driver.read_scaled("Topo")
                 change = z - self.previous_z
@@ -468,19 +392,13 @@ class ZConstAcquisition(QtWidgets.QWidget):
                 self.z_spin.setValue(z)
             else:
                 z = self.last_z
-=======
-            z = self.driver.read_scaled("Topo")
-            self.last_z = z
->>>>>>> 7124424d1e6f2e4e448eb69ba4b41202465d3b32
         except Exception as e:
-            print(f"Driver read error: {e}")
-            z = self.last_z
+            print(f"Polling error: {e}")
+            z = self.last_z if hasattr(self, 'last_z') else 0.0
 
-        # Append to ring buffers
-        self.timestamps.append(now.timestamp())
+        self.timestamps.append(elapsed)
         self.z_history.append(z)
 
-<<<<<<< HEAD
         # Extra channel
         chan_name = self.extra_chan_combo.currentText()
         if self.driver and chan_name in CHANNELS:
@@ -595,21 +513,85 @@ class ZConstAcquisition(QtWidgets.QWidget):
     def add_change_marker(self, time_stamp, z_value, change_value):
         """Add a vertical line marker at the change event"""
         if abs(change_value) < self.change_threshold:
-=======
-        # Retrieve all valid samples
-        t_all = self.timestamps.get_all()
-        z_vals = self.z_history.get_all()
-
-        if len(t_all) == 0:
->>>>>>> 7124424d1e6f2e4e448eb69ba4b41202465d3b32
             return
-
-        # Relative time axis
-        t_rel = t_all - t_all[0]
-
-        # Update plot
-        self.plot.setData(t_rel, z_vals)
-
-        self.status_label.setText(
-            f"Latest z = {z:.3f} nm at {now.strftime('%H:%M:%S')}"
+        
+        # Color based on change direction
+        if change_value > 0:
+            color = (46, 139, 87, 150)  # Sea green with transparency
+        else:
+            color = (220, 20, 60, 150)  # Crimson with transparency
+        
+        # Create vertical line
+        line = pg.InfiniteLine(
+            pos=time_stamp,
+            angle=90,
+            pen=pg.mkPen(color, width=1, style=QtCore.Qt.DashLine)
         )
+        
+        # Create text label with the change value
+        marker_font_size = max(8, int(10 * self.font_scale))
+        if abs(change_value) >= 1.0:
+            change_text = f"{change_value:+.2f}"
+        elif abs(change_value) >= 0.01:
+            change_text = f"{change_value:+.3f}"
+        else:
+            change_text = f"{change_value:+.4f}"
+        
+        # Position text label slightly offset from line
+        text_item = pg.TextItem(
+            text=change_text,
+            color=color[:3],  # RGB only for text
+            anchor=(0.5, 1.1)  # Center horizontally, above the line
+        )
+        
+        # Set font size for the text item
+        font = QtGui.QFont()
+        font.setPointSize(marker_font_size)
+        text_item.setFont(font)
+        
+        text_item.setPos(time_stamp, z_value)
+        
+        # Add to plot
+        self.plot.addItem(line)
+        self.plot.addItem(text_item)
+        
+        # Store references for cleanup
+        self.change_markers.append((line, text_item, time_stamp))
+    
+    def cleanup_old_markers(self, current_time):
+        """Remove markers that are outside the current time window"""
+        win = self.window_seconds
+        markers_to_remove = []
+        
+        for line, text, timestamp in self.change_markers:
+            if current_time - timestamp > win:
+                self.plot.removeItem(line)
+                self.plot.removeItem(text)
+                markers_to_remove.append((line, text, timestamp))
+        
+        # Remove from list
+        for marker in markers_to_remove:
+            self.change_markers.remove(marker)
+    
+    def clear_markers_only(self):
+        """Clear only the change markers and overlay, keep trace data"""
+        # Clear existing markers
+        for line, text, _ in self.change_markers:
+            self.plot.removeItem(line)
+            self.plot.removeItem(text)
+        self.change_markers.clear()
+        
+        # Hide the overlay
+        self.change_overlay.hide()
+        
+        print("Change markers and overlay cleared")
+
+    # KEEP OLD WORKING CLOSE EVENT
+    def closeEvent(self, event):
+        self.timer.stop()
+        if hasattr(self, 'driver') and self.driver:
+            try:
+                self.driver.close()
+            except:
+                pass
+        event.accept()
