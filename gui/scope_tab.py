@@ -162,7 +162,7 @@ class ScopeTab(QtWidgets.QWidget):
 
         # Create dual plots with shared X-axis
         self.plot_widget = pg.GraphicsLayoutWidget()
-        self.plot_widget.setBackground("white")  # Set background on the widget
+        # self.plot_widget.setBackground("white")  # Set background on the widget
         vbox.addWidget(self.plot_widget)
         
         # First plot
@@ -178,12 +178,6 @@ class ScopeTab(QtWidgets.QWidget):
         
         # Link X-axes so they zoom/pan together
         self.plot2.setXLink(self.plot1)
-
-        # Style the grids
-        for plot in [self.plot1, self.plot2]:
-            grid_pen = pg.mkPen(color=(70, 70, 70), width=0.5)
-            plot.getAxis('bottom').setPen(grid_pen)
-            plot.getAxis('left').setPen(grid_pen)
 
     def start_capture(self):
         chan1_name = self.chan1_combo.currentText()
@@ -246,8 +240,8 @@ class ScopeTab(QtWidgets.QWidget):
                 t = np.arange(len(self.last_data1), dtype=float)
 
             # Draw both traces
-            self.plot1.plot(t, self.last_data1, pen=pg.mkPen('b', width=1))
-            self.plot2.plot(t, self.last_data2, pen=pg.mkPen('r', width=1))
+            self.plot1.plot(t, self.last_data1, pen=pg.mkPen((50,100,200), width=2))
+            self.plot2.plot(t, self.last_data2, pen=pg.mkPen((200,50,50), width=2))
 
             # Update button states
             self.export_btn.setEnabled(True)
