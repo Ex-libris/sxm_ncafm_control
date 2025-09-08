@@ -1,310 +1,425 @@
+# scope_tab.py
 """
-Step Test Tab for NC-AFM Control Suite.
+Scope tab (dual-channel oscilloscope view) - HYBRID VERSION
+Uses the EXACT working mechanics from the old version with minimal changes.
 
-Provides square-wave style parameter stepping with optional integration
-to the ScopeTab for signal capture and event annotation.
-
-Features:
-    - Select a parameter (including custom EditXX)
-    - Define low/high values, period, and step count
-    - Visual preview of waveform
-    - Triggers Scope capture if enabled
-    - Optionally stops Scope capture with test
-    - Annotates Scope plots with timing events
-    - Sweep mode: repeat step test for a series of base values
+Provides live capture of two SXM channels, plotting them against a shared
+time axis. Supports export of data to CSV/NumPy, and overlay of event
+markers from external test tabs.
 """
 
-import datetime
+import sys
 import numpy as np
-from typing import List, Tuple
-from PyQt5 import QtWidgets, QtCore, QtGui
+from PyQt5 import QtWidgets, QtCore
 import pyqtgraph as pg
+import pyqtgraph.exporters
+from sxm_ncafm_control.device_driver import SXMIOCTL, CHANNELS
 
-from ..common import PARAMS_BASE, confirm_high_voltage
 
+class CaptureThread(QtCore.QThread):
+    """
+    Background capture thread for two SXM channels.
+    KEEPING EXACT SAME LOGIC AS OLD WORKING VERSION
 
-class StepTestTab(QtWidgets.QWidget):
-    """Square wave parameter stepping with optional scope trigger."""
+    Reads raw values from the IOCTL driver at maximum speed until the
+    requested number of points is acquired or the thread is stopped.
 
-    def __init__(self, dde_client):
-        """
-        Args:
-            dde_client (object): DDE client to communicate with SXM software.
-        """
+    Emits
+    -----
+    finished : np.ndarray, np.ndarray, float
+        Arrays of channel 1 and channel 2 values (scaled to physical units),
+        and the effective sampling rate in Hz.
+    """
+    finished = QtCore.pyqtSignal(np.ndarray, np.ndarray, float)  # data1, data2, rate Hz
+
+    def __init__(self, driver, chan_idx1, chan_idx2, npoints=50000):
         super().__init__()
-        self.dde = dde_client
-        self.step_index = 0
-        self._customs: List[Tuple[str, object, str]] = []
-        self.scope_tab = None  # linked externally
+        self.driver = driver
+        self.chan_idx1 = chan_idx1
+        self.chan_idx2 = chan_idx2
+        self.npoints = npoints
+        self._stop = False
 
-        v = QtWidgets.QVBoxLayout(self)
-        grid = QtWidgets.QGridLayout()
-        v.addLayout(grid)
-
-        # --- Controls ---
-        self.param = QtWidgets.QComboBox()
-        self._populate_params()
-
-        self.low = QtWidgets.QDoubleSpinBox()
-        self.low.setDecimals(6); self.low.setRange(-1e12, 1e12); self.low.setValue(10.0)
-        self.high = QtWidgets.QDoubleSpinBox()
-        self.high.setDecimals(6); self.high.setRange(-1e12, 1e12); self.high.setValue(101.0)
-        self.period = QtWidgets.QDoubleSpinBox()
-        self.period.setDecimals(3); self.period.setRange(0, 3600); self.period.setValue(1.0)
-        self.steps = QtWidgets.QSpinBox()
-        self.steps.setRange(1, 1_000_000); self.steps.setValue(20)
-
-        c = 0
-        grid.addWidget(self.param, 0, c, 1, 2); c += 2
-        grid.addWidget(QtWidgets.QLabel("Low:"), 0, c); c += 1; grid.addWidget(self.low, 0, c); c += 1
-        grid.addWidget(QtWidgets.QLabel("High:"), 0, c); c += 1; grid.addWidget(self.high, 0, c); c += 1
-        grid.addWidget(QtWidgets.QLabel("Period (s):"), 0, c); c += 1; grid.addWidget(self.period, 0, c); c += 1
-        grid.addWidget(QtWidgets.QLabel("Steps:"), 0, c); c += 1; grid.addWidget(self.steps, 0, c); c += 1
-
-        self.btn_preview = QtWidgets.QPushButton("Preview")
-        self.btn_start = QtWidgets.QPushButton("Start")
-        self.btn_stop = QtWidgets.QPushButton("Stop")
-        self.btn_stop.setEnabled(False)
-
-        self.btn_preview.clicked.connect(self.preview)
-        self.btn_start.clicked.connect(self.start)
-        self.btn_stop.clicked.connect(self.stop)
-
-        grid.addWidget(self.btn_preview, 0, c); c += 1
-        grid.addWidget(self.btn_start, 0, c); c += 1
-        grid.addWidget(self.btn_stop, 0, c)
-
-        # --- Scope integration ---
-        self.chk_trigger_scope = QtWidgets.QCheckBox("Trigger scope capture at start")
-        self.chk_stop_scope = QtWidgets.QCheckBox("Stop scope with Step Test")
-        grid.addWidget(self.chk_trigger_scope, 1, 0, 1, 4)
-        grid.addWidget(self.chk_stop_scope, 2, 0, 1, 4)
-
-        self.tabs_widget = None
-        self.scope_tab_index = None
-
-        # --- Sweep mode ---
-        sweep_group = QtWidgets.QGroupBox("Sweep mode (optional)")
-        sweep_layout = QtWidgets.QFormLayout(sweep_group)
-
-        self.chk_sweep = QtWidgets.QCheckBox("Enable sweep mode")
-        sweep_layout.addRow(self.chk_sweep)
-
-        self.sweep_start = QtWidgets.QDoubleSpinBox()
-        self.sweep_start.setRange(-1e6, 1e6)
-        self.sweep_start.setDecimals(3)
-        sweep_layout.addRow("Start value", self.sweep_start)
-
-        self.sweep_end = QtWidgets.QDoubleSpinBox()
-        self.sweep_end.setRange(-1e6, 1e6)
-        self.sweep_end.setDecimals(3)
-        sweep_layout.addRow("End value", self.sweep_end)
-
-        self.sweep_step = QtWidgets.QDoubleSpinBox()
-        self.sweep_step.setRange(1e-6, 1e6)
-        self.sweep_step.setDecimals(3)
-        self.sweep_step.setValue(1.0)
-        sweep_layout.addRow("Increment", self.sweep_step)
-
-        self.sweep_wait = QtWidgets.QDoubleSpinBox()
-        self.sweep_wait.setRange(0.0, 1e4)
-        self.sweep_wait.setDecimals(1)
-        self.sweep_wait.setValue(1.0)
-        sweep_layout.addRow("Wait between values (s)", self.sweep_wait)
-
-        v.addWidget(sweep_group)
-
-        # --- Plot ---
-        self.plot = pg.PlotWidget()
-        self.plot.setBackground("w")
-        axis_pen = pg.mkPen(color="k", width=1)
-        for ax in ["bottom", "left"]:
-            self.plot.getAxis(ax).setPen(axis_pen)
-            self.plot.getAxis(ax).setTextPen("k")
-            self.plot.getAxis(ax).setStyle(tickTextOffset=5, **{"tickFont": QtGui.QFont("", 10)})
-        self.plot.getPlotItem().layout.setContentsMargins(50, 10, 10, 40)
-        self.plot.setLabel("left", "Value")
-        self.plot.setLabel("bottom", "Time", units="s")
-        v.addWidget(self.plot)
-
-        # --- Log ---
-        self.log = QtWidgets.QTextEdit()
-        self.log.setReadOnly(True)
-        v.addWidget(self.log)
-
-        self._timer = QtCore.QTimer(self)
-        self._timer.timeout.connect(self._tick)
-        self._events = []  # list of (QtCore.QDateTime, str) for scope overlay
-
-        # sweep state
-        self.sweep_values = []
-        self.current_sweep_index = 0
-        self.sweep_wait_time = 0.0
-        self.current_base_value = None
-
-    def set_custom_params(self, customs: List[Tuple[str, object, str]]):
-        """Sets custom parameters received from ParamsTab.
-
-        Args:
-            customs (list): List of (ptype, pcode, label)
-        """
-        self._customs = customs[:]
-        self._populate_params()
-
-    def _populate_params(self):
-        """Populates dropdown with base and custom parameters."""
-        self.param.blockSignals(True)
-        current = self.param.currentText() if self.param.count() else None
-        self.param.clear()
-        for _k, ptype, pcode, label, _v in PARAMS_BASE:
-            self.param.addItem(label, (ptype, pcode, label))
-        for (ptype, pcode, label) in getattr(self, "_customs", []):
-            self.param.addItem(label, (ptype, pcode, label))
-        if current:
-            idx = self.param.findText(current, QtCore.Qt.MatchExactly)
-            if idx >= 0:
-                self.param.setCurrentIndex(idx)
-        self.param.blockSignals(False)
-
-    def preview(self):
-        """Generates a step waveform preview in the plot area."""
-        low, high, T, n = self.low.value(), self.high.value(), self.period.value(), self.steps.value()
-        x = [0.0]; y = []
-        for i in range(n):
-            x.append((i + 1) * T)
-            y.append(low if (i % 2 == 0) else high)
-        self.plot.clear()
-        self.plot.plot(x, y, stepMode=True, pen=pg.mkPen("b", width=2))
-        self.plot.setXRange(0, n * T, padding=0.02)
-        ymin, ymax = sorted([low, high])
-        m = 0.05 * max(1.0, abs(ymax - ymin))
-        self.plot.setYRange(ymin - m, ymax + m, padding=0.02)
-
-    def start(self):
-        """Begins step test (single or sweep)."""
-        if self.chk_sweep.isChecked():
-            # build sweep list
-            start = self.sweep_start.value()
-            end   = self.sweep_end.value()
-            step  = self.sweep_step.value()
-
-            if step == 0:
-                QtWidgets.QMessageBox.warning(self, "Sweep error", "Increment cannot be zero")
-                return
-
-            if start <= end:
-                self.sweep_values = list(np.arange(start, end + 0.5*step, step))
-            else:
-                self.sweep_values = list(np.arange(start, end - 0.5*step, -abs(step)))
-
-            self.sweep_wait_time = self.sweep_wait.value()
-            self.current_sweep_index = 0
-            self.run_next_sweep()
-        else:
-            # normal single step test
-            self._run_single_test(base_value=None)
-
-    def run_next_sweep(self):
-        """Run the next sweep value if any remain."""
-        if self.current_sweep_index >= len(self.sweep_values):
-            self.btn_start.setEnabled(True)
-            self.btn_stop.setEnabled(False)
-            return
-
-        base_val = self.sweep_values[self.current_sweep_index]
-        self._run_single_test(base_value=base_val)
-
-    def _run_single_test(self, base_value=None):
-        """Actually runs one step test, optionally at a sweep base value."""
-        self.preview()
-        self.step_index = 0
-        self.btn_start.setEnabled(False)
-        self.btn_stop.setEnabled(True)
-        self._events = []
-
-        # build metadata for scope
-        if self.scope_tab:
-            ptype, pcode, label = self.param.currentData()
-            meta = {
-                "param_label": label,
-                "ptype": ptype,
-                "pcode": pcode,
-                "low": self.low.value(),
-                "high": self.high.value(),
-                "period_s": self.period.value(),
-                "steps": self.steps.value(),
-            }
-            if base_value is not None:
-                meta["sweep_base"] = base_value
-
-            if hasattr(self.scope_tab, "set_test_metadata"):
-                try:
-                    self.scope_tab.set_test_metadata(meta)
-                except Exception:
-                    pass
-
-        if self.chk_trigger_scope.isChecked() and self.scope_tab:
-            self.scope_tab.start_capture()
-        if self.tabs_widget and self.scope_tab_index is not None:
-            self.tabs_widget.setCurrentIndex(self.scope_tab_index)
-
-        self._timer.start(int(self.period.value() * 1000))
-        self.current_base_value = base_value
+    def run(self):
+        vals1 = np.zeros(self.npoints, dtype=np.float64)
+        vals2 = np.zeros(self.npoints, dtype=np.float64)
+        t0 = QtCore.QTime.currentTime()
+        
+        # Get scaling factors for both channels
+        _, _, _, scale1 = [c for c in CHANNELS.values() if c[0] == self.chan_idx1][0]
+        _, _, _, scale2 = [c for c in CHANNELS.values() if c[0] == self.chan_idx2][0]
+        
+        for i in range(self.npoints):
+            if self._stop:
+                vals1 = vals1[:i]
+                vals2 = vals2[:i]
+                break
+            try:
+                raw1 = self.driver.read_raw(self.chan_idx1)
+                raw2 = self.driver.read_raw(self.chan_idx2)
+            except Exception:
+                raw1 = np.random.randn() * 0.01  # offline fallback
+                raw2 = np.random.randn() * 0.01 + 0.5  # different signal
+                
+            vals1[i] = raw1 * scale1
+            vals2[i] = raw2 * scale2
+            
+        elapsed_ms = t0.msecsTo(QtCore.QTime.currentTime())
+        rate = len(vals1) / max(elapsed_ms / 1000.0, 1e-9)
+        self.finished.emit(vals1, vals2, rate)
 
     def stop(self):
-        """Stops the step test and optionally stops the scope."""
-        if self._timer.isActive():
-            self._timer.stop()
-            self.log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Test stopped.")
-        self.btn_start.setEnabled(True)
-        self.btn_stop.setEnabled(False)
+        self._stop = True
 
-        if self.chk_trigger_scope.isChecked() and self.chk_stop_scope.isChecked() and self.scope_tab:
-            self.scope_tab.stop_capture()
 
-        if self.scope_tab:
+class ScopeTab(QtWidgets.QWidget):
+    """Dual-channel scope for SXM channels with shared time axis."""
+
+    def __init__(self):
+        super().__init__()
+        try:
+            self.driver = SXMIOCTL()
+        except Exception as e:
+            print("⚠ Could not open SXM driver, using mock:", e)
+            self.driver = None
+
+        self.capture_thread = None
+        self.last_data1 = None
+        self.last_data2 = None
+        self.last_rate = None
+        self.last_chan1 = None
+        self.last_chan2 = None
+        
+        # Time + markers state
+        self.capture_start_dt = None
+        self._event_markers = []
+        self._marker_items1 = []  # markers for plot1
+        self._marker_items2 = []  # markers for plot2
+        
+        # Reference to test tab for repeat functionality
+        self.test_tab = None
+        
+        # Remember last export path
+        self.last_export_path = None
+
+        vbox = QtWidgets.QVBoxLayout(self)
+
+        # Controls
+        hbox = QtWidgets.QHBoxLayout()
+        
+        # Channel 1 selection - default to QplusAmplitude
+        hbox.addWidget(QtWidgets.QLabel("Channel 1:"))
+        self.chan1_combo = QtWidgets.QComboBox()
+        self.chan1_combo.addItems(list(CHANNELS.keys()))
+        # Set default to QplusAmplitude if available
+        if "QplusAmplitude" in CHANNELS:
+            idx = list(CHANNELS.keys()).index("QplusAmplitude")
+            self.chan1_combo.setCurrentIndex(idx)
+        hbox.addWidget(self.chan1_combo)
+        
+        # Channel 2 selection - default to Drive
+        hbox.addWidget(QtWidgets.QLabel("Channel 2:"))
+        self.chan2_combo = QtWidgets.QComboBox()
+        self.chan2_combo.addItems(list(CHANNELS.keys()))
+        # Set default to Drive if available, otherwise second channel
+        if "Drive" in CHANNELS:
+            idx = list(CHANNELS.keys()).index("Drive")
+            self.chan2_combo.setCurrentIndex(idx)
+        elif len(CHANNELS) > 1:
+            self.chan2_combo.setCurrentIndex(1)
+        hbox.addWidget(self.chan2_combo)
+
+        self.npoints_spin = QtWidgets.QSpinBox()
+        self.npoints_spin.setRange(1000, 2_000_000)
+        self.npoints_spin.setValue(2_000_000)  # Default to 2M samples for ~1 minute capture
+        hbox.addWidget(QtWidgets.QLabel("Samples:"))
+        hbox.addWidget(self.npoints_spin)
+
+        self.start_btn = QtWidgets.QPushButton("Start Capture")
+        self.start_btn.clicked.connect(self.start_capture)
+        hbox.addWidget(self.start_btn)
+
+        self.stop_btn = QtWidgets.QPushButton("Stop")
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.clicked.connect(self.stop_capture)
+        hbox.addWidget(self.stop_btn)
+
+        self.export_btn = QtWidgets.QPushButton("Export Data")
+        self.export_btn.setEnabled(False)
+        self.export_btn.clicked.connect(self.export_data)
+        hbox.addWidget(self.export_btn)
+
+        self.repeat_test_btn = QtWidgets.QPushButton("Repeat Test")
+        self.repeat_test_btn.setEnabled(False)
+        self.repeat_test_btn.clicked.connect(self.repeat_test)
+        hbox.addWidget(self.repeat_test_btn)
+
+        self.clear_btn = QtWidgets.QPushButton("Clear")
+        self.clear_btn.clicked.connect(self.clear_plots)
+        hbox.addWidget(self.clear_btn)
+
+        vbox.addLayout(hbox)
+
+        # Create dual plots with shared X-axis
+        self.plot_widget = pg.GraphicsLayoutWidget()
+        # self.plot_widget.setBackground("white")  # Set background on the widget
+        vbox.addWidget(self.plot_widget)
+        
+        # First plot
+        self.plot1 = self.plot_widget.addPlot(row=0, col=0)
+        self.plot1.setLabel("left", "Channel 1")
+        self.plot1.showGrid(x=True, y=True, alpha=0.3)
+        
+        # Second plot (shares X-axis with first)
+        self.plot2 = self.plot_widget.addPlot(row=1, col=0)
+        self.plot2.setLabel("bottom", "Time (s)")
+        self.plot2.setLabel("left", "Channel 2")
+        self.plot2.showGrid(x=True, y=True, alpha=0.3)
+        
+        # Link X-axes so they zoom/pan together
+        self.plot2.setXLink(self.plot1)
+
+    def start_capture(self):
+        chan1_name = self.chan1_combo.currentText()
+        chan2_name = self.chan2_combo.currentText()
+        idx1, _, unit1, scale1 = CHANNELS[chan1_name]
+        idx2, _, unit2, scale2 = CHANNELS[chan2_name]
+        npts = self.npoints_spin.value()
+        
+        # Clear both plots
+        self.plot1.clear()
+        self.plot2.clear()
+        
+        # Update plot labels with units
+        self.plot1.setLabel("left", f"{chan1_name} ({unit1})")
+        self.plot2.setLabel("left", f"{chan2_name} ({unit2})")
+        
+        # Clear markers and set capture start time
+        self._clear_markers()
+        self.capture_start_dt = QtCore.QDateTime.currentDateTime()
+
+        self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.export_btn.setEnabled(False)
+
+        self.last_data1 = None
+        self.last_data2 = None
+        self.last_rate = None
+        self.last_chan1 = chan1_name
+        self.last_chan2 = chan2_name
+
+        if self.driver is not None:
+            # Launch capture thread for both channels
+            self.capture_thread = CaptureThread(self.driver, idx1, idx2, npoints=npts)
+            self.capture_thread.finished.connect(self.show_data)
+            self.capture_thread.start()
+        else:
+            # Offline fallback: generate mock signals
+            t = np.linspace(0, 1, npts)
+            arr1 = np.sin(2 * np.pi * 5 * t) + 0.1 * np.random.randn(npts)
+            arr2 = np.cos(2 * np.pi * 3 * t) * 2 + 0.2 * np.random.randn(npts)
+            self.show_data(arr1, arr2, rate=npts)
+
+    def stop_capture(self):
+        if self.capture_thread is not None:
+            self.capture_thread.stop()
+
+    def show_data(self, arr1, arr2, rate):
+        try:
+            self.plot1.clear()
+            self.plot2.clear()
+
+            self.last_data1 = np.asarray(arr1)
+            self.last_data2 = np.asarray(arr2)
+            self.last_rate = float(rate) if rate else 0.0
+
+            # Build time axis in seconds
+            if self.last_rate > 0:
+                t = np.arange(len(self.last_data1), dtype=float) / self.last_rate
+            else:
+                t = np.arange(len(self.last_data1), dtype=float)
+
+            # Draw both traces
+            self.plot1.plot(t, self.last_data1, pen=pg.mkPen((50,100,200), width=2))
+            self.plot2.plot(t, self.last_data2, pen=pg.mkPen((200,50,50), width=2))
+
+            # Update button states
+            self.export_btn.setEnabled(True)
+            self.start_btn.setEnabled(True)
+            self.stop_btn.setEnabled(False)
+
+            # Add markers to both plots
+            self._update_markers()
+
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Plot error", str(e))
+
+    def export_data(self):
+        if self.last_data1 is None or self.last_data2 is None:
+            return
+        
+        # Use last path or default filename
+        default_name = f"{self.last_chan1}_{self.last_chan2}_capture.csv"
+        if self.last_export_path:
+            import os
+            default_name = os.path.join(os.path.dirname(self.last_export_path), default_name)
+            
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Export Data", default_name, 
+            "CSV Files (*.csv);;NumPy Files (*.npy)"
+        )
+        if not path:
+            return
+            
+        # Remember this path for next time
+        self.last_export_path = path
+        
+        try:
+            if path.endswith(".npy"):
+                # Save as structured array with both channels
+                data = np.column_stack((self.last_data1, self.last_data2))
+                np.save(path, data)
+            else:
+                t = np.arange(len(self.last_data1)) / max(self.last_rate, 1)
+                header = f"chan1={self.last_chan1}, chan2={self.last_chan2}, rate={self.last_rate:.2f} Hz"
+                np.savetxt(
+                    path,
+                    np.column_stack((t, self.last_data1, self.last_data2)),
+                    delimiter=",",
+                    header="time,channel1,channel2\n" + header,
+                    comments="",
+                )
+                
+            # Also save PNG screenshot of the plots
+            png_path = path.rsplit('.', 1)[0] + '.png'
             try:
-                self.scope_tab.set_event_markers(self._events)
+                exporter = pg.exporters.ImageExporter(self.plot_widget.scene())
+                exporter.parameters()['width'] = 1200  # High resolution
+                exporter.export(png_path)
+                QtWidgets.QMessageBox.information(self, "Export", 
+                    f"Data saved to:\n{path}\n\nPlot image saved to:\n{png_path}")
+            except Exception as img_e:
+                QtWidgets.QMessageBox.information(self, "Export", 
+                    f"Data saved to:\n{path}\n\nNote: Could not save plot image: {img_e}")
+                    
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Export error", str(e))
+
+    def set_event_markers(self, events):
+        """
+        Accept a list of (QtCore.QDateTime, str_label) to overlay as vertical
+        lines with small text on both plots. Units on X are seconds from capture start.
+        """
+        self._event_markers = list(events or [])
+        self._update_markers()
+
+    def _clear_markers(self):
+        for it in self._marker_items1 + self._marker_items2:
+            try:
+                if it in self._marker_items1:
+                    self.plot1.removeItem(it)
+                else:
+                    self.plot2.removeItem(it)
             except Exception:
                 pass
+        self._marker_items1 = []
+        self._marker_items2 = []
 
-        # if sweep mode, queue next sweep run
-        if self.chk_sweep.isChecked() and hasattr(self, "sweep_values"):
-            self.current_sweep_index += 1
-            if self.current_sweep_index < len(self.sweep_values):
-                QtCore.QTimer.singleShot(
-                    int(self.sweep_wait_time * 1000), self.run_next_sweep
-                )
-
-    def _tick(self):
-        """Called on each timer tick: sends value and logs event."""
-        ptype, pcode, label = self.param.currentData()
-        value = self.low.value() if (self.step_index % 2 == 0) else self.high.value()
-
-        is_voltage_like = (ptype == "EDIT" and str(pcode).lower() == "edit23") or (
-            ptype == "DNC" and int(pcode) == 4
-        )
-        if is_voltage_like and not confirm_high_voltage(self, label, value):
-            self.stop()
+    def _update_markers(self):
+        # Need data, a valid rate and a start time
+        if (
+            self.last_data1 is None
+            or self.last_data2 is None
+            or self.capture_start_dt is None
+        ):
             return
 
+        # Compute plot X range in seconds
+        if self.last_rate and self.last_rate > 0:
+            tmax = (len(self.last_data1) - 1) / self.last_rate if len(self.last_data1) else 0.0
+        else:
+            tmax = float(len(self.last_data1) - 1) if len(self.last_data1) else 0.0
+
+        # Y positions for labels on each plot
         try:
-            if ptype == "EDIT":
-                self.dde.send_scanpara(str(pcode), value)
-            else:
-                self.dde.send_dncpara(int(pcode), value)
-        except Exception as e:
-            self.log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] SEND ERROR: {e}")
-            self.stop()
+            ymax1 = float(np.nanmax(self.last_data1)) if len(self.last_data1) else 0.0
+            ymax2 = float(np.nanmax(self.last_data2)) if len(self.last_data2) else 0.0
+        except Exception:
+            ymax1 = ymax2 = 0.0
+
+        self._clear_markers()
+
+        for dt, label in self._event_markers:
+            try:
+                # seconds since capture_start_dt
+                secs = max(0.0, self.capture_start_dt.msecsTo(dt) / 1000.0)
+            except Exception:
+                secs = 0.0
+
+            # Clamp into plotted window
+            x = min(secs, tmax)
+
+            # Add markers to both plots
+            # Plot 1
+            line1 = pg.InfiniteLine(pos=x, angle=90,
+                                   pen=pg.mkPen('r', width=1, style=QtCore.Qt.DashLine))
+            self.plot1.addItem(line1)
+            txt1 = pg.TextItem(label, anchor=(0, 1), color='r')
+            txt1.setPos(x, ymax1)
+            self.plot1.addItem(txt1)
+            self._marker_items1.extend([line1, txt1])
+
+            # Plot 2
+            line2 = pg.InfiniteLine(pos=x, angle=90,
+                                   pen=pg.mkPen('r', width=1, style=QtCore.Qt.DashLine))
+            self.plot2.addItem(line2)
+            txt2 = pg.TextItem(label, anchor=(0, 1), color='r')
+            txt2.setPos(x, ymax2)
+            self.plot2.addItem(txt2)
+            self._marker_items2.extend([line2, txt2])
+
+    def set_test_tab_reference(self, test_tab):
+        """Set reference to test tab for repeat functionality."""
+        self.test_tab = test_tab
+        self.repeat_test_btn.setEnabled(test_tab is not None)
+
+    def repeat_test(self):
+        """Trigger the test tab to repeat the last test configuration."""
+        if self.test_tab is None:
+            QtWidgets.QMessageBox.warning(self, "No Test Tab", 
+                "No test tab reference available. Please run a test first.")
             return
+            
+        # Check if test is already running
+        if hasattr(self.test_tab, '_timer') and self.test_tab._timer.isActive():
+            QtWidgets.QMessageBox.information(self, "Test Running", 
+                "A test is already in progress. Please wait for it to complete.")
+            return
+            
+        try:
+            # Enable scope triggering for this repeat
+            if hasattr(self.test_tab, 'chk_trigger_scope'):
+                self.test_tab.chk_trigger_scope.setChecked(True)
+            if hasattr(self.test_tab, 'chk_stop_scope'):
+                self.test_tab.chk_stop_scope.setChecked(True)
+                
+            # Start the test
+            self.test_tab.start()
+            
+            # Show a brief message
+            QtWidgets.QMessageBox.information(self, "Test Started", 
+                "Repeating last test configuration. The scope will be triggered automatically.")
+                
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Test Error", 
+                f"Failed to start test: {str(e)}")
 
-        ts_dt = QtCore.QDateTime.currentDateTime()
-        self._events.append((ts_dt, f"{label}={value:g}"))
-
-        ts = datetime.datetime.now().strftime("%H:%M:%S")
-        code_text = pcode if ptype == "EDIT" else f"DNC{pcode}"
-        self.log.append(f"[{ts}] Set {label} ({code_text}) to {value}")
-
-        self.step_index += 1
-        if self.step_index >= self.steps.value():
-            self.stop()
+    def clear_plots(self):
+        """Clear both plots and reset data."""
+        self.plot1.clear()
+        self.plot2.clear()
+        self._clear_markers()
+        self.last_data1 = None
+        self.last_data2 = None
+        self.last_rate = None
+        self.export_btn.setEnabled(False)
