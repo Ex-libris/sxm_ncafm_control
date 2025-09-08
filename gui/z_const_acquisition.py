@@ -267,7 +267,7 @@ class ZConstAcquisition(QtWidgets.QWidget):
         # ---- Z plot ----
         self.plot = pg.PlotWidget()
         self.plot.setBackground('w')
-        self.curve = self.plot.plot([], [], pen=pg.mkPen('b', width=2))
+        self.curve = self.plot.plot([], [], pen=pg.mkPen((200,50,50), width=2))
         self.plot.setLabel("bottom", "Time", units="s")
         self.plot.setLabel("left", "Z Position", units="nm")
         self.plot.showGrid(x=True, y=True, alpha=0.3)
@@ -278,7 +278,7 @@ class ZConstAcquisition(QtWidgets.QWidget):
         # ---- Extra channel plot ----
         self.extra_plot = pg.PlotWidget()
         self.extra_plot.setBackground('w')
-        self.extra_curve = self.extra_plot.plot([], [], pen=pg.mkPen('g', width=2))
+        self.extra_curve = self.extra_plot.plot([], [], pen=pg.mkPen((50,100,200), width=2))
         self.extra_plot.setLabel("bottom", "Time", units="s")
         self.extra_plot.setLabel("left", "Extra Channel")
         self.extra_plot.showGrid(x=True, y=True, alpha=0.3)
