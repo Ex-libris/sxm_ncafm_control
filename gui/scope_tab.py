@@ -157,6 +157,11 @@ class ScopeTab(QtWidgets.QWidget):
         self.clear_btn = QtWidgets.QPushButton("Clear")
         self.clear_btn.clicked.connect(self.clear_plots)
         hbox.addWidget(self.clear_btn)
+        
+        self.estimate_pi_btn = QtWidgets.QPushButton("Estimate PI Values")
+        self.estimate_pi_btn.setEnabled(False)
+        self.estimate_pi_btn.clicked.connect(self.estimate_pi)
+        hbox.addWidget(self.estimate_pi_btn)
 
         vbox.addLayout(hbox)
 
@@ -247,6 +252,7 @@ class ScopeTab(QtWidgets.QWidget):
             self.export_btn.setEnabled(True)
             self.start_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
+            self.estimate_pi_btn.setEnabled(True)
 
             # Add markers to both plots
             self._update_markers()
@@ -423,3 +429,53 @@ class ScopeTab(QtWidgets.QWidget):
         self.last_data2 = None
         self.last_rate = None
         self.export_btn.setEnabled(False)
+
+        def estimate_pi(self):
+            if self.last_data1 is None or self.last_data2 is None:
+                QtWidgets.QMessageBox.warning(self, "No Data", "Run a step test and capture first.")
+                return
+
+            import numpy as np
+            
+            t = np.arange(len(self.last_data1)) / max(self.last_rate, 1)
+            df = self.last_data1  # assuming channel1 = frequency shift
+            phase = self.last_data2  # assuming channel2 = phase error
+
+            # --- detect step onset from phase channel ---
+            step_idx = np.argmax(np.abs(np.diff(phase)))  # crude: largest jump
+            t0 = t[step_idx]
+
+            # --- crop response after step ---
+            resp_t = t[step_idx:] - t0
+            resp_df = df[step_idx:]
+
+            # --- normalize step (0→1) ---
+            y0, y1 = np.median(resp_df[:50]), np.median(resp_df[-50:])
+            resp_norm = (resp_df - y0) / (y1 - y0 + 1e-12)
+
+            # --- rise time (10-90%) ---
+            try:
+                t10 = resp_t[np.where(resp_norm > 0.1)[0][0]]
+                t90 = resp_t[np.where(resp_norm > 0.9)[0][0]]
+                trise = t90 - t10
+                bw_meas = 0.35 / trise
+            except Exception:
+                bw_meas = 0.0
+
+            # --- overshoot ---
+            overshoot = np.max(resp_norm) - 1.0
+
+            # --- recommend new P,I ---
+            bw_target = 50.0  # Hz, change as needed
+            scale = bw_target / max(bw_meas, 1e-9)
+            P_new = -100 * scale
+            I_new = -10000 * scale
+
+            if overshoot > 0.2:  # >20%
+                P_new *= 0.5
+                I_new *= 0.5
+
+            msg = (f"Measured BW ≈ {bw_meas:.1f} Hz, Overshoot ≈ {overshoot*100:.0f}%\n"
+                f"Suggested PI values:\n"
+                f"P = {P_new:.1f}\nI = {I_new:.1f}")
+            QtWidgets.QMessageBox.information(self, "Estimated PI", msg)
