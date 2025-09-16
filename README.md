@@ -88,7 +88,7 @@ This tab gives direct control of the piezo absolute position. You can enable or 
 ### Scope Tab
 Real-time channel monitoring with direct driver communication. You can track in a given channel the effects of triggering step-tests. In this example, you can see the effects of a step-test for the Amplitude reference setpoint on the QPlusAmplitude signal. 
 
-![Scope Tab](screenshots/scope_tab.png)
+![Scope Tab](screenshots/pll_state_0.png)
 
 ### Step Test Tab
 Square step tests for ncAFM channels parameters. In this tab, you can define a train of step changes in a given parameter for the different PIDs controlling the ncAFM loop.
