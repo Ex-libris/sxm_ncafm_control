@@ -5,76 +5,151 @@ from sxm_ncafm_control.device_driver import CHANNELS
 
 
 class FlexibleDoubleSpinBox(QtWidgets.QDoubleSpinBox):
-    """Enhanced spinbox with position-aware stepping from new version"""
+    """
+    Right-side digit stepping:
+    - Put the caret to the RIGHT of the digit you want to change.
+    - First step locks that digit place (no order jumps).
+    - Caret is restored to the RIGHT of that digit after each change.
+    - Minus sign is ignored for caret math.
+    """
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setKeyboardTracking(False)  # Only emit valueChanged when editing is finished
+        self.setKeyboardTracking(False)
         self.custom_step_enabled = True
-        
+
+        # lock state
+        self._lock_active = False
+        self._locked_step = None
+        self._locked_anchor = None  # ('L', k) for k digits left of '.', or ('R', k) for k digits right of '.'
+
+        self._lock_timer = QtCore.QTimer(self)
+        self._lock_timer.setSingleShot(True)
+        self._lock_timer.timeout.connect(self._unlock)
+        self._lock_idle_ms = 800
+
+        self.editingFinished.connect(self._unlock)
+
+    # ---------- helpers ----------
+    def _unlock(self):
+        self._lock_active = False
+        self._locked_step = None
+        self._locked_anchor = None
+
+    def _split_core(self, text):
+        """Return (sign_len, core_digits) stripping suffix and leading sign."""
+        suffix = self.suffix()
+        core = text[:-len(suffix)] if (suffix and text.endswith(suffix)) else text
+        if core.startswith(('+', '-')):
+            return 1, core[1:]
+        return 0, core
+
+    def _effective_pos_right(self, cursor_pos, text):
+        """
+        Convert absolute cursor_pos to position in the digits string,
+        then shift one left if possible so caret is to the RIGHT of the digit we change.
+        """
+        sign_len, digits = self._split_core(text)
+        pos = max(0, cursor_pos - sign_len)
+        if pos > 0 and pos <= len(digits) and digits[pos - 1].isdigit():
+            return pos - 1  # digit index whose RIGHT edge the caret is at
+        return max(0, min(len(digits) - 1, pos)) if digits else 0
+
+    def _anchor_from_pos_right(self, pos_right, digits):
+        """Make an anchor relative to the decimal using pos_right (a digit index)."""
+        dec = digits.find('.')
+        if dec == -1:
+            dec = len(digits)
+
+        if pos_right <= dec - 1:
+            # left side digit: k digits to the left of '.'
+            k = dec - pos_right
+            return ('L', k)
+        else:
+            # right side digit: k digits to the right of '.'
+            k = pos_right - dec - 1
+            return ('R', k)
+
+    def _restore_caret_right(self, line_edit, anchor):
+        """Place caret to the RIGHT of the anchored digit."""
+        text = line_edit.text()
+        sign_len, digits = self._split_core(text)
+        dec = digits.find('.')
+        if dec == -1:
+            dec = len(digits)
+
+        side, k = anchor
+        if side == 'L':
+            di = max(0, dec - k)
+            caret_pos = di + 1  # right of that digit
+        else:
+            di = dec + 1 + k
+            caret_pos = min(len(digits), di + 1)  # right of that digit
+
+        abs_pos = sign_len + caret_pos
+        QtCore.QTimer.singleShot(0, lambda: line_edit.setCursorPosition(abs_pos))
+
+    def _step_size_from_pos_right(self, pos_right, digits):
+        """Compute step size for the digit at pos_right (RIGHT-side model)."""
+        dec = digits.find('.')
+        if dec == -1:
+            dec = len(digits)
+
+        if pos_right <= dec - 1:
+            # left of decimal: ones -> 10^0, tens -> 10^1, etc.
+            power = dec - pos_right - 1
+            return 10 ** power
+        else:
+            # right of decimal: tenths -> 10^-1, hundredths -> 10^-2, etc.
+            power = -(pos_right - dec)
+            return 10 ** power
+
+    # ---------- main stepping ----------
     def stepBy(self, steps):
         if not self.custom_step_enabled:
             super().stepBy(steps)
             return
-            
-        line_edit = self.lineEdit()
-        cursor_pos = line_edit.cursorPosition()
-        text = line_edit.text()
-        
-        suffix = self.suffix()
-        if suffix and text.endswith(suffix):
-            text = text[:-len(suffix)]
-        
-        decimal_pos = text.find('.')
-        step_size = self.determine_step_size(cursor_pos, text, decimal_pos)
-        
-        current_value = self.value()
-        new_value = current_value + (steps * step_size)
-        
-        if new_value > self.maximum():
-            new_value = self.maximum()
-            print(f"Warning: Clamped to maximum value {self.maximum()}")
-        elif new_value < self.minimum():
-            new_value = self.minimum()
-            print(f"Warning: Clamped to minimum value {self.minimum()}")
-        
-        if abs(new_value - current_value) > 1e-10:
-            self.setValue(new_value)
-        
-        QtCore.QTimer.singleShot(0, lambda: line_edit.setCursorPosition(cursor_pos))
-    
-    def determine_step_size(self, cursor_pos, text, decimal_pos):
-        if decimal_pos == -1:
-            digits_from_right = len(text) - cursor_pos
-            if digits_from_right <= 0:
-                return 1.0
-            return 10 ** (digits_from_right - 1)
-        else:
-            if cursor_pos <= decimal_pos:
-                digits_from_right = decimal_pos - cursor_pos
-                return 10 ** digits_from_right if digits_from_right > 0 else 1.0
-            else:
-                decimal_places = cursor_pos - decimal_pos - 1
-                return 10 ** (-decimal_places - 1)
-    
+
+        le = self.lineEdit()
+        cur_pos_abs = le.cursorPosition()
+        raw_text = le.text()
+        _, digits = self._split_core(raw_text)
+
+        # first step in a session: lock step and anchor
+        if not self._lock_active:
+            pos_right = self._effective_pos_right(cur_pos_abs, raw_text)
+            step_size = self._step_size_from_pos_right(pos_right, digits)
+
+            self._lock_active = True
+            self._locked_step = step_size
+            self._locked_anchor = self._anchor_from_pos_right(pos_right, digits)
+
+        # always use the locked step
+        step_size = self._locked_step or self.singleStep()
+        new_val = self.value() + steps * step_size
+
+        # clamp
+        new_val = min(max(new_val, self.minimum()), self.maximum())
+
+        # set and restore caret to RIGHT of same digit
+        self.setValue(new_val)
+        if self._locked_anchor is not None:
+            self._restore_caret_right(le, self._locked_anchor)
+
+        # keep lock alive while stepping
+        self._lock_timer.start(self._lock_idle_ms)
+
+    # wheel and arrows go through the same logic
     def wheelEvent(self, event):
         if not self.custom_step_enabled:
             super().wheelEvent(event)
             return
-            
         steps = event.angleDelta().y() // 120
-        modifiers = QtWidgets.QApplication.keyboardModifiers()
-        
-        if modifiers == QtCore.Qt.ControlModifier:
-            self.custom_step_enabled = False
-            super().wheelEvent(event)
-            self.custom_step_enabled = True
-        elif modifiers == QtCore.Qt.ShiftModifier:
-            self.stepBy(steps * 10)
-        else:
+        if steps:
             self.stepBy(steps)
-            
-        event.accept()
-    
+            event.accept()
+        else:
+            super().wheelEvent(event)
+
     def keyPressEvent(self, event):
         if event.key() == QtCore.Qt.Key_Up:
             self.stepBy(1)
@@ -103,37 +178,26 @@ class ChangeOverlay(QtWidgets.QLabel):
                 color: #333;
             }
         """)
-        
         self.opacity_effect = QtWidgets.QGraphicsOpacityEffect()
         self.setGraphicsEffect(self.opacity_effect)
-        
         self.fade_animation = QtCore.QPropertyAnimation(self.opacity_effect, b"opacity")
         self.fade_animation.setDuration(300)
-        
         self.hide_timer = QtCore.QTimer()
         self.hide_timer.setSingleShot(True)
         self.hide_timer.timeout.connect(self.fade_out)
-        
         self.hide()
-    
+
     def show_change(self, change_value, current_value):
         if abs(change_value) < 0.001:
             return
-            
         if abs(change_value) >= 1.0:
             change_text = f"{change_value:+.2f}"
         elif abs(change_value) >= 0.01:
             change_text = f"{change_value:+.3f}"
         else:
             change_text = f"{change_value:+.4f}"
-        
         display_text = f"Δz: {change_text} nm\nz: {current_value:.3f} nm"
-        
-        if change_value > 0:
-            color = "#2E8B57"
-        else:
-            color = "#DC143C"
-        
+        color = "#2E8B57" if change_value > 0 else "#DC143C"
         self.setStyleSheet(f"""
             QLabel {{
                 background-color: rgba(255, 255, 255, 240);
@@ -145,29 +209,25 @@ class ChangeOverlay(QtWidgets.QLabel):
                 color: {color};
             }}
         """)
-        
         self.setText(display_text)
         self.adjustSize()
-        
         if self.parent():
             parent_rect = self.parent().rect()
             overlay_rect = self.rect()
             x = 20
             y = parent_rect.height() - overlay_rect.height() - 20
             self.move(x, y)
-        
         self.fade_in()
-        
         self.hide_timer.stop()
         self.hide_timer.start(4000)
-    
+
     def fade_in(self):
         self.show()
         self.fade_animation.stop()
         self.fade_animation.setStartValue(0.0)
         self.fade_animation.setEndValue(1.0)
         self.fade_animation.start()
-    
+
     def fade_out(self):
         self.fade_animation.stop()
         self.fade_animation.setStartValue(1.0)
@@ -185,9 +245,16 @@ class ZConstAcquisition(QtWidgets.QWidget):
         self.dde = dde
         self.driver = driver
         self.live_mode = True
+
+        # state
         self.last_z = 0.0
         self.previous_z = 0.0
-        self.base_z = 0.0
+
+        # absolute manual mode mapping
+        self.ch0_sign = +1   # set to -1 if direction is inverted
+        self.abs_ref_z = 0.0 # Z at disable
+        self.ch0_base = 0.0  # CH0 at disable
+
         self.z_history = []
         self.timestamps = []
         self.window_seconds = 10
@@ -267,7 +334,7 @@ class ZConstAcquisition(QtWidgets.QWidget):
         # ---- Z plot ----
         self.plot = pg.PlotWidget()
         self.plot.setBackground('w')
-        self.curve = self.plot.plot([], [], pen=pg.mkPen('b', width=2))
+        self.curve = self.plot.plot([], [], pen=pg.mkPen((200,50,50), width=2))
         self.plot.setLabel("bottom", "Time", units="s")
         self.plot.setLabel("left", "Z Position", units="nm")
         self.plot.showGrid(x=True, y=True, alpha=0.3)
@@ -278,7 +345,7 @@ class ZConstAcquisition(QtWidgets.QWidget):
         # ---- Extra channel plot ----
         self.extra_plot = pg.PlotWidget()
         self.extra_plot.setBackground('w')
-        self.extra_curve = self.extra_plot.plot([], [], pen=pg.mkPen('g', width=2))
+        self.extra_curve = self.extra_plot.plot([], [], pen=pg.mkPen((50,100,200), width=2))
         self.extra_plot.setLabel("bottom", "Time", units="s")
         self.extra_plot.setLabel("left", "Extra Channel")
         self.extra_plot.showGrid(x=True, y=True, alpha=0.3)
@@ -309,72 +376,101 @@ class ZConstAcquisition(QtWidgets.QWidget):
                 self.last_z = current_z
                 self.previous_z = current_z
                 self.z_spin.setValue(current_z)
-                print(f"Initialized Z position: {current_z:.6f} nm")
+                print(f"Initialized Z: {current_z:.6f} nm")
             else:
-                print("No driver available - using mock initialization")
+                print("No driver; mock init")
                 self.last_z = 0.0
                 self.previous_z = 0.0
         except Exception as e:
-            print(f"Error initializing Z position: {e}")
+            print(f"Init error: {e}")
             self.last_z = 0.0
             self.previous_z = 0.0
 
     def toggle_feedback(self, checked: bool):
         if checked:
+            # DISABLE feedback → manual absolute mode
             self.btn_toggle.setText("Enable Feedback")
             try:
                 if self.driver:
                     current_z = self.driver.read_scaled("Topo")
-                    self.base_z = current_z
-                    self.last_z = current_z
-                    self.previous_z = current_z
-                    self.z_spin.setValue(current_z)
-                    print(f"Feedback disabled. Base Z: {current_z:.6f} nm")
+                else:
+                    current_z = self.last_z
+
+                self.abs_ref_z = current_z
+                self.last_z = current_z
+                self.previous_z = current_z
+                print(f"FB OFF. Z_ref = {current_z:.6f} nm")
+
+                try:
+                    self.ch0_base = self.dde.get_channel(0)  # read-only is fine
+                    print(f"CH0_base = {self.ch0_base:.6f}")
+                except Exception as e:
+                    print(f"CH0 readback failed: {e} (keeping CH0_base={self.ch0_base:.6f})")
 
                 self.dde.feed_para("enable", 1)
                 self.feedback_enabled = False
+                self.live_mode = False
+
+                # Spinbox shows ABSOLUTE Z, editable
+                self.z_spin.blockSignals(True)
+                self.z_spin.setEnabled(True)
+                self.z_spin.setSuffix(" nm (absolute)")
+                self.z_spin.setValue(current_z)
+                self.z_spin.blockSignals(False)
+
+                self.status_label.setText("Status: Manual mode, Feedback OFF (Abs Z)")
+                self.status_label.setStyleSheet("QLabel { color: red; font-weight: bold; }")
 
             except Exception as e:
-                print(f"Error reading Z before disabling feedback: {e}")
-                self.z_spin.setValue(self.last_z)
-
-            self.live_mode = False
-            self.z_spin.setEnabled(True)
-            self.status_label.setText("Status: Manual mode, Feedback OFF")
-            self.status_label.setStyleSheet("QLabel { color: red; font-weight: bold; }")
+                print(f"Error disabling FB: {e}")
 
         else:
+            # ENABLE feedback
             self.btn_toggle.setText("Disable Feedback")
+            try:
+                z_target = self.z_spin.value()  # absolute target
+                dz_cmd = z_target - self.abs_ref_z
+                final_ch0 = self.ch0_base + self.ch0_sign * dz_cmd
+                self.dde.set_channel(0, final_ch0)
+                print(f"Restore before FB ON: Z_target={z_target:.6f} → CH0={final_ch0:.6f}")
+            except Exception as e:
+                print(f"Warn: cannot preset CH0: {e}")
+
             self.dde.feed_para("enable", 0)
             self.feedback_enabled = True
             self.live_mode = True
             self.z_spin.setEnabled(False)
+            self.z_spin.setSuffix(" nm")
             self.status_label.setText("Status: Live mode, Feedback ON")
             self.status_label.setStyleSheet("QLabel { color: green; font-weight: bold; }")
-            print("Feedback enabled - returning to live mode")
+            print("FB ON")
 
-    def manual_update(self, value: float):
+    def manual_update(self, abs_target: float):
+        """Manual Z in ABSOLUTE nm when feedback is disabled."""
         if self.live_mode:
             return
-            
-        change = value - self.last_z
-        self.previous_z = self.last_z
-        
+
+        dz_cmd = abs_target - self.abs_ref_z
+        ch0_target = self.ch0_base + self.ch0_sign * dz_cmd
+
         try:
-            delta = self.base_z - value 
-            self.dde.set_channel(0, delta)
-            self.last_z = value
-            
-            if abs(change) >= self.change_threshold:
-                self.change_overlay.show_change(change, self.last_z)
-                if self.timestamps:
-                    current_time = self.timestamps[-1] if self.timestamps else 0
-                    self.add_change_marker(current_time, self.last_z, change)
-            
-            print(f"Manual Z update: target {value:.6f} nm (Δ {delta:+.6f} nm from base)")
+            self.dde.set_channel(0, ch0_target)
         except Exception as e:
-            print(f"Manual Z write error: {e}")
-            self.z_spin.setValue(self.last_z)
+            print(f"Manual write error: {e}")
+            return
+
+        change = abs_target - self.last_z
+        self.previous_z = self.last_z
+        self.last_z = abs_target
+
+        if abs(change) >= self.change_threshold:
+            self.change_overlay.show_change(change, self.last_z)
+            # marker ONLY on manual input
+            now = datetime.datetime.now()
+            elapsed = (now - now.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds()
+            self.add_change_marker(elapsed, self.last_z, change)
+
+        print(f"Manual ABS Z: target={abs_target:.6f} nm, dz_cmd={dz_cmd:+.6f} nm → CH0={ch0_target:.6f}")
 
     def poll(self):
         now = datetime.datetime.now()
@@ -388,12 +484,20 @@ class ZConstAcquisition(QtWidgets.QWidget):
                 self.last_z = z
                 if abs(change) >= self.change_threshold:
                     self.change_overlay.show_change(change, z)
-                    self.add_change_marker(elapsed, z, change)
+                    # no marker in live mode
+                # show absolute Z in live mode
+                self.z_spin.blockSignals(True)
                 self.z_spin.setValue(z)
+                self.z_spin.blockSignals(False)
             else:
-                z = self.last_z
+                # manual mode: read for plot only; do not touch spinbox
+                if self.driver:
+                    z = self.driver.read_scaled("Topo")
+                    self.last_z = z
+                else:
+                    z = self.last_z
         except Exception as e:
-            print(f"Polling error: {e}")
+            print(f"Poll error: {e}")
             z = self.last_z if hasattr(self, 'last_z') else 0.0
 
         self.timestamps.append(elapsed)
@@ -417,7 +521,7 @@ class ZConstAcquisition(QtWidgets.QWidget):
             self.z_history.pop(0)
             self.extra_history.pop(0)
 
-        # Update Z plot
+        # Update plots
         if self.timestamps:
             self.curve.setData(self.timestamps, self.z_history)
             x_min = max(0, elapsed - self.window_seconds)
@@ -451,84 +555,44 @@ class ZConstAcquisition(QtWidgets.QWidget):
         self.extra_curve.setData([], [])
         print("Trace cleared")
 
-
-    # NEW VISUAL ENHANCEMENT METHODS FROM NEW VERSION
     def change_font_scale(self, scale_text):
-        """Change font scale for accessibility"""
-        scale_map = {
-            "Small": 0.8,
-            "Normal": 1.0,
-            "Large": 1.3,
-            "Extra Large": 1.6
-        }
-        
+        scale_map = {"Small": 0.8, "Normal": 1.0, "Large": 1.3, "Extra Large": 1.6}
         self.font_scale = scale_map.get(scale_text, 1.0)
         self.apply_font_scaling()
-        
-        print(f"Font scale changed to: {scale_text} ({self.font_scale}x)")
-    
+        print(f"Font scale: {scale_text} ({self.font_scale}x)")
+
     def apply_font_scaling(self):
-        """Apply font scaling to all UI elements"""
         scaled_size = int(self.base_font_size * self.font_scale)
         font = QtGui.QFont()
         font.setPointSize(scaled_size)
-        
-        # Apply to main widget and all children
         self.setFont(font)
         for child in self.findChildren(QtWidgets.QWidget):
             if not isinstance(child, (pg.PlotWidget, pg.GraphicsLayoutWidget)):
                 child.setFont(font)
-        
-        # Scale plot labels and axes
         self.scale_plot_fonts()
-        
-        # Update overlay font size
         self.update_overlay_font_size()
-    
+
     def scale_plot_fonts(self):
-        """Scale fonts for plot elements"""
         label_font_size = max(8, int(10 * self.font_scale))
         tick_font_size = max(7, int(9 * self.font_scale))
-        
-        # Style for plot labels and ticks
         label_style = {'font-size': f'{label_font_size}pt', 'color': 'black'}
-        tick_style = {'font-size': f'{tick_font_size}pt', 'color': 'black'}
-        
-        # Update plot
         self.plot.setLabel('bottom', 'Time', units='s', **label_style)
         self.plot.setLabel('left', 'Z Position', units='nm', **label_style)
         self.plot.getAxis('bottom').setTickFont(QtGui.QFont('', tick_font_size))
         self.plot.getAxis('left').setTickFont(QtGui.QFont('', tick_font_size))
-    
+
     def update_overlay_font_size(self):
-        """Update the change overlay font size"""
         overlay_font_size = max(12, int(14 * self.font_scale))
         current_style = self.change_overlay.styleSheet()
-        
-        # Update font-size in the stylesheet
         import re
         new_style = re.sub(r'font-size:\s*\d+px', f'font-size: {overlay_font_size}px', current_style)
         self.change_overlay.setStyleSheet(new_style)
 
     def add_change_marker(self, time_stamp, z_value, change_value):
-        """Add a vertical line marker at the change event"""
         if abs(change_value) < self.change_threshold:
             return
-        
-        # Color based on change direction
-        if change_value > 0:
-            color = (46, 139, 87, 150)  # Sea green with transparency
-        else:
-            color = (220, 20, 60, 150)  # Crimson with transparency
-        
-        # Create vertical line
-        line = pg.InfiniteLine(
-            pos=time_stamp,
-            angle=90,
-            pen=pg.mkPen(color, width=1, style=QtCore.Qt.DashLine)
-        )
-        
-        # Create text label with the change value
+        color = (46, 139, 87, 150) if change_value > 0 else (220, 20, 60, 150)
+        line = pg.InfiniteLine(pos=time_stamp, angle=90, pen=pg.mkPen(color, width=1, style=QtCore.Qt.DashLine))
         marker_font_size = max(8, int(10 * self.font_scale))
         if abs(change_value) >= 1.0:
             change_text = f"{change_value:+.2f}"
@@ -536,57 +600,34 @@ class ZConstAcquisition(QtWidgets.QWidget):
             change_text = f"{change_value:+.3f}"
         else:
             change_text = f"{change_value:+.4f}"
-        
-        # Position text label slightly offset from line
-        text_item = pg.TextItem(
-            text=change_text,
-            color=color[:3],  # RGB only for text
-            anchor=(0.5, 1.1)  # Center horizontally, above the line
-        )
-        
-        # Set font size for the text item
+        text_item = pg.TextItem(text=change_text, color=color[:3], anchor=(0.5, 1.1))
         font = QtGui.QFont()
         font.setPointSize(marker_font_size)
         text_item.setFont(font)
-        
         text_item.setPos(time_stamp, z_value)
-        
-        # Add to plot
         self.plot.addItem(line)
         self.plot.addItem(text_item)
-        
-        # Store references for cleanup
         self.change_markers.append((line, text_item, time_stamp))
-    
+
     def cleanup_old_markers(self, current_time):
-        """Remove markers that are outside the current time window"""
         win = self.window_seconds
-        markers_to_remove = []
-        
+        to_remove = []
         for line, text, timestamp in self.change_markers:
             if current_time - timestamp > win:
                 self.plot.removeItem(line)
                 self.plot.removeItem(text)
-                markers_to_remove.append((line, text, timestamp))
-        
-        # Remove from list
-        for marker in markers_to_remove:
-            self.change_markers.remove(marker)
-    
+                to_remove.append((line, text, timestamp))
+        for m in to_remove:
+            self.change_markers.remove(m)
+
     def clear_markers_only(self):
-        """Clear only the change markers and overlay, keep trace data"""
-        # Clear existing markers
         for line, text, _ in self.change_markers:
             self.plot.removeItem(line)
             self.plot.removeItem(text)
         self.change_markers.clear()
-        
-        # Hide the overlay
         self.change_overlay.hide()
-        
-        print("Change markers and overlay cleared")
+        print("Markers cleared")
 
-    # KEEP OLD WORKING CLOSE EVENT
     def closeEvent(self, event):
         self.timer.stop()
         if hasattr(self, 'driver') and self.driver:
