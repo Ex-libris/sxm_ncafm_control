@@ -1,5 +1,31 @@
-# gui_accessibility_manager.py
-# Global accessibility manager for your application
+"""
+gui_accessibility_manager.py
+============================
+
+Global accessibility manager for the GUI of the SPM microscope control software.
+
+This module provides a centralized system for managing accessibility features
+across all Qt widgets and pyqtgraph components. It controls font scaling,
+dark mode, and high contrast mode, ensuring consistent readability and usability.
+
+Accessibility preferences are stored in a JSON file in the user home directory
+so they persist across sessions. This is especially useful in long-term
+scientific projects where different users or setups may require different
+visual configurations.
+
+Main features
+-------------
+- Adjustable font scaling with predefined levels.
+- High-contrast and dark mode display options.
+- Application of styles to Qt widgets, tables, and pyqtgraph plots.
+- Toolbar for interactive accessibility controls.
+- Keyboard shortcuts for quick toggling of settings.
+
+Target audience
+---------------
+Graduate students and researchers working with microscopy GUIs. Focus is on
+clarity, usability, and reproducibility, with minimal software abstraction.
+"""
 
 import json
 import os
@@ -8,7 +34,26 @@ import pyqtgraph as pg
 
 
 class AccessibilityManager(QtCore.QObject):
-    """Global manager for accessibility settings across the app"""
+    """
+    Manage accessibility settings across the application.
+
+    Provides methods to save, load, and apply accessibility preferences,
+    including font scaling, high-contrast mode, and dark mode.
+
+    Attributes
+    ----------
+    settings_changed : QtCore.pyqtSignal(dict)
+        Signal emitted when settings are updated.
+
+    settings_file : str
+        Path to the JSON file for persistent storage.
+
+    settings : dict
+        Current accessibility parameters.
+
+    scale_options : dict
+        Mapping of scale names to numeric font scale factors.
+    """
 
     settings_changed = QtCore.pyqtSignal(dict)
 
@@ -18,7 +63,7 @@ class AccessibilityManager(QtCore.QObject):
             os.path.expanduser("~"), ".scientific_gui_accessibility.json"
         )
 
-        # Defaults
+        # Default settings
         self.settings = {
             "font_scale": 1.0,
             "font_family": "default",
@@ -29,6 +74,7 @@ class AccessibilityManager(QtCore.QObject):
             "button_height": "default",
         }
 
+        # Preset scaling factors for fonts
         self.scale_options = {
             "Tiny": 0.7,
             "Small": 0.85,
@@ -43,6 +89,11 @@ class AccessibilityManager(QtCore.QObject):
 
     # ---------------- Settings I/O ----------------
     def load_settings(self):
+        """
+        Load accessibility settings from JSON file.
+
+        Keeps defaults if file is missing or corrupted.
+        """
         try:
             if os.path.exists(self.settings_file):
                 with open(self.settings_file, "r") as f:
@@ -52,6 +103,9 @@ class AccessibilityManager(QtCore.QObject):
             print(f"Could not load accessibility settings: {e}")
 
     def save_settings(self):
+        """
+        Save current accessibility settings to JSON file.
+        """
         try:
             with open(self.settings_file, "w") as f:
                 json.dump(self.settings, f, indent=2)
@@ -59,7 +113,20 @@ class AccessibilityManager(QtCore.QObject):
             print(f"Could not save accessibility settings: {e}")
 
     # ---------------- Setters ----------------
-    def set_font_scale(self, scale_name: str):
+    def set_font_scale(self, scale_name: str) -> bool:
+        """
+        Set font scaling factor.
+
+        Parameters
+        ----------
+        scale_name : str
+            One of the predefined scale options.
+
+        Returns
+        -------
+        bool
+            True if applied successfully, False if invalid name.
+        """
         if scale_name in self.scale_options:
             self.settings["font_scale"] = self.scale_options[scale_name]
             self.save_settings()
@@ -68,17 +135,46 @@ class AccessibilityManager(QtCore.QObject):
         return False
 
     def set_high_contrast(self, enabled: bool):
+        """
+        Enable or disable high contrast mode.
+
+        Parameters
+        ----------
+        enabled : bool
+            Whether high contrast mode should be enabled.
+        """
         self.settings["high_contrast"] = bool(enabled)
         self.save_settings()
         self.settings_changed.emit(self.settings)
 
     def set_dark_mode(self, enabled: bool):
+        """
+        Enable or disable dark mode.
+
+        Parameters
+        ----------
+        enabled : bool
+            Whether dark mode should be enabled.
+        """
         self.settings["dark_mode"] = bool(enabled)
         self.save_settings()
         self.settings_changed.emit(self.settings)
 
     # ---------------- Helpers ----------------
     def get_scaled_font(self, base_size: int = None) -> QtGui.QFont:
+        """
+        Return a QFont object scaled by current font factor.
+
+        Parameters
+        ----------
+        base_size : int, optional
+            Base font size. Uses application default if None.
+
+        Returns
+        -------
+        QtGui.QFont
+            Scaled font.
+        """
         app = QtWidgets.QApplication.instance()
         if base_size is None:
             base_size = app.font().pointSize() or 10
@@ -88,36 +184,52 @@ class AccessibilityManager(QtCore.QObject):
         return font
 
     def get_scaled_size(self, base_size: int) -> int:
+        """
+        Return a scaled integer size (e.g., for labels).
+
+        Parameters
+        ----------
+        base_size : int
+            Reference size.
+
+        Returns
+        -------
+        int
+            Scaled size, minimum of 1.
+        """
         return max(1, int(base_size * self.settings["font_scale"]))
 
     # ---------------- Apply to widgets ----------------
     def apply_to_widget(self, widget: QtWidgets.QWidget):
-        # Fonts
+        """
+        Apply current accessibility settings to a widget and its children.
+
+        Parameters
+        ----------
+        widget : QtWidgets.QWidget
+            Target widget.
+        """
+        # Update fonts
         widget.setFont(self.get_scaled_font())
         for child in widget.findChildren(QtWidgets.QWidget):
             if not isinstance(child, (pg.PlotWidget, pg.GraphicsLayoutWidget)):
                 child.setFont(self.get_scaled_font())
 
-        # Handle PlotWidgets
+        # Update plots
         for plot_widget in widget.findChildren(pg.PlotWidget):
             self.apply_to_plot(plot_widget)
 
-        # Handle PlotItems inside GraphicsLayoutWidget (ScopeTab case)
         for glw in widget.findChildren(pg.GraphicsLayoutWidget):
             for item in glw.ci.items.keys():
                 if isinstance(item, pg.PlotItem):
                     self.apply_to_plotitem(item)
-            # outer margin fix
-            if self.settings.get("dark_mode", False):
-                glw.setBackground("k")
-            else:
-                glw.setBackground("w")
+            glw.setBackground("k" if self.settings.get("dark_mode", False) else "w")
 
-        # Handle tables
+        # Update tables
         for table in widget.findChildren(QtWidgets.QTableWidget):
             self.apply_table_colors(table)
 
-        # Modes
+        # Apply global styles
         if self.settings.get("dark_mode", False):
             self.apply_dark_mode_style(widget)
         elif self.settings.get("high_contrast", False):
@@ -126,6 +238,14 @@ class AccessibilityManager(QtCore.QObject):
             self.clear_styles(widget)
 
     def apply_to_plot(self, plot_widget: pg.PlotWidget):
+        """
+        Apply accessibility settings to a pyqtgraph PlotWidget.
+
+        Parameters
+        ----------
+        plot_widget : pg.PlotWidget
+            Target plot widget.
+        """
         tick_font = QtGui.QFont()
         tick_font.setPointSize(self.get_scaled_size(9))
         plot_widget.getAxis("bottom").setTickFont(tick_font)
@@ -151,6 +271,14 @@ class AccessibilityManager(QtCore.QObject):
             plot_widget.showGrid(x=True, y=True, alpha=grid_alpha)
 
     def apply_to_plotitem(self, plot_item: pg.PlotItem):
+        """
+        Apply accessibility settings to a pyqtgraph PlotItem.
+
+        Parameters
+        ----------
+        plot_item : pg.PlotItem
+            Target plot item.
+        """
         tick_font = QtGui.QFont()
         tick_font.setPointSize(self.get_scaled_size(9))
         plot_item.getAxis("bottom").setTickFont(tick_font)
@@ -177,7 +305,14 @@ class AccessibilityManager(QtCore.QObject):
 
     # ---------------- Table helpers ----------------
     def apply_table_colors(self, table: QtWidgets.QTableWidget):
-        """Recolor 'Current' and 'New Value' columns for dark/light mode."""
+        """
+        Recolor 'Current' and 'New Value' columns according to mode.
+
+        Parameters
+        ----------
+        table : QtWidgets.QTableWidget
+            Table to update.
+        """
         if table.columnCount() == 0:
             return
 
@@ -195,12 +330,12 @@ class AccessibilityManager(QtCore.QObject):
             col_newvalue = None
 
         if self.settings.get("dark_mode", False):
-            current_bg = QtGui.QColor("#2a2a2a")  # dark gray
-            new_bg = QtGui.QColor("#665500")      # dark amber
+            current_bg = QtGui.QColor("#2a2a2a")
+            new_bg = QtGui.QColor("#665500")
             fg = QtGui.QColor("#f0f0f0")
         else:
-            current_bg = QtGui.QColor("#dcdcdc")  # light gray
-            new_bg = QtGui.QColor("#ffffcc")      # pale yellow
+            current_bg = QtGui.QColor("#dcdcdc")
+            new_bg = QtGui.QColor("#ffffcc")
             fg = QtGui.QColor("#000000")
 
         for r in range(table.rowCount()):
@@ -217,6 +352,14 @@ class AccessibilityManager(QtCore.QObject):
 
     # ---------------- Style helpers ----------------
     def apply_high_contrast_style(self, widget: QtWidgets.QWidget):
+        """
+        Apply a high contrast stylesheet to a widget.
+
+        Parameters
+        ----------
+        widget : QtWidgets.QWidget
+            Target widget.
+        """
         style = """
             QWidget { background-color: white; color: black; }
             QPushButton { background-color: #f0f0f0; border: 2px solid #333; padding: 6px; font-weight: bold; }
@@ -242,6 +385,14 @@ class AccessibilityManager(QtCore.QObject):
         widget.setStyleSheet(style)
 
     def apply_dark_mode_style(self, widget: QtWidgets.QWidget):
+        """
+        Apply a dark mode stylesheet to a widget.
+
+        Parameters
+        ----------
+        widget : QtWidgets.QWidget
+            Target widget.
+        """
         style = """
             QWidget { background-color: #121212; color: #f0f0f0; }
             QPushButton { background-color: #333; border: 1px solid #555; padding: 6px; }
@@ -278,6 +429,14 @@ class AccessibilityManager(QtCore.QObject):
         widget.setStyleSheet(style)
 
     def clear_styles(self, widget: QtWidgets.QWidget):
+        """
+        Restore original widget stylesheet.
+
+        Parameters
+        ----------
+        widget : QtWidgets.QWidget
+            Target widget.
+        """
         prev = widget.property("_a11y_prev_stylesheet")
         if prev is not None:
             widget.setStyleSheet(prev)
@@ -287,9 +446,21 @@ class AccessibilityManager(QtCore.QObject):
                 widget.setStyleSheet("")
 
 
-
 class AccessibilityToolbar(QtWidgets.QWidget):
-    """Toolbar with font scale and mode toggles"""
+    """
+    Toolbar with controls for accessibility settings.
+
+    Provides combo box for font scaling and toggle buttons for
+    high contrast and dark mode. Updates settings globally.
+
+    Parameters
+    ----------
+    accessibility_manager : AccessibilityManager
+        Reference to global manager handling the settings.
+
+    parent : QWidget, optional
+        Parent widget.
+    """
 
     def __init__(self, accessibility_manager: AccessibilityManager, parent=None):
         super().__init__(parent)
@@ -298,6 +469,7 @@ class AccessibilityToolbar(QtWidgets.QWidget):
         self.accessibility_manager.settings_changed.connect(self.update_from_settings)
 
     def setup_ui(self):
+        """Initialize toolbar layout and controls."""
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(5, 2, 5, 2)
 
@@ -305,7 +477,7 @@ class AccessibilityToolbar(QtWidgets.QWidget):
         acc_frame.setFrameStyle(QtWidgets.QFrame.StyledPanel)
         acc_layout = QtWidgets.QHBoxLayout(acc_frame)
 
-        # Font control
+        # Font scale selector
         acc_layout.addWidget(QtWidgets.QLabel("🔍 Font:"))
         self.font_combo = QtWidgets.QComboBox()
         self.font_combo.addItems(list(self.accessibility_manager.scale_options.keys()))
@@ -338,22 +510,27 @@ class AccessibilityToolbar(QtWidgets.QWidget):
         layout.addStretch()
 
     def on_font_scale_changed(self, scale_name: str):
+        """Handle change in font scale selection."""
         self.accessibility_manager.set_font_scale(scale_name)
         self.apply_to_current_window()
 
     def on_high_contrast_toggled(self, enabled: bool):
+        """Handle toggle of high contrast button."""
         self.accessibility_manager.set_high_contrast(enabled)
         self.apply_to_current_window()
 
     def on_dark_mode_toggled(self, enabled: bool):
+        """Handle toggle of dark mode button."""
         self.accessibility_manager.set_dark_mode(enabled)
         self.apply_to_current_window()
 
     def apply_to_current_window(self):
+        """Reapply accessibility settings to parent window."""
         if self.parent():
             self.accessibility_manager.apply_to_widget(self.parent())
 
     def update_from_settings(self, settings: dict):
+        """Update toolbar state from current settings."""
         for name, scale in self.accessibility_manager.scale_options.items():
             if abs(scale - settings["font_scale"]) < 0.01:
                 self.font_combo.setCurrentText(name)
@@ -363,6 +540,13 @@ class AccessibilityToolbar(QtWidgets.QWidget):
 
 
 class AccessibleWidget(QtWidgets.QWidget):
+    """
+    Base widget class with automatic accessibility support.
+
+    Connects to the global AccessibilityManager and reapplies settings
+    on changes or when the widget is shown.
+    """
+
     def __init__(self, parent=None):
         super().__init__(parent)
         app = QtWidgets.QApplication.instance()
@@ -372,21 +556,49 @@ class AccessibleWidget(QtWidgets.QWidget):
         self.accessibility_manager.settings_changed.connect(self.on_accessibility_changed)
 
     def on_accessibility_changed(self, settings: dict):
+        """Reapply accessibility settings when updated globally."""
         self.accessibility_manager.apply_to_widget(self)
 
     def add_accessibility_toolbar(self, layout: QtWidgets.QLayout):
+        """
+        Add toolbar for accessibility controls to a given layout.
+
+        Parameters
+        ----------
+        layout : QtWidgets.QLayout
+            Target layout to add toolbar to.
+
+        Returns
+        -------
+        AccessibilityToolbar
+            The created toolbar instance.
+        """
         toolbar = AccessibilityToolbar(self.accessibility_manager, self)
         layout.addWidget(toolbar)
         return toolbar
 
     def showEvent(self, event):
+        """Apply accessibility settings after widget is shown."""
         super().showEvent(event)
         QtCore.QTimer.singleShot(
             50, lambda: self.accessibility_manager.apply_to_widget(self)
         )
 
 
-def make_accessible(widget: QtWidgets.QWidget):
+def make_accessible(widget: QtWidgets.QWidget) -> AccessibilityManager:
+    """
+    Apply accessibility settings to an existing widget.
+
+    Parameters
+    ----------
+    widget : QtWidgets.QWidget
+        Target widget.
+
+    Returns
+    -------
+    AccessibilityManager
+        Reference to the global manager.
+    """
     app = QtWidgets.QApplication.instance()
     if not hasattr(app, "accessibility_manager"):
         app.accessibility_manager = AccessibilityManager()
@@ -397,12 +609,20 @@ def make_accessible(widget: QtWidgets.QWidget):
 
 
 class AccessibilityShortcuts(QtWidgets.QWidget):
+    """
+    Global keyboard shortcuts for accessibility control.
+
+    Provides key sequences for increasing/decreasing font,
+    resetting font scale, and toggling high contrast or dark mode.
+    """
+
     def __init__(self, accessibility_manager: AccessibilityManager):
         super().__init__()
         self.accessibility_manager = accessibility_manager
         self.setup_shortcuts()
 
     def setup_shortcuts(self):
+        """Initialize all shortcuts and connect them to actions."""
         self.shortcut_increase = QtWidgets.QShortcut(
             QtGui.QKeySequence("Ctrl++"), self
         )
@@ -423,6 +643,7 @@ class AccessibilityShortcuts(QtWidgets.QWidget):
         self.shortcut_dark.activated.connect(self.toggle_dark_mode)
 
     def increase_font(self):
+        """Increase font size to the next larger scale."""
         current = self.accessibility_manager.settings["font_scale"]
         scales = sorted(self.accessibility_manager.scale_options.values())
         for s in scales:
@@ -433,6 +654,7 @@ class AccessibilityShortcuts(QtWidgets.QWidget):
                         return
 
     def decrease_font(self):
+        """Decrease font size to the next smaller scale."""
         current = self.accessibility_manager.settings["font_scale"]
         scales = sorted(
             self.accessibility_manager.scale_options.values(), reverse=True
@@ -445,18 +667,34 @@ class AccessibilityShortcuts(QtWidgets.QWidget):
                         return
 
     def reset_font(self):
+        """Reset font scale to 'Normal'."""
         self.accessibility_manager.set_font_scale("Normal")
 
     def toggle_high_contrast(self):
+        """Toggle high contrast mode."""
         cur = self.accessibility_manager.settings["high_contrast"]
         self.accessibility_manager.set_high_contrast(not cur)
 
     def toggle_dark_mode(self):
+        """Toggle dark mode."""
         cur = self.accessibility_manager.settings["dark_mode"]
         self.accessibility_manager.set_dark_mode(not cur)
 
 
 def setup_global_accessibility(app: QtWidgets.QApplication) -> AccessibilityManager:
+    """
+    Initialize global accessibility manager and shortcuts for an application.
+
+    Parameters
+    ----------
+    app : QtWidgets.QApplication
+        Application instance.
+
+    Returns
+    -------
+    AccessibilityManager
+        Global accessibility manager.
+    """
     if not hasattr(app, "accessibility_manager"):
         app.accessibility_manager = AccessibilityManager()
         app.accessibility_shortcuts = AccessibilityShortcuts(app.accessibility_manager)
@@ -464,6 +702,19 @@ def setup_global_accessibility(app: QtWidgets.QApplication) -> AccessibilityMana
 
 
 def add_accessibility_to_existing_widget(widget: QtWidgets.QWidget) -> AccessibilityManager:
+    """
+    Add accessibility support to an already existing widget.
+
+    Parameters
+    ----------
+    widget : QtWidgets.QWidget
+        Target widget.
+
+    Returns
+    -------
+    AccessibilityManager
+        Global manager reference.
+    """
     app = QtWidgets.QApplication.instance()
     if not hasattr(app, "accessibility_manager"):
         setup_global_accessibility(app)

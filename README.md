@@ -86,9 +86,9 @@ This tab gives direct control of the piezo absolute position. You can enable or 
 ![constant_height](screenshots/constant_height.gif)
 
 ### Scope Tab
-Real-time channel monitoring with direct driver communication. You can track in a given channel the effects of triggering step-tests. In this example, you can see the effects of a step-test for the Amplitude reference setpoint on the QPlusAmplitude signal. 
+Real-time channel monitoring with direct driver communication. You can track in a given channel the effects of triggering step-tests. In this example, you can see the effects of a step-test on the frequency of oscillation of a Qplus sensor and its effects on the frequency shift (df) and phase calculated by the PLL. 
 
-![Scope Tab](screenshots/scope_tab.png)
+![Scope Tab](screenshots/pll_state_0.png)
 
 ### Step Test Tab
 Square step tests for ncAFM channels parameters. In this tab, you can define a train of step changes in a given parameter for the different PIDs controlling the ncAFM loop.
@@ -141,10 +141,10 @@ sxm_ncafm_control/
 └── gui/                                    # GUI components
     ├── params_tab.py                       # Parameter adjustment
     ├── step_test_tab.py                    # Square wave testing
-    ├── suggested_tab.py                    # Setup suggestions
-    └── scope_tab.py                        # Real-time monitoring
-    └── gui_accessibility_manager.py        # Real-time monitoring
+    ├── suggested_tab.py                    # Setup suggestions based on some numbers suggested by our manual.
+    └── scope_tab.py                        # Scope representing the maximum amount of points delivered by the driver.
+    └── gui_accessibility_manager.py        # Contrast management and dark mode
     └── main_window.py                      # Handles the connections between all the tabs and the GUI
     └── gui_accessibility_manager.py        # Helper to improve readibility of the whole GUI
-    └── z_const_acquisition.py              # Control the z position of your piezo.
+    └── z_const_acquisition.py              # Control the z position of your piezo. Useful to get into ncAFM constant height mode.
 ```
