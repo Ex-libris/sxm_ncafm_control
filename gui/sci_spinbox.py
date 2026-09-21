@@ -15,9 +15,11 @@ _NUMBER = re.compile(r"^[+-]?(\d+\.?\d*|\.\d*)?([eE][+-]?\d*)?$")     # a number
 
 
 class SciDoubleSpinBox(QtWidgets.QDoubleSpinBox):
-    def __init__(self, parent=None, sci_above: float = 1e6, sci_below: float = 1e-3, sig: int = 15):
+    def __init__(self, parent=None, sci_above: float = 1e6, sci_below: float = 1e-3, sig: int = 15, plain: bool = False):
+        """``plain=True``: ordinary fixed-decimals display, never e-notation (frequencies such as f0 = 25132.457 Hz).
+        Scientific notation is still accepted as input."""
         super().__init__(parent)
-        self.sci_above, self.sci_below, self.sig = sci_above, sci_below, sig
+        self.sci_above, self.sci_below, self.sig, self.plain = sci_above, sci_below, sig, plain
 
     def _bare(self, text: str) -> str:
         t = text.strip()
@@ -29,12 +31,14 @@ class SciDoubleSpinBox(QtWidgets.QDoubleSpinBox):
         return t.strip().replace(",", ".")
 
     def textFromValue(self, value: float) -> str:
+        if self.plain:
+            return super().textFromValue(value)
         return format_number(value, self.sig, self.sci_above, self.sci_below)
 
     def stepBy(self, steps: int):
         """Arrow keys / buttons: a fixed step of 1 means nothing at 2e9, so values shown in e-notation move by 10 %."""
         v = self.value()
-        if v != 0 and (abs(v) >= self.sci_above or abs(v) < self.sci_below):
+        if not self.plain and v != 0 and (abs(v) >= self.sci_above or abs(v) < self.sci_below):
             self.setValue(v * 1.1 ** steps)
         else:
             super().stepBy(steps)

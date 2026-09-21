@@ -108,11 +108,48 @@ class SciSpin(unittest.TestCase):
             self.assertEqual(s.value(), v)
 
 
+class PlainFrequencyFields(unittest.TestCase):
+    """f0 is in Hz with decimals (25132.457): fixed decimals, never e-notation, no rounding to 0.1 Hz."""
+
+    def test_plain_mode_shows_fixed_decimals_and_never_e_notation(self):
+        s = SciDoubleSpinBox(plain=True)
+        s.setDecimals(3)
+        s.setRange(1.0, 1e9)
+        s.setSuffix(" Hz")
+        for v, text in ((25000.0, "25000.000 Hz"), (25132.457, "25132.457 Hz"), (2.5e6, "2500000.000 Hz")):
+            s.setValue(v)
+            self.assertEqual(s.text(), text)
+        s.lineEdit().setText("2.5e4 Hz")                                   # e-notation is still accepted as input
+        s.interpretText()
+        self.assertEqual(s.value(), 25000.0)
+        s.setSingleStep(100.0)
+        s.stepBy(1)
+        self.assertEqual(s.value(), 25100.0)                                # ordinary stepping, not +-10 %
+
+    def test_tuning_tab_f0_keeps_mhz_resolution(self):
+        tab = T.TuningTab(FakeInstrument(), FakeInstrument())
+        self.assertEqual(tab.f0_spin.text(), "25000.000 Hz")
+        tab.f0_spin.lineEdit().setText("25132.457 Hz")
+        tab.f0_spin.interpretText()
+        self.assertEqual(tab.f0_spin.value(), 25132.457)                    # was rounded to 25132.5 with one decimal
+        self.assertEqual(tab.f0_spin.text(), "25132.457 Hz")
+        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("afl"))
+        self.assertIn("f0=25132.457 Hz", tab.start_label.text())            # the label does not round it either
+
+    def test_suggested_setup_f0(self):
+        from sxm_ncafm_control.gui.suggested_tab import SuggestedTab
+        tab = SuggestedTab(FakeInstrument(), None)
+        tab.f0_val.lineEdit().setText("32768.123 Hz")
+        tab.f0_val.interpretText()
+        self.assertEqual(tab.f0_val.value(), 32768.123)
+        self.assertEqual(tab.f0_val.text(), "32768.123 Hz")
+
+
 class FieldsInTheTabs(unittest.TestCase):
     def test_tuning_tab_gain_fields(self):
         tab = T.TuningTab(FakeInstrument(), FakeInstrument())
         self.assertEqual((tab.kp_spin.text(), tab.ki_spin.text()), ("-100", "-1e4"))
-        self.assertEqual(tab.base_spin.text(), "25000")
+        self.assertEqual(tab.base_spin.text(), "25000.0000")                # a frequency: fixed decimals
         tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("afl"))
         self.assertEqual((tab.kp_spin.text(), tab.ki_spin.text()), ("2e8", "2e4"))
         tab.gain_combo.setCurrentIndex(tab.gain_combo.findData(0.1))

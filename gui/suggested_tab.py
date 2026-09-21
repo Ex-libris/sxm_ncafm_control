@@ -91,9 +91,9 @@ class SuggestedTab(QtWidgets.QWidget):
         self.q_val.setDecimals(1)
         self.q_val.setValue(30000.0)
 
-        self.f0_val = SciDoubleSpinBox()
+        self.f0_val = SciDoubleSpinBox(plain=True)     # frequency in Hz with mHz resolution: fixed decimals, never e-notation
         self.f0_val.setRange(1.0, 1e9)
-        self.f0_val.setDecimals(1)
+        self.f0_val.setDecimals(3)
         self.f0_val.setValue(300000.0)
         self.f0_val.setSuffix(" Hz")
 

@@ -540,9 +540,12 @@ class TuningTab(QtWidgets.QWidget):
         self._update_enabled()
 
     # ------------------------------------------------------------------ construction
-    def _spin(self, lo, hi, val, dec=3, step=None, suffix="", sci_above=1e6):
-        """Number field: accepts scientific notation ('2.5e8') and shows large / small values that way."""
-        s = SciDoubleSpinBox(sci_above=sci_above)
+    def _spin(self, lo, hi, val, dec=3, step=None, suffix="", sci_above=1e6, plain=False):
+        """
+        Number field: accepts scientific notation ('2.5e8') and shows large / small values that way.
+        ``plain=True`` keeps fixed decimals and never switches (frequencies: f0 = 25132.457 Hz).
+        """
+        s = SciDoubleSpinBox(sci_above=sci_above, plain=plain)
         s.setDecimals(dec)
         s.setRange(lo, hi)
         s.setValue(val)
@@ -575,7 +578,7 @@ class TuningTab(QtWidgets.QWidget):
         self.channels_label = QtWidgets.QLabel()
         self.channels_label.setWordWrap(True)
         f.addRow("Records:", self.channels_label)
-        self.base_spin = self._spin(-1e12, 1e12, 25000.0, 4)
+        self.base_spin = self._spin(-1e12, 1e12, 25000.0, 4, plain=True)     # `use` frequency in Hz (or Ref): fixed decimals
         self.base_label = QtWidgets.QLabel()
         f.addRow(self.base_label, self.base_spin)
         self.step_spin = self._spin(0.001, 1e6, 1.0, 3)
@@ -595,7 +598,7 @@ class TuningTab(QtWidgets.QWidget):
         self.tau_spin = self._spin(1.0, 2000.0, 10.0, 1, 1.0, " ms")
         self.tau_label = QtWidgets.QLabel("Amplitude Tau:")
         f.addRow(self.tau_label, self.tau_spin)
-        self.f0_spin = self._spin(1.0, 1e7, 25000.0, 1, 100.0, " Hz")
+        self.f0_spin = self._spin(1.0, 1e7, 25000.0, 3, 100.0, " Hz", plain=True)     # Hz with mHz resolution, e.g. 25132.457
         self.q_spin = self._spin(1.0, 1e7, 25000.0, 0, 1000.0)
         f.addRow("f0 (from the sweep):", self.f0_spin)
         f.addRow("Q (from the sweep):", self.q_spin)
@@ -853,7 +856,7 @@ class TuningTab(QtWidgets.QWidget):
         except ValueError:
             self.start_label.setText("Set Q and f0 (from the sweep) to get the manual's start values.")
             return
-        self.start_label.setText(f"Manual start for Q={self.q_spin.value():.0f}, f0={self.f0_spin.value():.0f} Hz, "
+        self.start_label.setText(f"Manual start for Q={self.q_spin.value():.0f}, f0={self.f0_spin.value():.10g} Hz, "
                                  f"+-{self.gain_combo.currentData():g} V:<br>Kp = {format_number(s.kp, 4, 1e4)}, "
                                  f"Ki = {format_number(s.ki, 4, 1e4)}, "
                                  f"Tau = {s.tau_s * 1e3:.3g} ms<br>Ring-down Q/(pi f0) = {s.ring_down_s:.2f} s "
