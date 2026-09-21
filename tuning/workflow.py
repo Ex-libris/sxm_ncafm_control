@@ -62,6 +62,40 @@ AFL = LoopDef("afl", "Amplitude feedback (QPlusAmpl / Drive)", y_channel="QPlusA
               align_lead_s=0.03, typical_ratio=1e-4)
 LOOPS = {"pll": PLL, "afl": AFL}
 
+
+# ---------------------------------------------------------------------------
+# amplitude-loop starting values (manual, pp. 6-7)
+# ---------------------------------------------------------------------------
+AFL_OUTPUT_GAINS = (0.1, 1.0, 10.0)     # DNC 'Output Gain' ranges, +-V peak
+
+
+@dataclass(frozen=True)
+class AflStart:
+    kp: float
+    ki: float
+    tau_s: float            # AFL 'Tau' low-pass, Q / (100 f0)
+    ring_down_s: float      # amplitude ring-down time of the resonator, Q / (pi f0)
+    hold_s: float           # suggested step hold
+    settle_s: float         # suggested settle time before recording
+
+
+def afl_start_values(q: float, f0: float, output_gain_v: float = 1.0) -> AflStart:
+    """
+    The manual's starting point for the amplitude loop: Ki ~ 5e8/Q and Kp ~ 1e4*Ki at +-1 V output gain,
+    both x10 for each range *lower* (+-1 V -> +-0.1 V, stated in the manual). +-10 V is the same rule
+    extrapolated (/10); the manual does not state it. Tau = Q / (100 f0).
+
+    ``hold_s`` / ``settle_s`` are this app's heuristic, not the manual's: 3x / 5x the ring-down time
+    Q/(pi f0), rounded to 0.5 s, so that a slow (high-Q) sensor can settle between steps.
+    """
+    if q <= 0 or f0 <= 0 or output_gain_v <= 0:
+        raise ValueError("Q, f0 and the output gain must be positive")
+    ki = 5e8 / q / output_gain_v
+    ring = q / (math.pi * f0)
+    return AflStart(kp=1e4 * ki, ki=ki, tau_s=q / (100.0 * f0), ring_down_s=ring,
+                    hold_s=min(10.0, max(1.0, round(3.0 * ring * 2) / 2)),
+                    settle_s=min(30.0, max(2.0, round(5.0 * ring * 2) / 2)))
+
 _ALIASES = {"df": "df", "phase": "Phase", "qplusampl": "QPlusAmpl", "qplusamplitude": "QPlusAmpl", "drive": "Drive"}
 
 
@@ -479,10 +513,13 @@ def advise(res: StepTestResult, verdict: Verdict, target: Target) -> List[Sugges
         out.append(Suggestion("change_ki", kp, ki * 1.7, "Slow tail: raise Ki at the same Kp so the residual is removed faster."))
         out.append(Suggestion("scale_both", kp * 1.4, ki * 1.4, "Or raise both together, keeping the Ki:Kp ratio."))
     elif c == "too_slow":
-        f = 1.25
+        f, need, hi = 1.25, math.nan, (10.0 if res.loop == "afl" else 2.5)     # the amplitude loop is often decades off
         if res.primary is not None and not math.isnan(res.primary.rise_time) and target.rise_max > 0:
-            f = float(np.clip(res.primary.rise_time / target.rise_max, 1.25, 2.5))
-        out.append(Suggestion("scale_both", kp * f, ki * f, f"Clean but too slow: raise both by x{f:.2f}, keeping the ratio (the manual's way to a faster loop)."))
+            need = res.primary.rise_time / target.rise_max
+            f = float(np.clip(need, 1.25, hi))
+        more = f" About x{need:.0f} is needed: a Scale scan gets there faster." if need > hi else ""
+        out.append(Suggestion("scale_both", kp * f, ki * f,
+                              f"Clean but too slow: raise both by x{f:.2f}, keeping the ratio (the manual's way to a faster loop)." + more))
     else:  # good
         if verdict.fast_margin >= 2.0:
             out.append(Suggestion("scale_both", kp * 0.7, ki * 0.7,
@@ -504,6 +541,14 @@ class SafetyLimits:
     phase_limit_deg: float = 75.0       # PLL: |Phase| beyond this means the lock is gone
     amplitude_floor: float = 0.3        # amplitude loop: amplitude below this fraction of Ref is a collapse
     amplitude_ceiling: float = 3.0
+
+
+def gain_within_limits(kp: float, ki: float, reference: Tuple[float, float], limits: SafetyLimits) -> bool:
+    """Both gains within ``[min, max]_gain_factor`` times the known-good reference pair."""
+    lo, hi = limits.min_gain_factor, limits.max_gain_factor
+    fk = abs(kp / reference[0])
+    fi = abs(ki / reference[1])
+    return lo * (1 - 1e-9) <= fk <= hi * (1 + 1e-9) and lo * (1 - 1e-9) <= fi <= hi * (1 + 1e-9)
 
 
 def runaway_reason(plan: StepTestPlan, limits: SafetyLimits, channels: Dict[str, np.ndarray],
@@ -563,6 +608,12 @@ class GridSpec:
     def shape(self) -> Tuple[int, int]:
         return len(self.kp_exps), len(self.ki_exps)
 
+    @classmethod
+    def scan(cls, kp0: float, ki0: float, factor: float, n_down: int, n_up: int) -> "GridSpec":
+        """Grid whose diagonal is a scale scan: Kp and Ki move together, so Ki:Kp stays what the baseline has."""
+        exps = tuple(range(-int(n_down), int(n_up) + 1))
+        return cls(kp0=kp0, ki0=ki0, factor=factor, kp_exps=exps, ki_exps=exps)
+
     def refine(self, i: int, j: int, factor: Optional[float] = None) -> "GridSpec":
         """A finer 3x3 grid (step factor**0.5 by default) centred on cell (i, j)."""
         return GridSpec(kp0=self.kp(i), ki0=self.ki(j), factor=factor or math.sqrt(self.factor),
@@ -588,9 +639,13 @@ class ScreeningMap:
     """
 
     def __init__(self, grid: GridSpec, target: Target, limits: SafetyLimits = SafetyLimits(),
-                 reference: Optional[Tuple[float, float]] = None):
-        """``reference`` = the known-good baseline the safety limits are measured against (default: the grid centre)."""
+                 reference: Optional[Tuple[float, float]] = None, ratio_locked: bool = False):
+        """
+        ``reference`` = the known-good baseline the safety limits are measured against (default: the grid centre).
+        ``ratio_locked`` = only the diagonal cells (equal Kp and Ki exponents) exist: a scale scan at the baseline's Ki:Kp.
+        """
         self.grid, self.target, self.limits = grid, target, limits
+        self.ratio_locked = ratio_locked
         self.reference = reference or (grid.kp0, grid.ki0)
         self.results: Dict[Tuple[int, int], StepTestResult] = {}
         self.skipped: Dict[Tuple[int, int], str] = {}
@@ -601,14 +656,14 @@ class ScreeningMap:
 
     # -- ordering and safety --------------------------------------------------------------
     def _in_limits(self, i, j) -> bool:
-        lo, hi = self.limits.min_gain_factor, self.limits.max_gain_factor
-        fk = abs(self.grid.kp(i) / self.reference[0])
-        fi = abs(self.grid.ki(j) / self.reference[1])
-        return lo * (1 - 1e-9) <= fk <= hi * (1 + 1e-9) and lo * (1 - 1e-9) <= fi <= hi * (1 + 1e-9)
+        return gain_within_limits(self.grid.kp(i), self.grid.ki(j), self.reference, self.limits)
 
     def cells(self) -> List[Tuple[int, int]]:
         nk, ni = self.grid.shape
-        return [(i, j) for i in range(nk) for j in range(ni)]
+        out = [(i, j) for i in range(nk) for j in range(ni)]
+        if self.ratio_locked:
+            out = [(i, j) for i, j in out if self.grid.kp_exps[i] == self.grid.ki_exps[j]]
+        return out
 
     def order(self) -> List[Tuple[int, int]]:
         """Cells nearest the baseline first (in log-gain distance); ties: lower gains first (safer)."""
@@ -751,7 +806,8 @@ class ScreeningMap:
 
     def summary(self) -> str:
         cat = self.category_grid()
-        counts = {k: int(np.sum(cat == k)) for k in list(CATEGORIES) + ["skipped", "untested"]}
+        cells = self.cells()
+        counts = {k: sum(1 for c in cells if cat[c] == k) for k in list(CATEGORIES) + ["skipped", "untested"]}
         lines = ["Map: " + ", ".join(f"{counts[k]} {CATEGORY_LABEL.get(k, k)}" for k in counts if counts[k])]
         isl = self.islands()
         if not isl:

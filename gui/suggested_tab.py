@@ -6,6 +6,7 @@ from PyQt5 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 
 from ..common import PARAMS_BASE, confirm_high_voltage
+from ..tuning.workflow import AFL_OUTPUT_GAINS, afl_start_values
 
 
 def lorentzian_amp(f, A0, f0, Q):
@@ -110,6 +111,15 @@ class SuggestedTab(QtWidgets.QWidget):
         form.addWidget(QtWidgets.QLabel("PLL bandwidth (Hz):"), r, 0)
         form.addWidget(self.bw_pll, r, 1)
         r += 1
+        self.out_gain = QtWidgets.QComboBox()
+        for v in AFL_OUTPUT_GAINS:
+            self.out_gain.addItem(f"±{v:g} V", v)
+        self.out_gain.setCurrentIndex(AFL_OUTPUT_GAINS.index(1.0))
+        self.out_gain.setToolTip("DNC window > Output Gain, as set in SXM. The amplitude Ki and Kp scale with it:\n"
+                                 "x10 for each range lower (manual: ±1 V -> ±0.1 V). ±10 V (/10) is the same rule extrapolated.")
+        form.addWidget(QtWidgets.QLabel("AFL output gain (DNC):"), r, 0)
+        form.addWidget(self.out_gain, r, 1)
+        r += 1
 
         # Outputs
         sep = QtWidgets.QFrame()
@@ -209,6 +219,7 @@ class SuggestedTab(QtWidgets.QWidget):
         self.btn_recalc.clicked.connect(self._recalc)
         for w in (self.q_val, self.f0_val, self.bw_pll):
             w.valueChanged.connect(self._recalc)
+        self.out_gain.currentIndexChanged.connect(self._recalc)
         self.btn_stage.clicked.connect(self._stage)
         self.btn_send.clicked.connect(self._send)
         self.btn_load_spec.clicked.connect(self._load_spectrum)
@@ -241,8 +252,8 @@ class SuggestedTab(QtWidgets.QWidget):
         BW_PLL = max(float(self.bw_pll.value()), 1e-9)
 
         # Rules of thumb (see the note in the tab). Ki/Kp are in SXM units.
-        Ki = 5e8 / Q
-        Kp = 1e4 * Ki
+        start = afl_start_values(Q, f0, float(self.out_gain.currentData()))      # manual: Ki = 5e8/Q at +-1 V, x10 per range lower
+        Ki, Kp = start.ki, start.kp
         tau_amp_ms = 10.0 * Q / f0                 # manual: Tau = Q/(100 f0) s = 10 Q/f0 ms; grows with Q
         tau_pll_ms = 1.0 / (10.0 * BW_PLL) * 1000.0
 

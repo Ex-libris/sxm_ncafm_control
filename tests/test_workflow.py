@@ -517,5 +517,113 @@ class EndToEndScreening(unittest.TestCase):
         self.assertLess(abs(s[0].ki), abs(r.ki))
 
 
+class AmplitudeLoopSearch(unittest.TestCase):
+    """The amplitude loop spans decades of gain: manual start values, output gain, scale scan, wide limits."""
+
+    def test_manual_start_values_at_1v(self):
+        s = W.afl_start_values(q=25000.0, f0=25000.0, output_gain_v=1.0)
+        self.assertAlmostEqual(s.ki, 2e4)
+        self.assertAlmostEqual(s.kp, 2e8)
+        self.assertAlmostEqual(s.tau_s, 0.01)                                   # Q / (100 f0) = 10 ms
+        self.assertAlmostEqual(s.ring_down_s, 1.0 / math.pi)                    # Q / (pi f0)
+
+    def test_each_lower_output_gain_range_needs_ten_times_larger_gains(self):
+        base = W.afl_start_values(25000.0, 25000.0, 1.0)
+        low = W.afl_start_values(25000.0, 25000.0, 0.1)
+        high = W.afl_start_values(25000.0, 25000.0, 10.0)
+        self.assertAlmostEqual(low.ki / base.ki, 10.0)
+        self.assertAlmostEqual(low.kp / base.kp, 10.0)
+        self.assertAlmostEqual(high.ki / base.ki, 0.1)
+        self.assertAlmostEqual(low.kp / low.ki, 1e4)                            # the ratio never changes
+
+    def test_start_values_span_many_decades_with_q_and_gain(self):
+        ks = [W.afl_start_values(q, 25000.0, g).kp for q in (2e3, 1e5) for g in (10.0, 1.0, 0.1)]
+        self.assertGreater(max(ks) / min(ks), 1e3)
+
+    def test_test_timing_follows_the_ring_down_and_is_bounded(self):
+        slow = W.afl_start_values(1e5, 25000.0)                                 # ring-down 1.27 s
+        self.assertEqual(slow.hold_s, 4.0)
+        self.assertEqual(slow.settle_s, 6.5)
+        fast = W.afl_start_values(2000.0, 25000.0)
+        self.assertEqual((fast.hold_s, fast.settle_s), (1.0, 2.0))
+        huge = W.afl_start_values(1e9, 1000.0)
+        self.assertEqual((huge.hold_s, huge.settle_s), (10.0, 30.0))
+
+    def test_invalid_inputs_are_rejected(self):
+        for args in ((0, 25000.0, 1.0), (25000.0, 0, 1.0), (25000.0, 25000.0, 0)):
+            with self.assertRaises(ValueError):
+                W.afl_start_values(*args)
+
+    LIM = W.SafetyLimits(max_gain_factor=1000.0, min_gain_factor=1e-3)
+
+    def scan_map(self):
+        g = W.GridSpec.scan(2e8, 2e4, 10.0, 3, 3)
+        return g, W.ScreeningMap(g, TARGET, self.LIM, reference=(2e8, 2e4), ratio_locked=True)
+
+    def test_scale_scan_moves_both_gains_together(self):
+        g, m = self.scan_map()
+        self.assertEqual(g.kp_exps, tuple(range(-3, 4)))
+        self.assertEqual(len(m.cells()), 7)
+        for i, j in m.cells():
+            self.assertAlmostEqual(g.ki(j) / g.kp(i), 1e-4)                     # Ki:Kp is the baseline's
+        self.assertEqual(m.order()[0], (3, 3))                                  # the baseline first
+        self.assertIn("7 untested", m.summary())
+
+    def test_scale_scan_does_not_go_on_after_a_lost_cell(self):
+        g, m = self.scan_map()
+        m.results[(3, 3)] = _cat_result("good", g.kp(3), g.ki(3))
+        m.results[(4, 4)] = _cat_result("lost", g.kp(4), g.ki(4))               # one decade up loses the loop
+        visited = []
+        while True:
+            c = m.next_cell()
+            if c is None:
+                break
+            visited.append(c)
+            m.results[c] = _cat_result("too_slow", g.kp(c[0]), g.ki(c[1]))
+        self.assertEqual(sorted(visited), [(0, 0), (1, 1), (2, 2)])
+        self.assertEqual(sorted(m.skipped), [(5, 5), (6, 6)])
+
+    def test_the_scan_is_bounded_by_the_gain_range(self):
+        g = W.GridSpec.scan(2e8, 2e4, 10.0, 4, 4)
+        m = W.ScreeningMap(g, TARGET, self.LIM, reference=(2e8, 2e4), ratio_locked=True)
+        seen = []
+        while True:
+            c = m.next_cell()
+            if c is None:
+                break
+            seen.append(c)
+            m.results[c] = _cat_result("too_slow", g.kp(c[0]), g.ki(c[1]))
+        self.assertEqual(len(seen), 7)                                          # +-4 decades asked, +-3 allowed
+        self.assertEqual(sorted(m.skipped), [(0, 0), (8, 8)])
+
+    def test_refining_a_scan_gives_a_full_finer_map_with_the_same_limits(self):
+        g, m = self.scan_map()
+        sub = m.refined((3, 3))
+        self.assertFalse(sub.ratio_locked)
+        self.assertEqual(len(sub.cells()), 9)
+        self.assertAlmostEqual(sub.grid.factor, math.sqrt(10.0))
+        self.assertIs(sub.limits, m.limits)
+        self.assertEqual(sub.reference, m.reference)
+
+    def test_gain_range_check(self):
+        ref = (2e8, 2e4)
+        self.assertTrue(W.gain_within_limits(2e11, 2e7, ref, self.LIM))         # exactly x1000 both ways
+        self.assertFalse(W.gain_within_limits(2e12, 2e7, ref, self.LIM))
+        self.assertFalse(W.gain_within_limits(2e8, 2.0, ref, self.LIM))
+
+    def test_amplitude_loop_may_be_scaled_by_a_decade_and_points_to_the_scan(self):
+        t = W.Target(rise_max=0.05, overshoot_max=0.10)
+        r = _result(kp=2e8, ki=2e4, primary=dict(rise_time=0.5))                # 10x too slow
+        r.loop = "afl"
+        s = W.advise(r, W.classify(r, t), t)
+        self.assertEqual(s[0].kind, "scale_both")
+        self.assertAlmostEqual(s[0].kp / r.kp, 10.0)
+        self.assertNotIn("Scale scan", s[0].why)
+        r.primary = _metrics(rise_time=2.0)                                     # 40x too slow: more than one step
+        s = W.advise(r, W.classify(r, t), t)
+        self.assertAlmostEqual(s[0].kp / r.kp, 10.0)
+        self.assertIn("Scale scan", s[0].why)
+
+
 if __name__ == "__main__":
     unittest.main()

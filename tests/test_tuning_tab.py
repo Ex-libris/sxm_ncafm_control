@@ -86,8 +86,8 @@ class Offline(unittest.TestCase):
     def test_switching_loop_loads_the_manuals_defaults(self):
         tab = T.TuningTab(FakeInstrument(), None)
         tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("afl"))
-        self.assertEqual(tab.kp_spin.value(), 8.9e7)
-        self.assertEqual(tab.ki_spin.value(), 8900.0)
+        self.assertAlmostEqual(tab.kp_spin.value(), 2e8)      # the manual start for Q = f0 = 25 k at +-1 V
+        self.assertAlmostEqual(tab.ki_spin.value(), 2e4)
         self.assertEqual(tab.step_spin.value(), 10.0)
         self.assertIn("QPlusAmpl", tab.channels_label.text())
         self.assertEqual(tab.plan().step, 0.10)
@@ -404,6 +404,115 @@ class Guidance(unittest.TestCase):
         self.assertTrue(tab.btn_single.isEnabled())
         off = T.TuningTab(MockDDEClient(), None)
         self.assertIn("Offline", off.hint_label.text())
+
+
+class AmplitudeLoopUI(unittest.TestCase):
+    def make(self):
+        tab = T.TuningTab(FakeInstrument(), FakeInstrument())
+        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("afl"))
+        return tab
+
+    def test_switching_to_the_amplitude_loop_uses_the_manuals_values_at_1v(self):
+        tab = self.make()
+        self.assertEqual(tab.gain_combo.currentData(), 1.0)
+        self.assertAlmostEqual(tab.ki_spin.value(), 5e8 / tab.q_spin.value())
+        self.assertAlmostEqual(tab.kp_spin.value() / tab.ki_spin.value(), 1e4)
+        self.assertAlmostEqual(tab.tau_spin.value(), 10.0 * tab.q_spin.value() / tab.f0_spin.value())
+        self.assertEqual((tab.factor_spin.value(), tab.range_spin.value()), (10.0, 1000.0))
+        self.assertFalse(tab.gain_combo.isHidden())
+        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("pll"))
+        self.assertTrue(tab.gain_combo.isHidden())
+        self.assertEqual((tab.factor_spin.value(), tab.range_spin.value()), (2.0, 16.0))
+
+    def test_a_lower_output_gain_needs_ten_times_larger_gains(self):
+        tab = self.make()
+        ki1, kp1 = tab.ki_spin.value(), tab.kp_spin.value()
+        tab.gain_combo.setCurrentIndex(tab.gain_combo.findData(0.1))
+        self.assertEqual(tab.ki_spin.value(), ki1)                              # the selector alone never touches the baseline
+        self.assertIn("+-0.1 V", tab.start_label.text())
+        tab.btn_fill.click()
+        self.assertAlmostEqual(tab.ki_spin.value() / ki1, 10.0)
+        self.assertAlmostEqual(tab.kp_spin.value() / kp1, 10.0)
+
+    def test_a_baseline_far_from_the_manual_start_is_flagged(self):
+        tab = self.make()
+        for c in tab.checks:
+            c.setChecked(True)
+        self.assertNotIn("Check:", tab.hint_label.text())
+        tab.ki_spin.setValue(tab.ki_spin.value() * 100)
+        self.assertIn("Check:", tab.hint_label.text())
+        tab.gain_combo.setCurrentIndex(tab.gain_combo.findData(0.1))            # x10 explains part of it: x10 left
+        self.assertNotIn("Check:", tab.hint_label.text())
+
+    def test_the_checklist_follows_the_loop_and_starts_unticked(self):
+        tab = T.TuningTab(FakeInstrument(), FakeInstrument())
+        for c in tab.checks:
+            c.setChecked(True)
+        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("afl"))
+        self.assertFalse(any(c.isChecked() for c in tab.checks))
+        self.assertIn("PLL off", tab.checks[1].text())
+        self.assertNotIn("Auto 0", " ".join(c.text() for c in tab.checks))
+        self.assertFalse(tab.btn_scan.isEnabled())
+        for c in tab.checks:
+            c.setChecked(True)
+        self.assertTrue(tab.btn_scan.isEnabled())
+
+    def test_scale_scan_and_limits_come_from_the_widgets(self):
+        tab = self.make()
+        g = tab.scan_grid()
+        self.assertEqual(g.shape, (7, 7))
+        self.assertEqual(g.factor, 10.0)
+        self.assertAlmostEqual(g.ki(6) / g.kp(6), tab.ki_spin.value() / tab.kp_spin.value())
+        lim = tab.safety_limits()
+        self.assertEqual(lim.max_gain_factor, 1000.0)
+        self.assertAlmostEqual(lim.min_gain_factor, 1e-3)
+        self.assertIn("Scale scan: 7 tests", tab.est_label.text())
+
+    def test_running_a_scale_scan_pushes_a_ratio_locked_map_and_stop_restores_the_baseline(self):
+        inst = FakeInstrument()
+        tab = T.TuningTab(inst, inst)
+        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("afl"))
+        for c in tab.checks:
+            c.setChecked(True)
+        kp, ki = tab.kp_spin.value(), tab.ki_spin.value()
+        tab._run_scan()
+        self.assertTrue(tab.runner_active())
+        m = tab.current_map()
+        self.assertTrue(m.ratio_locked)
+        self.assertEqual(len(m.cells()), 7)
+        tab.stop()
+        self.assertFalse(tab.runner_active())
+        self.assertEqual(inst.writes[-3:], [("Edit32", kp), ("Edit24", ki), ("Edit23", 6.0)])    # baseline + Ref back
+
+    def test_a_suggestion_beyond_the_allowed_range_is_not_run(self):
+        tab = self.make()
+        for c in tab.checks:
+            c.setChecked(True)
+        tab.range_spin.setValue(4.0)
+        tab._suggestions = [W.Suggestion("scale_both", tab.kp_spin.value() * 10, tab.ki_spin.value() * 10, "x")]
+        tab._test_suggestion()
+        self.assertFalse(tab.runner_active())
+        self.assertIn("Not run", tab.log.toPlainText())
+
+    def test_the_guide_explains_the_amplitude_loop(self):
+        html = T.guide_html()
+        for word in ("Output Gain", "scale scan", "decades", "Drive"):
+            self.assertIn(word.lower(), html.lower())
+
+
+class SuggestedSetupGain(unittest.TestCase):
+    def test_output_gain_scales_the_amplitude_gains(self):
+        from sxm_ncafm_control.gui.suggested_tab import SuggestedTab
+        tab = SuggestedTab(FakeInstrument(), None)
+        tab.q_val.setValue(25000.0)
+        tab.f0_val.setValue(25000.0)
+        tab.out_gain.setCurrentIndex(tab.out_gain.findData(1.0))
+        tab._recalc()
+        ki1, kp1 = float(tab.ki_out.text()), float(tab.kp_out.text())
+        self.assertAlmostEqual(ki1, 2e4)
+        tab.out_gain.setCurrentIndex(tab.out_gain.findData(0.1))                # recalculates by itself
+        self.assertAlmostEqual(float(tab.ki_out.text()) / ki1, 10.0)
+        self.assertAlmostEqual(float(tab.kp_out.text()) / kp1, 10.0)
 
 
 if __name__ == "__main__":

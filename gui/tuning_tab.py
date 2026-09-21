@@ -414,6 +414,14 @@ def format_result_html(res: W.StepTestResult, verdict: W.Verdict, suggestions: L
 
 
 # (category, what the response looks like, what to change) - kept in line with W.advise()
+CHECKLISTS = {
+    "pll": ("Tip retracted / far from the surface", "The loop under test is running and locked",
+            "PLL: DNC Lockin Options > Acquire > Auto 0 deg is DISABLED", "Baseline Kp/Ki above match what is set in SXM"),
+    "afl": ("Tip retracted / far from the surface", "PLL off (Kp = Ki = 0) and DNC 'use' = the free resonance f_res",
+            "Amplitude feedback is ON: QPlusAmpl sits at Ref and Drive has settled",
+            "Baseline Kp/Ki, Ref and the output gain above match what is set in SXM"),
+}
+
 GUIDE_VERDICTS = (
     ("good", "Fast enough, overshoot within the limit, no ringing.",
      "Keep it. If it is much faster than needed, lower both gains a little: less noise, same shape."),
@@ -482,6 +490,22 @@ Imaging target: at most half a pixel dwell (line time / pixels).</td></tr>
 <li>A faster loop is a noisier loop: stop at the slowest gains that still meet the target.</li>
 <li>Kp and Ki are SXM's raw units. Nothing here assumes what a value means: gains are judged only from measured responses.</li>
 </ul>
+
+<h3>Amplitude loop: gains that span decades</h3>
+<p>The manual's start is Ki &asymp; 5&middot;10<sup>8</sup>/Q and Kp &asymp; 10<sup>4</sup>&middot;Ki at DNC <i>Output Gain</i> &plusmn;1 V, and both
+are &times;10 for each range lower (&plusmn;1 V &rarr; &plusmn;0.1 V). So the same sensor needs 10&times; larger values at &plusmn;0.1 V, and
+different sensors differ by decades through Q. Steps of &times;2 cannot cover that.</p>
+<ol>
+<li>Choose the <b>output gain you really use</b> (left, 2) and press <i>Use the manual's start values</i>. It fills Kp, Ki and Tau from
+Q, f0 and the gain, and the hold / settle times from the ring-down time Q/(&pi;f0) (this app's rule, not the manual's). Set the same values in SXM.</li>
+<li><b>Run scale scan</b>: tests the baseline, then both gains together in steps of the step factor (default &times;10, three down and three up).
+Ki:Kp stays; only the speed changes. It stops going further once a test loses the loop.</li>
+<li>Read the scan on the map: grey = still too slow, green = the right decade, orange / red = too high.</li>
+<li>Click the best cell and <i>Suggest / refine zoom</i>: a finer 3&times;3 map in steps of &radic;(factor), which now also varies the ratio. Repeat once more, then use single tests.</li>
+<li>Check the <b>Drive</b> line of each result: the manual asks you to avoid a strong (saturating) overshoot there, and Kp amplifies its noise.</li>
+</ol>
+<p><i>Max gain change vs baseline</i> (left, 4) limits how far from your baseline any test may go (default &times;1000 for this loop, &times;16 for the PLL).
+If the baseline warning above the results appears, check first that the output gain here matches the DNC window.</p>
 
 <h3>The (Kp, Ki) map (optional)</h3>
 <p>Runs one test per cell of a log-spaced grid around the baseline. Up-right = both higher (faster), down-left = both lower (slower).
@@ -581,6 +605,28 @@ class TuningTab(QtWidgets.QWidget):
         self.ki_spin = self._spin(-1e12, 1e12, -1e4, 4)
         f.addRow("Kp:", self.kp_spin)
         f.addRow("Ki:", self.ki_spin)
+        # amplitude loop only: the gains scale with the DNC Output Gain, and span decades with Q
+        self.gain_label = QtWidgets.QLabel("AFL output gain (DNC):")
+        self.gain_combo = QtWidgets.QComboBox()
+        for v in W.AFL_OUTPUT_GAINS:
+            self.gain_combo.addItem(f"+-{v:g} V", v)
+        self.gain_combo.setCurrentIndex(W.AFL_OUTPUT_GAINS.index(1.0))
+        self.gain_combo.setToolTip("DNC window > Output Gain, as set in SXM. Kp and Ki scale with it: x10 for each range lower "
+                                   "(manual: +-1 V -> +-0.1 V). +-10 V (/10) is the same rule extrapolated.")
+        f.addRow(self.gain_label, self.gain_combo)
+        self.start_label = QtWidgets.QLabel()
+        self.start_label.setWordWrap(True)
+        f.addRow(self.start_label)
+        self.btn_fill = QtWidgets.QPushButton("Use the manual's start values")
+        self.btn_fill.setToolTip("Fills Kp, Ki and Tau from Q, f0 and the output gain (manual), and the hold / settle times "
+                                 "from the ring-down time (this app's rule of thumb).")
+        f.addRow(self.btn_fill)
+        self._afl_rows = (self.gain_label, self.gain_combo, self.start_label, self.btn_fill)
+        for w in (self.q_spin, self.f0_spin, self.gain_combo):
+            (w.currentIndexChanged if isinstance(w, QtWidgets.QComboBox) else w.valueChanged).connect(self._update_start_label)
+        self.btn_fill.clicked.connect(lambda: self._fill_afl_start())
+        for w in (self.kp_spin, self.ki_spin):
+            w.valueChanged.connect(lambda *_: self._update_hint())          # the baseline warning follows what is typed
         lv.addWidget(g)
 
         # 3. target
@@ -607,42 +653,55 @@ class TuningTab(QtWidgets.QWidget):
         lv.addWidget(g)
 
         # 4. grid
-        g = QtWidgets.QGroupBox("4. Map grid (log-spaced around the baseline)")
+        g = QtWidgets.QGroupBox("4. Search (log-spaced around the baseline)")
         f = QtWidgets.QFormLayout(g)
-        self.factor_spin = self._spin(1.2, 4.0, 2.0, 2, 0.1, " x")
+        self.factor_spin = self._spin(1.2, 10.0, 2.0, 2, 0.1, " x")
+        self.factor_spin.setToolTip("Gain ratio between neighbouring tests. x2 for a fine PLL search; x10 (a decade) "
+                                    "for the amplitude loop, whose gains span many orders of magnitude.")
+        self.scan_lo = self._spin(0, 6, 2, 0)
+        self.scan_hi = self._spin(0, 6, 2, 0)
         self.kp_lo = self._spin(0, 4, 2, 0)
         self.kp_hi = self._spin(0, 4, 2, 0)
         self.ki_lo = self._spin(0, 5, 3, 0)
         self.ki_hi = self._spin(0, 5, 2, 0)
+        self.range_spin = self._spin(2.0, 1e6, 16.0, 0, 10.0, " x")
+        self.range_spin.setToolTip("No test is written with a Kp or Ki more than this factor above or below the baseline "
+                                   "(map, scale scan and suggested pairs).")
         f.addRow("Step factor:", self.factor_spin)
-        f.addRow("Kp steps down / up:", self._pair(self.kp_lo, self.kp_hi))
-        f.addRow("Ki steps down / up:", self._pair(self.ki_lo, self.ki_hi))
+        f.addRow("Scale scan steps down / up:", self._pair(self.scan_lo, self.scan_hi))
+        f.addRow("Map: Kp steps down / up:", self._pair(self.kp_lo, self.kp_hi))
+        f.addRow("Map: Ki steps down / up:", self._pair(self.ki_lo, self.ki_hi))
+        f.addRow("Max gain change vs baseline:", self.range_spin)
         self.est_label = QtWidgets.QLabel()
+        self.est_label.setWordWrap(True)
         f.addRow(self.est_label)
         lv.addWidget(g)
-        for w in (self.factor_spin, self.kp_lo, self.kp_hi, self.ki_lo, self.ki_hi, self.hold_spin, self.settle_spin,
-                  self.events_spin, self.step_spin):
+        for w in (self.factor_spin, self.scan_lo, self.scan_hi, self.kp_lo, self.kp_hi, self.ki_lo, self.ki_hi, self.range_spin,
+                  self.hold_spin, self.settle_spin, self.events_spin, self.step_spin):
             w.valueChanged.connect(self._update_estimate)
 
         # 5. checklist + buttons
         g = QtWidgets.QGroupBox("5. Before running")
         v = QtWidgets.QVBoxLayout(g)
         self.checks = []
-        for text in ("Tip retracted / far from the surface", "The loop under test is running and locked",
-                     "PLL: DNC Lockin Options > Acquire > Auto 0 deg is DISABLED", "Baseline Kp/Ki above match what is set in SXM"):
+        for text in CHECKLISTS["pll"]:                      # the texts follow the loop, see _on_loop_changed
             c = QtWidgets.QCheckBox(text)
             c.toggled.connect(self._update_enabled)
             v.addWidget(c)
             self.checks.append(c)
         self.btn_single = QtWidgets.QPushButton("Run single test (baseline)")
+        self.btn_scan = QtWidgets.QPushButton("Run scale scan (keep Ki:Kp)")
+        self.btn_scan.setToolTip("Tests the baseline, then both gains scaled together in steps of the step factor: Ki:Kp is "
+                                 "kept and only the speed changes. Use it first when the right decade of gain is unknown.")
         self.btn_map = QtWidgets.QPushButton("Run / continue map")
         self.btn_stop = QtWidgets.QPushButton("Stop && restore baseline")
         self.btn_clear = QtWidgets.QPushButton("Clear map")
         self.btn_scope = QtWidgets.QPushButton("Analyze Scope capture")
         self.btn_scope.setToolTip("Analyze the step train recorded in the Scope tab (needs the Step Test events on it).")
-        for b in (self.btn_single, self.btn_map, self.btn_stop, self.btn_clear, self.btn_scope):
+        for b in (self.btn_single, self.btn_scan, self.btn_map, self.btn_stop, self.btn_clear, self.btn_scope):
             v.addWidget(b)
         self.btn_single.clicked.connect(self._run_single)
+        self.btn_scan.clicked.connect(self._run_scan)
         self.btn_map.clicked.connect(self._run_map)
         self.btn_stop.clicked.connect(self.stop)
         self.btn_clear.clicked.connect(self._clear_map)
@@ -761,14 +820,71 @@ class TuningTab(QtWidgets.QWidget):
         self.base_spin.setValue(25000.0 if pll else 6.0)
         self.step_spin.setValue(1.0 if pll else 10.0)
         self.hold_spin.setValue(0.5 if pll else 1.0)
-        self.kp_spin.setValue(-100.0 if pll else 8.9e7)
-        self.ki_spin.setValue(-1e4 if pll else 8900.0)
-        for w in (self.tau_spin, self.tau_label):
+        if pll:
+            self.kp_spin.setValue(-100.0)
+            self.ki_spin.setValue(-1e4)
+        else:
+            self._fill_afl_start(log=False)        # the manual's values for the Q, f0 and output gain on screen
+        # the amplitude loop is often decades off the first guess: coarse (x10) steps, wide allowed range
+        self.factor_spin.setValue(2.0 if pll else 10.0)
+        self.scan_lo.setValue(2 if pll else 3)
+        self.scan_hi.setValue(2 if pll else 3)
+        self.range_spin.setValue(16.0 if pll else 1000.0)
+        for w in (self.tau_spin, self.tau_label) + self._afl_rows:
             w.setVisible(not pll)
+        for c, text in zip(self.checks, CHECKLISTS[ld.key]):
+            c.setText(text)
+            c.setChecked(False)                      # a different loop needs a different set of checks
+        self._update_start_label()
         self.target_combo.setCurrentIndex(0 if pll else 1)
         self.rise_spin.setValue(50.0 if pll else 500.0)
         self._on_target_changed()
         self._update_estimate()
+
+    def _afl_start(self) -> W.AflStart:
+        return W.afl_start_values(self.q_spin.value(), self.f0_spin.value(), self.gain_combo.currentData())
+
+    def _update_start_label(self, *_):
+        try:
+            s = self._afl_start()
+        except ValueError:
+            self.start_label.setText("Set Q and f0 (from the sweep) to get the manual's start values.")
+            return
+        self.start_label.setText(f"Manual start for Q={self.q_spin.value():.0f}, f0={self.f0_spin.value():.0f} Hz, "
+                                 f"+-{self.gain_combo.currentData():g} V:<br>Kp = {s.kp:.4g}, Ki = {s.ki:.4g}, "
+                                 f"Tau = {s.tau_s * 1e3:.3g} ms<br>Ring-down Q/(pi f0) = {s.ring_down_s:.2f} s "
+                                 f"-> hold {s.hold_s:g} s, settle {s.settle_s:g} s")
+        self._update_hint()
+
+    def _fill_afl_start(self, log: bool = True):
+        """Baseline gains, Tau and test timing from the manual's rules for the Q, f0 and output gain on screen."""
+        try:
+            s = self._afl_start()
+        except ValueError:
+            return
+        self.kp_spin.setValue(s.kp)
+        self.ki_spin.setValue(s.ki)
+        self.tau_spin.setValue(s.tau_s * 1e3)
+        self.hold_spin.setValue(s.hold_s)
+        self.settle_spin.setValue(s.settle_s)
+        if log:
+            self._log(f"Baseline set to the manual's start for +-{self.gain_combo.currentData():g} V: Kp={s.kp:.4g}, Ki={s.ki:.4g}, "
+                      f"Tau={s.tau_s * 1e3:.3g} ms, hold {s.hold_s:g} s, settle {s.settle_s:g} s. Set the same values in SXM.")
+
+    def _baseline_warning(self) -> str:
+        """Amplitude loop: flag a baseline far from the manual's start (typically a wrong output-gain decade)."""
+        if self.loop_def.key != "afl":
+            return ""
+        try:
+            s = self._afl_start()
+            ratio = self.ki_spin.value() / s.ki
+        except (ValueError, ZeroDivisionError):
+            return ""
+        if 1 / 30 <= ratio <= 30:
+            return ""
+        return (f"<br><span style='color:#a06000'><b>Check:</b> the baseline Ki is x{ratio:.3g} of the manual's start for this "
+                f"Q, f0 and output gain. Is the output gain selected here the one set in the DNC window? "
+                f"(It may be right for your sensor: a Scale scan will tell.)</span>")
 
     def _on_target_changed(self):
         scan = self.target_combo.currentIndex() == 0
@@ -805,6 +921,14 @@ class TuningTab(QtWidgets.QWidget):
                           kp_exps=tuple(range(-int(self.kp_lo.value()), int(self.kp_hi.value()) + 1)),
                           ki_exps=tuple(range(-int(self.ki_lo.value()), int(self.ki_hi.value()) + 1)))
 
+    def scan_grid(self) -> W.GridSpec:
+        return W.GridSpec.scan(self.kp_spin.value(), self.ki_spin.value(), self.factor_spin.value(),
+                               int(self.scan_lo.value()), int(self.scan_hi.value()))
+
+    def safety_limits(self) -> W.SafetyLimits:
+        n = max(self.range_spin.value(), 1.0)
+        return W.SafetyLimits(max_gain_factor=n, min_gain_factor=1.0 / n)
+
     def analysis_kwargs(self) -> dict:
         kw = dict(li_stages=2, f0=self.f0_spin.value(), q=self.q_spin.value())
         if self.li_spin.value() > 0:
@@ -819,8 +943,10 @@ class TuningTab(QtWidgets.QWidget):
         except ValueError:
             return
         n = g.shape[0] * g.shape[1]
+        n_scan = int(self.scan_lo.value()) + int(self.scan_hi.value()) + 1
         each = p.settle_s + p.duration + 0.3
-        self.est_label.setText(f"{n} tests, about {n * each / 60:.1f} min (worst case; unstable regions are skipped)")
+        self.est_label.setText(f"Each test takes about {each:.0f} s. Scale scan: {n_scan} tests, about {n_scan * each / 60:.1f} min. "
+                               f"Map: {n} tests, about {n * each / 60:.1f} min (worst case; unstable regions are skipped).")
         self._target_note()
         self._update_hint()
 
@@ -839,7 +965,7 @@ class TuningTab(QtWidgets.QWidget):
     def _update_enabled(self, *_):
         running = self.runner is not None and self.runner.running
         ready = self._online() and all(c.isChecked() for c in self.checks) and not running
-        for b in (self.btn_single, self.btn_map, self.btn_test_sug):
+        for b in (self.btn_single, self.btn_scan, self.btn_map, self.btn_test_sug):
             b.setEnabled(ready)
         self.btn_stop.setEnabled(running)
         self.btn_clear.setEnabled(not running)
@@ -852,6 +978,11 @@ class TuningTab(QtWidgets.QWidget):
             tip = ""
         for b in (self.btn_single, self.btn_map):
             b.setToolTip(tip)
+        if tip:
+            self.btn_scan.setToolTip(tip)
+        else:
+            self.btn_scan.setToolTip("Tests the baseline, then both gains scaled together in steps of the step factor: Ki:Kp is "
+                                     "kept and only the speed changes. Use it first when the right decade of gain is unknown.")
         self._update_hint()
 
     def _update_hint(self):
@@ -875,10 +1006,15 @@ class TuningTab(QtWidgets.QWidget):
             text = (f"<b>Ready.</b> Press <i>Run single test (baseline)</i>: it steps {what} {self.step_spin.value():g} "
                     f"{'Hz' if self.loop_def.key == 'pll' else '%'} up and down, measures the loop at the current gains "
                     f"and suggests what to change{secs}.")
+            if self.loop_def.key == "afl":
+                text += (" If the right decade of gain is unknown, press <i>Run scale scan</i> first: it tries the baseline and "
+                         "both gains scaled together by decades.")
         else:
             text = ("<b>Next:</b> read the verdict and the suggestion below. <i>Test suggested pair</i> re-measures with the "
                     "suggested gains; <i>Stage in Params tab</i> hands a pair to the Parameters tab. Repeat until the "
                     "verdict is good.")
+        if not self.runner_active():
+            text += self._baseline_warning()
         self.hint_label.setText(text)
 
     # ------------------------------------------------------------------ logging
@@ -891,7 +1027,8 @@ class TuningTab(QtWidgets.QWidget):
 
     def _ensure_map(self) -> W.ScreeningMap:
         if not self.maps:
-            m = W.ScreeningMap(self.grid(), self.target(), reference=(self.kp_spin.value(), self.ki_spin.value()))
+            m = W.ScreeningMap(self.grid(), self.target(), limits=self.safety_limits(),
+                               reference=(self.kp_spin.value(), self.ki_spin.value()))
             self.maps.append(m)
             self._paint_map()
         return self.maps[-1]
@@ -947,12 +1084,27 @@ class TuningTab(QtWidgets.QWidget):
             return c, kp, ki
         self._start_runner(nxt)
 
+    def _run_scan(self):
+        """Scale scan: the baseline, then Kp and Ki scaled together (Ki:Kp kept) up and down by the step factor."""
+        m = W.ScreeningMap(self.scan_grid(), self.target(), limits=self.safety_limits(),
+                           reference=(self.kp_spin.value(), self.ki_spin.value()), ratio_locked=True)
+        self.maps.append(m)                          # on top of the stack: 'Back to coarse map' returns to the previous one
+        self.selected = None
+        self._paint_map()
+        self._refresh_table()
+        self._run_map()
+
     def _test_suggestion(self):
         row = self._suggestion_row()
         if row is None:
             return
         s = self._suggestions[row]
         if s.kp is None:
+            return
+        ref, lim = (self.kp_spin.value(), self.ki_spin.value()), self.safety_limits()
+        if not W.gain_within_limits(s.kp, s.ki, ref, lim):
+            self._log(f"Not run: Kp={s.kp:.4g}, Ki={s.ki:.4g} is more than x{lim.max_gain_factor:g} away from the baseline. "
+                      "Raise 'Max gain change vs baseline', or move the baseline to a pair you have set in SXM.")
             return
         self._start_runner(self._one_shot(s.kp, s.ki))
 
@@ -1031,6 +1183,7 @@ class TuningTab(QtWidgets.QWidget):
         nk, ni = m.grid.shape
         cat = m.category_grid()
         img = np.zeros((ni, nk, 4), dtype=np.uint8)
+        active = set(m.cells())
         for i in range(nk):
             for j in range(ni):
                 c = cat[i, j]
@@ -1038,6 +1191,8 @@ class TuningTab(QtWidgets.QWidget):
                 alpha = 255
                 if c == "untested" and m.prior.get((i, j)) in CATEGORY_COLOR:      # faint model prediction
                     col, alpha = CATEGORY_COLOR[m.prior[(i, j)]], 70
+                if (i, j) not in active:                                            # scale scan: only the diagonal exists
+                    alpha = 0
                 img[j, i] = (*col, alpha)
         self.map_img.setImage(img, autoLevels=False)
         self.map_img.setRect(QtCore.QRectF(0, 0, ni, nk))
@@ -1071,6 +1226,8 @@ class TuningTab(QtWidgets.QWidget):
             ys += [float("nan"), i, i, i + 1, i + 1, i]
         self.map_marks.setData(xs, ys, pen=pg.mkPen((30, 30, 30), width=2), connect="finite")
         title = "(Kp, Ki) map: up-right = raise both (faster), down-left = lower both (slower)"
+        if m.ratio_locked:
+            title = "Scale scan (Ki:Kp kept): up-right = both higher (faster), down-left = both lower (slower)"
         self.map_plot.setTitle(title)
 
     def _on_map_click(self, ev):
@@ -1083,7 +1240,7 @@ class TuningTab(QtWidgets.QWidget):
         pos = vb.mapSceneToView(ev.scenePos())
         nk, ni = m.grid.shape
         i, j = int(math.floor(pos.y())), int(math.floor(pos.x()))
-        if 0 <= i < nk and 0 <= j < ni:
+        if 0 <= i < nk and 0 <= j < ni and (i, j) in m.cells():
             self.select_cell((i, j))
 
     def select_cell(self, cell):
