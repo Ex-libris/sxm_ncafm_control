@@ -1,0 +1,78 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+A PyQt5 desktop GUI for tuning NC-AFM (qPlus) loops on an **Anfatec SXM** SPM controller. It talks to the instrument over **two independent channels**:
+
+| Channel | Module | Transport | Used for |
+|---|---|---|---|
+| **DDE** | `SXMRemote.py` → `dde_client.py` | Win32 DDEML (`user32`) to the running SXM software (service `SXM`, topic `Remote`) | Writing parameters (`EditNN`, DNC), setting Z, toggling feedback |
+| **IOCTL** | `device_driver.py` | `DeviceIoControl` on `\\.\SXM` (the Anfatec kernel driver), bypassing SXM software | Fast reads of any hardware channel (scope, live Z) |
+
+Windows-only (pywin32 + ctypes on `user32`). `device_driver.py` imports `win32file` at module top, so even offline mode needs Windows + pywin32.
+
+## Commands
+
+There is no build step, test suite, or linter configured.
+
+```bash
+# Setup (Python 3.11; conda recommended)
+conda env update -f environment.yml        # or: pip install -r requirements.txt
+
+# Run — MUST be run from the PARENT of this folder, as a module
+cd ..
+python -m sxm_ncafm_control.app
+```
+
+The checkout directory must be named `sxm_ncafm_control`: modules use absolute imports (`from sxm_ncafm_control.gui...`) *and* relative ones (`from ..common import ...`), so running `python app.py` from inside the folder fails.
+
+To exercise the GUI without hardware, just launch with SXM closed: the app falls back to offline mode (see below). Verifying real DDE/IOCTL behaviour requires the SXM software and driver on the measurement PC.
+
+## Architecture
+
+### Startup and the connection object
+`app.py` builds one `SXMConnection` (`connection.py`) and passes it to `MainWindow`. This is the only place connection logic lives:
+- `conn.dde` — `RealDDEClient`, or `MockDDEClient` if anything raises
+- `conn.driver` — `SXMIOCTL`, or `None` if the driver can't be opened
+- `conn.is_offline` — true if either fell back
+
+Fallback messages are printed by `common.offline_message()` (root `common.py`). Offline, the mock DDE client prints `[MOCK] ...` lines instead of sending, and tabs synthesize data when `driver is None`.
+
+### DDE layer (two files, easy to confuse)
+- **`SXMRemote.py`** — Anfatec's vendor DDEML wrapper (ctypes), lightly modified. Keep edits minimal. **Importing it opens a DDE conversation** (`MySXM = DDEClient("SXM","Remote")` at module bottom); if SXM isn't running the import raises `DDEError`, which `SXMConnection` catches and turns into the mock. `RealDDEClient` then creates its *own* `SXMRemote.DDEClient`. `dde_client.py` does a bare `import SXMRemote`, which only resolves because `app.main()` inserts the package dir into `sys.path`.
+- **`dde_client.py`** — the app-facing API. `BaseDDE` / `RealDDEClient` / `MockDDEClient` share this contract, and **the mock must be kept in sync with the real client** when adding a method:
+  `send_scanpara("EditNN", v)`, `send_dncpara(i, v)`, `read_channel(i)`, `set_channel(i, v)`, `read_topography()`, `feed_para(name, v)`, `last_written(ptype, pcode)`.
+
+How DDE commands work: `execute()` wraps the command in a Pascal program (`begin ... end.`) and sends `XTYP_EXECUTE`. SXM speaks Pascal, e.g. `ScanPara('Edit23', 0.08);`, `DNCPara(4, v);`, `SetChannel(0, v);`, `FeedPara('enable', 1);`, `a:=GetChannel(0); writeln(a);`. Replies arrive asynchronously through the **advise callback** (`Scan`, `Command`, `SaveFileName`, `ScanLine`, `MicState`, `SpectSave` items are subscribed); `SendWait`/`GetChannel` set `NotGotAnswer=True` and spin on `loop()` (a blocking `GetMessageW`) until the callback clears it. This runs **on the calling thread with no overall timeout** — a missing SXM reply hangs the GUI. Numeric replies use decimal commas and the value is on the second line (`BackStr[1]`). `StartMsgLoop`/`MyMsgClass` exist but are unused.
+
+SXM parameters are effectively **write-only**; `BaseDDE._last` caches the last value written per `(ptype, pcode)` so the UI can show something.
+
+### IOCTL layer (`device_driver.py`)
+- `SXMIOCTL` opens `\\.\SXM` (share mode 0). `read_raw(index)` → signed 32-bit via `IOCTL_GET_KANAL` (0xF0D); `read_scaled(name)` multiplies by the scale from `CHANNELS`. `write_raw` uses `IOCTL_SET_CHANNEL` (0xF18); `write_unit` currently hard-codes DAC 0 (Topo) regardless of the name passed.
+- `CHANNELS` = `{name: (driver_index, short_label, unit, scale)}` is the single source for channel names/units/scales; the scope and constant-height tabs populate their combo boxes from it. Negative indices are DACs/outputs, positive are ADC inputs. Channel keys are e.g. `'QPlusAmpl'`, `'Drive'`, `'Phase'`, `'df'`, `'Topo'`; `Topo` is in **nm**.
+- `io_reader.py` is dead code (imports an external `SXMOscilloscope` module that isn't in the repo, nothing imports it); `device_driver.py` replaced it.
+
+### Parameter registry
+`PARAMS_BASE` in **root `common.py`** defines the tunable parameters as `(key, ptype, pcode, label, voltage_guarded)`:
+Amp Ref `Edit23`, Amp Ki `Edit24`, Amp Kp `Edit32`, PLL Kp `Edit27`, PLL Ki `Edit22` (ptype `EDIT` → `send_scanpara`), and Used Frequency `DNC 3`, Drive `DNC 4` (ptype `DNC` → `send_dncpara`). Tabs import it via `from ..common import ...`.
+
+`gui/common.py` is a stale near-duplicate (different row order) that nothing imports — edit root `common.py`. The ±10 V guard (`confirm_high_voltage`, `VOLTAGE_LIMIT_ABS`) applies to `voltage_guarded` params (Amp Ref, Drive). `StepTestTab._tick` and `ParamsTab._add_custom_editxx` re-derive "voltage-like" by hard-coding `Edit23` / `DNC 4` rather than reading the flag, so change all three together.
+
+### GUI (`gui/`)
+`MainWindow` (a `QWidget`, not `QMainWindow`) creates the tabs and does all cross-tab wiring:
+- `ParamsTab(dde)` — table Previous/Current/New; stage → apply; save/load "tune" JSON (`kind: "ncafm_tune"`); user-added `EditXX` rows. Emits `custom_params_changed` → `StepTestTab.set_custom_params`.
+- `StepTestTab(dde)` — QTimer-driven low/high square wave on one parameter. Holds direct refs to the scope and tab widget; triggers `ScopeTab.start_capture()` and hands it `(QDateTime, label)` events via `set_event_markers()` for overlay. `ScopeTab.set_test_tab_reference()` links back for "Repeat Test".
+- `ScopeTab()` — takes **no** connection; it opens its **own** `SXMIOCTL` and runs `CaptureThread` (QThread, reads two channels sample-by-sample as fast as the driver allows; effective rate = samples / wall time). Falls back to synthetic signals if the driver won't open.
+- `SuggestedTab(dde, params_tab)` — Ki/Kp/τ calculator from Q, f₀, PLL bandwidth, plus Lorentzian fit (`scipy.curve_fit`) of a loaded spectrum; can stage into `ParamsTab.stage_value()` or send directly.
+- `QplusCalibrationTab(dde)` — sweeps `Edit23`, reads topography via DDE `read_topography()` (constructed without a driver, so the IOCTL fallback is unused), fits pm/mV with `scipy.stats.linregress`.
+- `ZConstAcquisition(dde, driver)` — 100 ms `QTimer` polls `Topo` via the driver for live Z (plain lists trimmed to a time window). "Disable Feedback" calls `feed_para("enable", 1)` (note the inverted-looking sense: 1 = feedback off) and re-enabling sends `0`. Manual mode is in **absolute Z (nm)** but the write goes to DDE channel 0, so it maps through a reference captured at disable time: `CH0 = ch0_base + ch0_sign * (z_target - abs_ref_z)`. `ch0_sign` (+1) is a manual knob if the piezo direction is inverted. Re-enabling feedback first presets CH0 to the spinbox target. Has its own font-scale combo, independent of the global accessibility manager.
+- `gui_accessibility_manager.py` — `AccessibilityManager` is stashed on the `QApplication` instance (`app.accessibility_manager`), persists to `~/.scientific_gui_accessibility.json`, and emits `settings_changed` (font scale, high contrast, dark mode). `MainWindow.apply_accessibility_to_all_tabs()` iterates an explicit tab list, so **a new tab must be added there** (and to `addTab`).
+
+### Gotchas
+- `MainWindow` sets `step_tab.scope_tab_index = 2` (hard-coded); reordering tabs breaks the "jump to Scope" behaviour.
+- `ScopeTab` defaults its combos to the key `"QplusAmplitude"`, which doesn't exist in `CHANNELS` (the key is `'QPlusAmpl'`), so the default silently falls through to the first channel.
+- **Known bug:** `ZConstAcquisition.toggle_feedback` calls `self.dde.get_channel(0)`, but the DDE clients only define `read_channel()`. The `AttributeError` is swallowed by its `try/except`, so `ch0_base` stays `0.0` and absolute-Z writes use the wrong base. Fix by calling `read_channel(0)`.
+- Values sent are in **SXM's current GUI units**; the app does no unit conversion for DDE parameters.
+- `__pycache__/*.pyc` files are tracked in git despite `.gitignore`, so they show up as modified/deleted after any run. Don't stage them.
