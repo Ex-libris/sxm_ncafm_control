@@ -125,7 +125,8 @@ class SuggestedTab(QtWidgets.QWidget):
         # the suggestions above.
         self.bw_res_out = QtWidgets.QLineEdit(); self.bw_res_out.setReadOnly(True)
         self.tau_ring_out = QtWidgets.QLineEdit(); self.tau_ring_out.setReadOnly(True)
-        self.tau_amp.setToolTip("Rule of thumb: amplitude loop time constant = 10 * Q / f0.\n"
+        self.tau_amp.setToolTip("Manual: amplitude feedback 'Tau' = Q / (100 * f0) seconds, i.e. 10 * Q / f0 in ms.\n"
+                                "SXM's Tau field offers discrete values: pick the nearest one.\n"
                                 "It grows with Q: a sharper resonance responds more slowly.")
         self.tpll_out.setToolTip("Rule of thumb: PLL time constant = 1 / (10 * PLL bandwidth).")
         self.bw_res_out.setToolTip("Full width at half maximum of the resonance, f0 / Q.")
@@ -154,9 +155,9 @@ class SuggestedTab(QtWidgets.QWidget):
             "Derived from the resonator (f₀ in Hz, Q dimensionless):\n"
             "  • Bandwidth (FWHM) = f₀/Q;  amplitude ring-down time = Q/(π·f₀).\n"
             "\n"
-            "Rules of thumb (empirical, from the SXM notes; check them against your SXM version):\n"
-            "  • Amplitude Ki ≈ 5×10⁸/Q (\"for 1 V output gain\", SXM units), Kp ≈ 10⁴·Ki.\n"
-            "  • Amplitude loop time constant ≈ 10·Q/f₀ (grows with Q).\n"
+            "Rules of thumb (Scienta Omicron QPlus NC-AFM manual, 2022; arbitrary SXM units):\n"
+            "  • Amplitude Ki ≈ 5×10⁸/Q at ±1 V output gain (×10 for ±0.1 V), Kp ≈ 10⁴·Ki.\n"
+            "  • Amplitude feedback Tau ≈ Q/(100·f₀) = 10·Q/f₀ ms (SXM offers discrete values).\n"
             "  • PLL time constant ≈ 1/(10·BW_PLL); BW_PLL = 50 Hz → 2 ms.\n"
             "\n"
             "Only Amplitude Ki/Kp are sent to SXM. PLL Kp/Ki (Edit27/Edit22) are not suggested: "
@@ -242,7 +243,7 @@ class SuggestedTab(QtWidgets.QWidget):
         # Rules of thumb (see the note in the tab). Ki/Kp are in SXM units.
         Ki = 5e8 / Q
         Kp = 1e4 * Ki
-        tau_amp_ms = 10.0 * Q / f0 * 1000.0        # a TIME: proportional to Q/f0, so it grows with Q
+        tau_amp_ms = 10.0 * Q / f0                 # manual: Tau = Q/(100 f0) s = 10 Q/f0 ms; grows with Q
         tau_pll_ms = 1.0 / (10.0 * BW_PLL) * 1000.0
 
         # Straight resonator physics, for sanity-checking the above.
