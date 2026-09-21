@@ -25,6 +25,7 @@ to ensure compatibility with existing Anfatec software.
 """
 
 import ctypes
+import threading
 from ctypes import c_long
 import win32file, win32con
 
@@ -195,6 +196,16 @@ class SXMIOCTL:
         # We allocate this once and reuse it for efficiency
         self._inbuf = ctypes.create_string_buffer(ctypes.sizeof(c_long))
 
+        # This single instance is shared across multiple threads (e.g. a
+        # ScopeTab capture thread running concurrently with the
+        # Constant-Height tab's GUI-thread poll timer). _inbuf above is
+        # reused per call, so without serializing access here, one thread
+        # can overwrite it with a different channel index before another
+        # thread's DeviceIoControl call actually reads it - silently
+        # returning the wrong channel's value. This lock makes read_raw/
+        # write_raw safe to call concurrently from multiple threads.
+        self._io_lock = threading.Lock()
+
     def close(self):
         """
         Explicitly close the driver connection.
@@ -242,24 +253,28 @@ class SXMIOCTL:
             3. Driver returns 4 bytes containing the raw channel value
             4. Converts bytes back to C long integer
         """
-        # Copy channel index into the pre-allocated input buffer
-        # This converts Python int to C long in the buffer format expected by driver
-        ctypes.memmove(
-            self._inbuf, 
-            ctypes.byref(c_long(channel_index)), 
-            ctypes.sizeof(c_long)
-        )
-        
-        # Execute the IOCTL call to read channel data
-        # DeviceIoControl sends control code + input buffer to driver
-        # Driver processes request and returns output buffer with channel value
-        out = win32file.DeviceIoControl(
-            self.handle,              # Device handle
-            IOCTL_GET_KANAL,         # Control code (what operation to perform)
-            self._inbuf,             # Input buffer (channel index)
-            ctypes.sizeof(c_long)    # Expected output size (4 bytes for long)
-        )
-        
+        # Serialize the whole fill-buffer -> call -> read-result sequence,
+        # since self._inbuf is a single shared buffer reused across calls
+        # (see the note on self._io_lock in __init__).
+        with self._io_lock:
+            # Copy channel index into the pre-allocated input buffer
+            # This converts Python int to C long in the buffer format expected by driver
+            ctypes.memmove(
+                self._inbuf,
+                ctypes.byref(c_long(channel_index)),
+                ctypes.sizeof(c_long)
+            )
+
+            # Execute the IOCTL call to read channel data
+            # DeviceIoControl sends control code + input buffer to driver
+            # Driver processes request and returns output buffer with channel value
+            out = win32file.DeviceIoControl(
+                self.handle,              # Device handle
+                IOCTL_GET_KANAL,         # Control code (what operation to perform)
+                self._inbuf,             # Input buffer (channel index)
+                ctypes.sizeof(c_long)    # Expected output size (4 bytes for long)
+            )
+
         # Convert output bytes back to a C long integer
         return c_long.from_buffer_copy(out).value
 
@@ -308,7 +323,8 @@ class SXMIOCTL:
         """
         import struct
         buf = struct.pack("<ll", int(write_index), int(counts))
-        win32file.DeviceIoControl(self.handle, IOCTL_SET_CHANNEL, buf, 0)
+        with self._io_lock:
+            win32file.DeviceIoControl(self.handle, IOCTL_SET_CHANNEL, buf, 0)
 
     def write_unit(self, name: str, value: float) -> int:
         """

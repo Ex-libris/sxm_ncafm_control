@@ -28,6 +28,8 @@ python -m sxm_ncafm_control.app
 
 The checkout directory must be named `sxm_ncafm_control`: modules use absolute imports (`from sxm_ncafm_control.gui...`) *and* relative ones (`from ..common import ...`), so running `python app.py` from inside the folder fails.
 
+`measure_driver_throughput.py` is a read-only diagnostic for the achievable IOCTL/DDE read rates. Run it **on the hardware PC, from inside this folder** (it uses bare `import device_driver`): `python measure_driver_throughput.py`. Measured so far: ~150–175 kHz combined IOCTL reads.
+
 To exercise the GUI without hardware, just launch with SXM closed: the app falls back to offline mode (see below). Verifying real DDE/IOCTL behaviour requires the SXM software and driver on the measurement PC.
 
 ## Architecture
@@ -38,7 +40,9 @@ To exercise the GUI without hardware, just launch with SXM closed: the app falls
 - `conn.driver` — `SXMIOCTL`, or `None` if the driver can't be opened
 - `conn.is_offline` — true if either fell back
 
-Fallback messages are printed by `common.offline_message()` (root `common.py`). Offline, the mock DDE client prints `[MOCK] ...` lines instead of sending, and tabs synthesize data when `driver is None`.
+Fallback messages are printed by `common.offline_message()` (root `common.py`). Offline, the mock DDE client prints `[MOCK] ...` lines instead of sending, and tabs synthesize data when `driver is None` (Live Scope has no mock and just refuses to start).
+
+`conn.reconnect()` tears both handles down and re-creates them (the DDE conversation and the exclusive IOCTL handle can go stale in long sessions). **Tabs each hold their own `dde`/`driver` reference**, so `MainWindow.reconnect_hardware()` first pauses anything using the old handles (scope capture, live scope, step test, Z timer) and then `_push_connection_to_tabs()` re-injects the new ones. A new tab that stores `dde`/`driver` must be added to that method. The shared driver is closed once, in `MainWindow.closeEvent` — individual tabs must not close it.
 
 ### DDE layer (two files, easy to confuse)
 - **`SXMRemote.py`** — Anfatec's vendor DDEML wrapper (ctypes), lightly modified. Keep edits minimal. **Importing it opens a DDE conversation** (`MySXM = DDEClient("SXM","Remote")` at module bottom); if SXM isn't running the import raises `DDEError`, which `SXMConnection` catches and turns into the mock. `RealDDEClient` then creates its *own* `SXMRemote.DDEClient`. `dde_client.py` does a bare `import SXMRemote`, which only resolves because `app.main()` inserts the package dir into `sys.path`.
@@ -50,7 +54,7 @@ How DDE commands work: `execute()` wraps the command in a Pascal program (`begin
 SXM parameters are effectively **write-only**; `BaseDDE._last` caches the last value written per `(ptype, pcode)` so the UI can show something.
 
 ### IOCTL layer (`device_driver.py`)
-- `SXMIOCTL` opens `\\.\SXM` (share mode 0). `read_raw(index)` → signed 32-bit via `IOCTL_GET_KANAL` (0xF0D); `read_scaled(name)` multiplies by the scale from `CHANNELS`. `write_raw` uses `IOCTL_SET_CHANNEL` (0xF18); `write_unit` currently hard-codes DAC 0 (Topo) regardless of the name passed.
+- `SXMIOCTL` opens `\\.\SXM` (share mode 0, so **one handle for the whole app** — pass `conn.driver` around, never open a second). One instance is used concurrently by capture threads and GUI timers, and reuses a single input buffer, so `read_raw`/`write_raw` are serialized by `_io_lock`; keep any new driver call inside it. `read_raw(index)` → signed 32-bit via `IOCTL_GET_KANAL` (0xF0D); `read_scaled(name)` multiplies by the scale from `CHANNELS`. `write_raw` uses `IOCTL_SET_CHANNEL` (0xF18); `write_unit` currently hard-codes DAC 0 (Topo) regardless of the name passed.
 - `CHANNELS` = `{name: (driver_index, short_label, unit, scale)}` is the single source for channel names/units/scales; the scope and constant-height tabs populate their combo boxes from it. Negative indices are DACs/outputs, positive are ADC inputs. Channel keys are e.g. `'QPlusAmpl'`, `'Drive'`, `'Phase'`, `'df'`, `'Topo'`; `Topo` is in **nm**.
 - `io_reader.py` is dead code (imports an external `SXMOscilloscope` module that isn't in the repo, nothing imports it); `device_driver.py` replaced it.
 
@@ -63,8 +67,9 @@ Amp Ref `Edit23`, Amp Ki `Edit24`, Amp Kp `Edit32`, PLL Kp `Edit27`, PLL Ki `Edi
 ### GUI (`gui/`)
 `MainWindow` (a `QWidget`, not `QMainWindow`) creates the tabs and does all cross-tab wiring:
 - `ParamsTab(dde)` — table Previous/Current/New; stage → apply; save/load "tune" JSON (`kind: "ncafm_tune"`); user-added `EditXX` rows. Emits `custom_params_changed` → `StepTestTab.set_custom_params`.
-- `StepTestTab(dde)` — QTimer-driven low/high square wave on one parameter. Holds direct refs to the scope and tab widget; triggers `ScopeTab.start_capture()` and hands it `(QDateTime, label)` events via `set_event_markers()` for overlay. `ScopeTab.set_test_tab_reference()` links back for "Repeat Test".
-- `ScopeTab()` — takes **no** connection; it opens its **own** `SXMIOCTL` and runs `CaptureThread` (QThread, reads two channels sample-by-sample as fast as the driver allows; effective rate = samples / wall time). Falls back to synthetic signals if the driver won't open.
+- `StepTestTab(dde)` — QTimer-driven low/high square wave on one parameter. Holds direct refs to the scope and tab widget; triggers `ScopeTab.start_capture(npoints_override=...)` sized from the test duration, and hands it `(QDateTime, label)` events via `set_event_markers()` for overlay. `ScopeTab.set_test_tab_reference()` links back for "Repeat Test".
+- `ScopeTab(driver)` — one-shot capture: `CaptureThread` (QThread) reads two channels back-to-back for N samples as fast as the driver allows; there is no fixed sample rate, it is measured afterwards (samples / wall time) and shown in the status line. Plot is downsampled above 100k points, export keeps the full data. `estimate_capture_npoints(duration_s)` sizes a capture from the last measured rate. Events past the end of the capture are skipped, not clamped. Synthetic signals if `driver is None`.
+- `LiveScopeTab(driver)` — separate tab (not a mode of `ScopeTab`): `LiveCaptureThread` fills a ring buffer forever; a 40 ms timer redraws the last N seconds (strided to ≤5000 points). Buffer is sized from `ASSUMED_MAX_RATE`, so the real time span is reported in the status line. The GUI reads the buffer without a lock, by design (display only).
 - `SuggestedTab(dde, params_tab)` — Ki/Kp/τ calculator from Q, f₀, PLL bandwidth, plus Lorentzian fit (`scipy.curve_fit`) of a loaded spectrum; can stage into `ParamsTab.stage_value()` or send directly.
 - `QplusCalibrationTab(dde)` — sweeps `Edit23`, reads topography via DDE `read_topography()` (constructed without a driver, so the IOCTL fallback is unused), fits pm/mV with `scipy.stats.linregress`.
 - `ZConstAcquisition(dde, driver)` — 100 ms `QTimer` polls `Topo` via the driver for live Z (plain lists trimmed to a time window). "Disable Feedback" calls `feed_para("enable", 1)` (note the inverted-looking sense: 1 = feedback off) and re-enabling sends `0`. Manual mode is in **absolute Z (nm)** but the write goes to DDE channel 0, so it maps through a reference captured at disable time: `CH0 = ch0_base + ch0_sign * (z_target - abs_ref_z)`. `ch0_sign` (+1) is a manual knob if the piezo direction is inverted. Re-enabling feedback first presets CH0 to the spinbox target. Has its own font-scale combo, independent of the global accessibility manager.
@@ -72,7 +77,8 @@ Amp Ref `Edit23`, Amp Ki `Edit24`, Amp Kp `Edit32`, PLL Kp `Edit27`, PLL Ki `Edi
 
 ### Gotchas
 - `MainWindow` sets `step_tab.scope_tab_index = 2` (hard-coded); reordering tabs breaks the "jump to Scope" behaviour.
-- `ScopeTab` defaults its combos to the key `"QplusAmplitude"`, which doesn't exist in `CHANNELS` (the key is `'QPlusAmpl'`), so the default silently falls through to the first channel.
+- Don't `print()` non-ASCII (e.g. `→`): with a cp1252 stdout it raises `UnicodeEncodeError`, and an exception inside a Qt slot aborts PyQt5. Use `->`.
+- Long-running `QTextEdit` logs should go through `common.append_log_line()` (bounded to `LOG_MAX_BLOCKS`), not `.append()`.
 - **Known bug:** `ZConstAcquisition.toggle_feedback` calls `self.dde.get_channel(0)`, but the DDE clients only define `read_channel()`. The `AttributeError` is swallowed by its `try/except`, so `ch0_base` stays `0.0` and absolute-Z writes use the wrong base. Fix by calling `read_channel(0)`.
 - Values sent are in **SXM's current GUI units**; the app does no unit conversion for DDE parameters.
 - `__pycache__/*.pyc` files are tracked in git despite `.gitignore`, so they show up as modified/deleted after any run. Don't stage them.

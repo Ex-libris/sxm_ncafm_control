@@ -1,4 +1,5 @@
-import datetime
+import time
+from collections import deque
 from PyQt5 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 from sxm_ncafm_control.device_driver import CHANNELS
@@ -255,9 +256,10 @@ class ZConstAcquisition(QtWidgets.QWidget):
         self.abs_ref_z = 0.0 # Z at disable
         self.ch0_base = 0.0  # CH0 at disable
 
-        self.z_history = []
-        self.timestamps = []
+        self.z_history = deque()
+        self.timestamps = deque()
         self.window_seconds = 10
+        self._t0 = time.monotonic()
         self.feedback_enabled = True
         self.change_threshold = 0.001
 
@@ -351,7 +353,7 @@ class ZConstAcquisition(QtWidgets.QWidget):
         self.extra_plot.showGrid(x=True, y=True, alpha=0.3)
         layout.addWidget(self.extra_plot)
 
-        self.extra_history = []
+        self.extra_history = deque()
 
         # ---- Timer ----
         self.timer = QtCore.QTimer()
@@ -432,7 +434,7 @@ class ZConstAcquisition(QtWidgets.QWidget):
                 dz_cmd = z_target - self.abs_ref_z
                 final_ch0 = self.ch0_base + self.ch0_sign * dz_cmd
                 self.dde.set_channel(0, final_ch0)
-                print(f"Restore before FB ON: Z_target={z_target:.6f} → CH0={final_ch0:.6f}")
+                print(f"Restore before FB ON: Z_target={z_target:.6f} -> CH0={final_ch0:.6f}")
             except Exception as e:
                 print(f"Warn: cannot preset CH0: {e}")
 
@@ -466,15 +468,13 @@ class ZConstAcquisition(QtWidgets.QWidget):
         if abs(change) >= self.change_threshold:
             self.change_overlay.show_change(change, self.last_z)
             # marker ONLY on manual input
-            now = datetime.datetime.now()
-            elapsed = (now - now.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds()
+            elapsed = time.monotonic() - self._t0
             self.add_change_marker(elapsed, self.last_z, change)
 
-        print(f"Manual ABS Z: target={abs_target:.6f} nm, dz_cmd={dz_cmd:+.6f} nm → CH0={ch0_target:.6f}")
+        print(f"Manual ABS Z: target={abs_target:.6f} nm, dz_cmd={dz_cmd:+.6f} nm -> CH0={ch0_target:.6f}")
 
     def poll(self):
-        now = datetime.datetime.now()
-        elapsed = (now - now.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds()
+        elapsed = time.monotonic() - self._t0
 
         try:
             if self.live_mode and self.driver:
@@ -517,9 +517,9 @@ class ZConstAcquisition(QtWidgets.QWidget):
 
         # Trim
         while self.timestamps and self.timestamps[-1] - self.timestamps[0] > self.window_seconds:
-            self.timestamps.pop(0)
-            self.z_history.pop(0)
-            self.extra_history.pop(0)
+            self.timestamps.popleft()
+            self.z_history.popleft()
+            self.extra_history.popleft()
 
         # Update plots
         if self.timestamps:
@@ -629,10 +629,7 @@ class ZConstAcquisition(QtWidgets.QWidget):
         print("Markers cleared")
 
     def closeEvent(self, event):
+        # Only stop this tab's own timer - the IOCTL driver is shared across
+        # tabs and is closed once, centrally, in MainWindow.closeEvent.
         self.timer.stop()
-        if hasattr(self, 'driver') and self.driver:
-            try:
-                self.driver.close()
-            except:
-                pass
         event.accept()

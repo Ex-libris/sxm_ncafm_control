@@ -18,7 +18,7 @@ from typing import List, Tuple
 from PyQt5 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 
-from ..common import PARAMS_BASE, confirm_high_voltage
+from ..common import PARAMS_BASE, confirm_high_voltage, append_log_line
 
 
 class StepTestTab(QtWidgets.QWidget):
@@ -151,7 +151,21 @@ class StepTestTab(QtWidgets.QWidget):
         self._timer.start(int(self.period.value() * 1000))
 
         if self.chk_trigger_scope.isChecked() and self.scope_tab:
-            self.scope_tab.start_capture()
+            # Size the capture from the test's own duration, not whatever
+            # happens to be in the Scope tab's "Samples to acquire" field -
+            # otherwise a capture that finishes early leaves the back half
+            # of the test's events with nowhere valid to be drawn.
+            test_duration_s = self.steps.value() * self.period.value()
+            npts = self.scope_tab.estimate_capture_npoints(test_duration_s)
+            if npts >= self.scope_tab.npoints_spin.maximum():
+                append_log_line(
+                    self.log,
+                    f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Warning: this test "
+                    f"(~{test_duration_s:.0f} s) may be too long for Scope to fully capture "
+                    f"in one shot even at its maximum sample count - consider the Live Scope "
+                    f"tab for tests this long."
+                )
+            self.scope_tab.start_capture(npoints_override=npts)
         if self.tabs_widget and self.scope_tab_index is not None:
             self.tabs_widget.setCurrentIndex(self.scope_tab_index)
 
@@ -159,7 +173,7 @@ class StepTestTab(QtWidgets.QWidget):
         """Stops the step test and optionally stops the scope."""
         if self._timer.isActive():
             self._timer.stop()
-            self.log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Test stopped.")
+            append_log_line(self.log, f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Test stopped.")
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
 
@@ -190,7 +204,7 @@ class StepTestTab(QtWidgets.QWidget):
             else:
                 self.dde.send_dncpara(int(pcode), value)
         except Exception as e:
-            self.log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] SEND ERROR: {e}")
+            append_log_line(self.log, f"[{datetime.datetime.now().strftime('%H:%M:%S')}] SEND ERROR: {e}")
             self.stop()
             return
 
@@ -199,7 +213,7 @@ class StepTestTab(QtWidgets.QWidget):
 
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         code_text = pcode if ptype == "EDIT" else f"DNC{pcode}"
-        self.log.append(f"[{ts}] Set {label} ({code_text}) to {value}")
+        append_log_line(self.log, f"[{ts}] Set {label} ({code_text}) to {value}")
 
         self.step_index += 1
         if self.step_index >= self.steps.value():

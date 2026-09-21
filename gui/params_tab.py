@@ -26,6 +26,7 @@ from ..common import (
     confirm_high_voltage,
     NumericItemDelegate,
     VOLTAGE_LIMIT_ABS,
+    append_log_line,
 )
 
 
@@ -189,7 +190,7 @@ class ParamsTab(QtWidgets.QWidget):
     def _append_log(self, text: str) -> None:
         """Append a timestamped entry to the change log."""
         ts = datetime.datetime.now().strftime("%H:%M:%S")
-        self.log_widget.append(f"[{ts}] {text}")
+        append_log_line(self.log_widget, f"[{ts}] {text}")
 
     # ---------- staging ----------
     def stage_value(self, ptype: str, pcode: str, value: float) -> bool:

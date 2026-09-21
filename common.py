@@ -27,6 +27,28 @@ PARAM_TOOLTIPS = {
 # Voltage safety limit
 VOLTAGE_LIMIT_ABS = 10.0
 
+# Max lines kept in a QTextEdit log before old lines are trimmed
+LOG_MAX_BLOCKS = 500
+
+
+def append_log_line(log_widget: QtWidgets.QTextEdit, text: str, max_blocks: int = LOG_MAX_BLOCKS) -> None:
+    """
+    Append a line to a QTextEdit log, trimming the oldest lines once the
+    document exceeds max_blocks.
+
+    QTextDocument layout/repaint cost grows with document size, so an
+    unbounded log left running over a long session gradually slows down
+    every append and any repaint that touches the widget.
+    """
+    log_widget.append(text)
+    doc = log_widget.document()
+    excess = doc.blockCount() - max_blocks
+    if excess > 0:
+        cursor = QtGui.QTextCursor(doc)
+        cursor.movePosition(QtGui.QTextCursor.Start)
+        cursor.movePosition(QtGui.QTextCursor.NextBlock, QtGui.QTextCursor.KeepAnchor, excess)
+        cursor.removeSelectedText()
+
 
 def _to_float(text: str) -> Optional[float]:
     """
@@ -158,6 +180,6 @@ def offline_message(component: str, error: Exception, mock_name: str):
     err_msg = str(error)
     print(
         f"\n[OFFLINE MODE] {component} is not available.\n"
-        f"→ Cause: {err_msg}\n"
-        f"→ Action: Switching to {mock_name} (no hardware connected).\n"
+        f"-> Cause: {err_msg}\n"
+        f"-> Action: Switching to {mock_name} (no hardware connected).\n"
     )

@@ -15,7 +15,7 @@ from PyQt5 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 from scipy import stats
 
-from ..common import confirm_high_voltage
+from ..common import confirm_high_voltage, append_log_line
 
 
 class QplusCalibrationTab(QtWidgets.QWidget):
@@ -170,7 +170,7 @@ class QplusCalibrationTab(QtWidgets.QWidget):
 
     def _log(self, text: str) -> None:
         """Append a line to the log display."""
-        self.log.append(text)
+        append_log_line(self.log, text)
         self.log.moveCursor(QtGui.QTextCursor.End)
 
     def _build_amplitude_points(self) -> None:

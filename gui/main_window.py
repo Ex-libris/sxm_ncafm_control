@@ -10,7 +10,8 @@ Enhanced with comprehensive accessibility features for users with visual impairm
 Tabs:
     - Parameters: Adjust feedback gains, amplitude reference, and other settings.
     - Step Test: Automatically switch parameters to test system response.
-    - Scope: View real-time signals from the microscope.
+    - Scope: Capture and export discrete signal snapshots (one-shot).
+    - Live Scope: Continuously rolling live oscilloscope view.
     - Suggested Setup: View recommended starting values.
     - QPlus Calibration: Sweep amplitude and calibrate delta-topography response.
     - Constant Height: Control Z in constant-height mode.
@@ -32,6 +33,7 @@ from sxm_ncafm_control.gui.params_tab import ParamsTab
 from sxm_ncafm_control.gui.step_test_tab import StepTestTab
 from sxm_ncafm_control.gui.suggested_tab import SuggestedTab
 from sxm_ncafm_control.gui.scope_tab import ScopeTab
+from sxm_ncafm_control.gui.live_scope_tab import LiveScopeTab
 from sxm_ncafm_control.gui.qplus_calibration_tab import QplusCalibrationTab
 from sxm_ncafm_control.gui.z_const_acquisition import ZConstAcquisition
 from sxm_ncafm_control.gui.gui_accessibility_manager import (
@@ -105,13 +107,32 @@ class MainWindow(QtWidgets.QWidget):
         separator.setFrameShadow(QtWidgets.QFrame.Sunken)
         layout.addWidget(separator)
 
+        # Connection status + manual reconnect. DDE conversations and the
+        # exclusive-access IOCTL handle can both go stale over a long-running
+        # session without any error until the next call fails, so this gives
+        # the user a way to recover without restarting the whole app.
+        conn_bar = QtWidgets.QHBoxLayout()
+        self.conn_status_label = QtWidgets.QLabel()
+        conn_bar.addWidget(self.conn_status_label)
+        conn_bar.addStretch(1)
+        self.btn_reconnect = QtWidgets.QPushButton("Reconnect")
+        self.btn_reconnect.setToolTip(
+            "Close and reopen the DDE connection and IOCTL driver handle.\n"
+            "Use this if commands stop taking effect or readings stop updating\n"
+            "during a long session, before restarting the whole application."
+        )
+        self.btn_reconnect.clicked.connect(self.reconnect_hardware)
+        conn_bar.addWidget(self.btn_reconnect)
+        layout.addLayout(conn_bar)
+
         # Create tab widget
         self.tabs = QtWidgets.QTabWidget()
 
         # Create all tabs, sharing the same connection handles
         self.params_tab = ParamsTab(conn.dde)
         self.step_tab = StepTestTab(conn.dde)
-        self.scope_tab = ScopeTab()
+        self.scope_tab = ScopeTab(conn.driver)
+        self.live_scope_tab = LiveScopeTab(conn.driver)
         self.suggest_tab = SuggestedTab(conn.dde, self.params_tab)
         self.qplus_tab = QplusCalibrationTab(conn.dde)
         self.topo_hold_tab = ZConstAcquisition(conn.dde, conn.driver)
@@ -126,6 +147,7 @@ class MainWindow(QtWidgets.QWidget):
         self.tabs.addTab(self.params_tab, "Parameters")
         self.tabs.addTab(self.step_tab, "Step Test")
         self.tabs.addTab(self.scope_tab, "Scope")
+        self.tabs.addTab(self.live_scope_tab, "Live Scope")
         self.tabs.addTab(self.suggest_tab, "Suggested Setup")
         self.tabs.addTab(self.qplus_tab, "QPlus Amplitude calibration")
         self.tabs.addTab(self.topo_hold_tab, "Constant Height")
@@ -150,6 +172,91 @@ class MainWindow(QtWidgets.QWidget):
 
         # Apply initial accessibility settings
         self.apply_accessibility_to_all_tabs()
+
+        self.update_connection_status()
+
+    def update_connection_status(self):
+        """Refresh the connection status label to reflect self.conn's current state."""
+        if self.conn.is_offline:
+            self.conn_status_label.setText("● OFFLINE (mock DDE/driver)")
+            self.conn_status_label.setStyleSheet("QLabel { color: #b36b00; font-weight: bold; }")
+        else:
+            self.conn_status_label.setText("● ONLINE (real SXM)")
+            self.conn_status_label.setStyleSheet("QLabel { color: #2e8b57; font-weight: bold; }")
+
+    def _push_connection_to_tabs(self):
+        """Hand the current conn.dde/conn.driver to every tab that holds its own reference."""
+        self.params_tab.dde = self.conn.dde
+        self.step_tab.dde = self.conn.dde
+        self.suggest_tab.dde = self.conn.dde
+        self.qplus_tab.dde = self.conn.dde
+        self.qplus_tab.driver = self.conn.driver
+        self.topo_hold_tab.dde = self.conn.dde
+        self.topo_hold_tab.driver = self.conn.driver
+        self.scope_tab.driver = self.conn.driver
+        self.live_scope_tab.driver = self.conn.driver
+
+    def reconnect_hardware(self):
+        """
+        Close and reopen the DDE connection and IOCTL driver handle.
+
+        Anything actively using the old handles is paused first (a running
+        Scope capture, a running Live Scope, an in-progress Step Test, the
+        Constant-Height poll timer), since reconnect() closes the driver out
+        from under them. Every tab is holding its own copy of dde/driver from
+        construction time, so after reconnecting those references are
+        explicitly pushed out again - just replacing self.conn.dde/driver
+        would not reach them.
+        """
+        scope_was_capturing = (
+            self.scope_tab.capture_thread is not None
+            and self.scope_tab.capture_thread.isRunning()
+        )
+        if scope_was_capturing:
+            self.scope_tab.stop_capture()
+            self.scope_tab.capture_thread.wait(1000)
+
+        live_was_running = self.live_scope_tab.capture_thread is not None
+        if live_was_running:
+            self.live_scope_tab.stop_live()
+
+        step_test_was_running = self.step_tab._timer.isActive()
+        if step_test_was_running:
+            self.step_tab.stop()
+
+        self.topo_hold_tab.timer.stop()
+
+        self.btn_reconnect.setEnabled(False)
+        self.conn_status_label.setText("● Reconnecting...")
+        self.conn_status_label.setStyleSheet("QLabel { color: #666; font-weight: bold; }")
+        QtWidgets.QApplication.processEvents()
+
+        was_online = self.conn.reconnect()
+        self._push_connection_to_tabs()
+        self.topo_hold_tab.initialize_z_position()
+        self.topo_hold_tab.timer.start(100)
+
+        self.update_connection_status()
+        self.btn_reconnect.setEnabled(True)
+
+        if step_test_was_running:
+            QtWidgets.QMessageBox.information(
+                self, "Reconnected",
+                "Hardware connection re-established. The Step Test that was "
+                "running has been stopped - restart it manually if needed."
+            )
+        elif scope_was_capturing:
+            QtWidgets.QMessageBox.information(
+                self, "Reconnected",
+                "Hardware connection re-established. The Scope capture that "
+                "was running has been stopped - press Start Capture again if needed."
+            )
+        elif live_was_running:
+            QtWidgets.QMessageBox.information(
+                self, "Reconnected",
+                "Hardware connection re-established. Live Scope was running "
+                "and has been stopped - press Start Live again if needed."
+            )
 
     def setup_accessibility(self):
         """Initialize accessibility features"""
@@ -243,6 +350,7 @@ class MainWindow(QtWidgets.QWidget):
             self.params_tab,
             self.step_tab,
             self.scope_tab,
+            self.live_scope_tab,
             self.suggest_tab,
             self.qplus_tab,
             self.topo_hold_tab
@@ -439,5 +547,19 @@ class MainWindow(QtWidgets.QWidget):
 
     def closeEvent(self, event):
         """Handle window closing"""
-        # Accessibility settings are automatically saved by the manager
+        # Accessibility settings are automatically saved by the manager.
+        # Live Scope runs an unbounded acquisition thread against the driver
+        # handle - stop it before closing that handle out from under it.
+        # (A child tab widget's own closeEvent is not reliably delivered when
+        # only the top-level MainWindow is closed, so this is done centrally.)
+        if self.live_scope_tab.capture_thread is not None:
+            self.live_scope_tab.stop_live()
+
+        # The IOCTL driver is shared across tabs (Scope, Constant Height), so it
+        # is closed once here rather than by any individual tab.
+        if getattr(self.conn, "driver", None) is not None:
+            try:
+                self.conn.driver.close()
+            except Exception:
+                pass
         super().closeEvent(event)
