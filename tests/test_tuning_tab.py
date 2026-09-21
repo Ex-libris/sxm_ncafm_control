@@ -375,5 +375,36 @@ class MapInteraction(unittest.TestCase):
         self.assertEqual(staged, [("EDIT", "Edit27", kp), ("EDIT", "Edit22", ki)])
 
 
+class Guidance(unittest.TestCase):
+    """The on-screen explanations: the Guide tab and the 'what now?' line."""
+
+    def test_guide_covers_every_verdict_with_an_action(self):
+        html = T.guide_html()
+        for cat in W.CATEGORIES:
+            self.assertIn(W.CATEGORY_LABEL[cat], html)
+            self.assertIn(cat, {c for c, _, _ in T.GUIDE_VERDICTS})
+        for word in ("Baseline", "Kp", "Ki", "Stage in Params tab"):
+            self.assertIn(word, html)
+
+    def test_guide_is_the_first_thing_shown_and_the_first_result_switches_to_the_plots(self):
+        tab = make_tab(FakeInstrument())
+        self.assertIs(tab.detail_tabs.currentWidget(), tab.guide)
+        self.assertIn("No test yet", tab.detail_text.toPlainText())
+        tab._show_result(W.StepTestResult(kp=-100, ki=-1e4, loop="pll", failure="x"))
+        self.assertEqual(tab.detail_tabs.currentIndex(), 0)
+
+    def test_hint_says_why_the_buttons_are_disabled_and_what_to_press(self):
+        tab = T.TuningTab(FakeInstrument(), FakeInstrument())
+        self.assertIn("tick every item", tab.hint_label.text())
+        self.assertIn("Tick every item", tab.btn_single.toolTip())
+        self.assertFalse(tab.btn_single.isEnabled())
+        for c in tab.checks:
+            c.setChecked(True)
+        self.assertIn("Run single test", tab.hint_label.text())
+        self.assertTrue(tab.btn_single.isEnabled())
+        off = T.TuningTab(MockDDEClient(), None)
+        self.assertIn("Offline", off.hint_label.text())
+
+
 if __name__ == "__main__":
     unittest.main()

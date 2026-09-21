@@ -413,6 +413,83 @@ def format_result_html(res: W.StepTestResult, verdict: W.Verdict, suggestions: L
     return "<br>".join(rows)
 
 
+# (category, what the response looks like, what to change) - kept in line with W.advise()
+GUIDE_VERDICTS = (
+    ("good", "Fast enough, overshoot within the limit, no ringing.",
+     "Keep it. If it is much faster than needed, lower both gains a little: less noise, same shape."),
+    ("too_slow", "Clean response, but the rise takes longer than the target.",
+     "Raise Kp and Ki together by the same factor. The Ki:Kp ratio stays, so the shape stays."),
+    ("overshoot", "Goes past the new value by more than the limit, then comes back.",
+     "Lower Ki, keep Kp."),
+    ("ringing", "Oscillates around the new value, or never settles (large scatter between repeated steps).",
+     "Lower Ki first. If it persists, lower Kp too."),
+    ("slow_tail", "Gets there quickly, but the Phase error (PLL) or the last few percent linger.",
+     "Raise Ki, keep Kp: the integral term removes what Kp leaves behind."),
+    ("lost", "The loop lost lock, ran away, or the step could not be measured.",
+     "The run stops and the baseline is restored. Go back to the last good pair, or halve both gains."),
+)
+
+
+def guide_html() -> str:
+    """Static help for the tab: what it does, how to use it, what the numbers and verdicts mean."""
+    def rgb(cat):
+        return "#%02x%02x%02x" % CATEGORY_COLOR[cat]
+
+    rows = "".join(
+        f"<tr><td bgcolor='{rgb(cat)}'><b>{W.CATEGORY_LABEL[cat]}</b></td><td>{seen}</td><td>{todo}</td></tr>"
+        for cat, seen, todo in GUIDE_VERDICTS)
+    return f"""
+<h3>What this tab does</h3>
+<p>It nudges a setpoint back and forth (PLL: <i>DNC use</i> by &plusmn;step Hz; amplitude loop: <i>Ref</i> by &plusmn;step %),
+records how the loop follows it through the driver, measures the response, gives it a verdict and suggests new Kp / Ki.
+Only Kp, Ki and the stepped parameter are ever written. They are put back to the baseline when a run ends, is stopped
+or is aborted.</p>
+
+<h3>How to use it</h3>
+<ol>
+<li><b>Test</b> (left, 1): pick the loop. The defaults follow the manual.</li>
+<li><b>Baseline</b> (left, 2): type the Kp / Ki that are set in SXM right now. SXM cannot be read back, so this is
+what every change is measured against and what is restored afterwards.</li>
+<li><b>Target</b> (left, 3): your scan (line time, pixels) or a response time. It sets the limits used for the verdict.</li>
+<li><b>Before running</b> (left, 5): tick every item. Only then are the run buttons enabled.</li>
+<li><b>Run single test (baseline)</b>: measures the loop as it is now. The verdict, the measured times and the suggested
+new gains appear in the results panel and the plots.</li>
+<li><b>Test suggested pair</b>: re-measures with the suggested gains. Repeat until the verdict is <i>good</i>.</li>
+<li><b>Stage in Params tab</b>: hands the chosen pair to the Parameters tab. Apply it there.</li>
+</ol>
+
+<h3>What is measured</h3>
+<table border='1' cellspacing='0' cellpadding='4'>
+<tr><td><b>Rise time (10-90 %)</b></td><td>How fast the main channel (df for the PLL, QPlusAmpl for the amplitude loop) follows the step.
+Imaging target: at most half a pixel dwell (line time / pixels).</td></tr>
+<tr><td><b>5 % settling</b></td><td>Time until it stays within 5 % of the new value.</td></tr>
+<tr><td><b>Overshoot</b></td><td>How far it goes past the new value, in % of the step.</td></tr>
+<tr><td><b>Ringing extrema</b></td><td>Number of wiggles after the step.</td></tr>
+<tr><td><b>Phase tail</b> (PLL)</td><td>The Phase error is what the loop is still correcting. It should have decayed within 10 % of a line time.</td></tr>
+<tr><td><b>Scatter</b></td><td>How much repeated steps differ from each other: noise, or a sustained oscillation.</td></tr>
+</table>
+
+<h3>Verdicts and what to change</h3>
+<table border='1' cellspacing='0' cellpadding='4'>
+<tr><th>Verdict</th><th>What you see</th><th>What to change</th></tr>
+{rows}
+</table>
+
+<h3>Rules of thumb</h3>
+<ul>
+<li>Kp does the fast tracking; Ki removes what is left (the Phase tail).</li>
+<li>The Ki:Kp <b>ratio</b> sets the shape. Raising or lowering <b>both</b> by the same factor makes the loop faster or slower.</li>
+<li>A faster loop is a noisier loop: stop at the slowest gains that still meet the target.</li>
+<li>Kp and Ki are SXM's raw units. Nothing here assumes what a value means: gains are judged only from measured responses.</li>
+</ul>
+
+<h3>The (Kp, Ki) map (optional)</h3>
+<p>Runs one test per cell of a log-spaced grid around the baseline. Up-right = both higher (faster), down-left = both lower (slower).
+Cell colours are the verdict colours above; grey = skipped (more aggressive than a cell that lost the loop), pale = not tested yet.
+Click a cell to see its response and advice; <i>Suggest / refine zoom</i> maps the neighbourhood of a good cell in finer steps.</p>
+"""
+
+
 # ---------------------------------------------------------------------------
 # the tab
 # ---------------------------------------------------------------------------
@@ -543,7 +620,8 @@ class TuningTab(QtWidgets.QWidget):
         self.est_label = QtWidgets.QLabel()
         f.addRow(self.est_label)
         lv.addWidget(g)
-        for w in (self.factor_spin, self.kp_lo, self.kp_hi, self.ki_lo, self.ki_hi, self.hold_spin, self.settle_spin, self.events_spin):
+        for w in (self.factor_spin, self.kp_lo, self.kp_hi, self.ki_lo, self.ki_hi, self.hold_spin, self.settle_spin,
+                  self.events_spin, self.step_spin):
             w.valueChanged.connect(self._update_estimate)
 
         # 5. checklist + buttons
@@ -573,8 +651,18 @@ class TuningTab(QtWidgets.QWidget):
         lv.addStretch(1)
 
         # right side: [map | advice] over [selected-test plots | all tests | log]
+        right_box = QtWidgets.QWidget()
+        rb = QtWidgets.QVBoxLayout(right_box)
+        rb.setContentsMargins(0, 0, 0, 0)
+        self.hint_label = QtWidgets.QLabel()
+        self.hint_label.setWordWrap(True)
+        self.hint_label.setTextFormat(QtCore.Qt.RichText)
+        self.hint_label.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.hint_label.setMargin(6)
+        rb.addWidget(self.hint_label)
         right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        root.addWidget(right, 1)
+        rb.addWidget(right, 1)
+        root.addWidget(right_box, 1)
         top = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         right.addWidget(top)
 
@@ -633,6 +721,13 @@ class TuningTab(QtWidgets.QWidget):
         self.log = QtWidgets.QTextEdit()
         self.log.setReadOnly(True)
         self.detail_tabs.addTab(self.log, "Log")
+        self.guide = QtWidgets.QTextBrowser()
+        self.guide.setHtml(guide_html())
+        self.detail_tabs.addTab(self.guide, "Guide")
+        self.detail_tabs.setCurrentWidget(self.guide)         # what a first-time user needs; the first result switches to the plots
+        self.detail_text.setHtml("<b>No test yet.</b><br>The verdict, the measured times and the suggested new "
+                                 "Kp / Ki appear here after a test. The <b>Guide</b> tab below explains the steps "
+                                 "and what each verdict means.")
         right.setStretchFactor(0, 3)
         right.setStretchFactor(1, 2)
 
@@ -727,6 +822,7 @@ class TuningTab(QtWidgets.QWidget):
         each = p.settle_s + p.duration + 0.3
         self.est_label.setText(f"{n} tests, about {n * each / 60:.1f} min (worst case; unstable regions are skipped)")
         self._target_note()
+        self._update_hint()
 
     def _gains_valid(self) -> Optional[str]:
         ld = self.loop_def
@@ -748,9 +844,42 @@ class TuningTab(QtWidgets.QWidget):
         self.btn_stop.setEnabled(running)
         self.btn_clear.setEnabled(not running)
         self.btn_scope.setEnabled(self.scope_tab is not None and not running)
-        tip = "" if self._online() else "Offline: running tests needs the real SXM and driver."
+        if not self._online():
+            tip = "Offline: running tests needs the real SXM and driver."
+        elif not all(c.isChecked() for c in self.checks):
+            tip = "Tick every item in '5. Before running' first."
+        else:
+            tip = ""
         for b in (self.btn_single, self.btn_map):
             b.setToolTip(tip)
+        self._update_hint()
+
+    def _update_hint(self):
+        """The one-line 'what now?' above the results: why the buttons are disabled and what to press next."""
+        if self.runner_active():
+            text = ("<b>Running.</b> The setpoint is being stepped and the response recorded; the verdict appears when the "
+                    "test ends. <i>Stop &amp; restore baseline</i> aborts and puts the baseline gains back.")
+        elif not self._online():
+            text = ("<b>Offline.</b> Running tests needs the real SXM and driver. You can still analyse a step train "
+                    "recorded in the Scope tab (<i>Analyze Scope capture</i>).")
+        elif not all(c.isChecked() for c in self.checks):
+            text = ("<b>First:</b> enter the Kp / Ki that are set in SXM now (left, 2), then tick every item in "
+                    "<i>5. Before running</i>. The run buttons stay disabled until you do.")
+        elif not self.singles and not (self.current_map() and self.current_map().results):
+            what = "DNC use" if self.loop_def.key == "pll" else "Amplitude Ref"
+            try:
+                p = self.plan()
+                secs = f" (about {p.settle_s + p.duration + 0.3:.0f} s)"
+            except ValueError:
+                secs = ""
+            text = (f"<b>Ready.</b> Press <i>Run single test (baseline)</i>: it steps {what} {self.step_spin.value():g} "
+                    f"{'Hz' if self.loop_def.key == 'pll' else '%'} up and down, measures the loop at the current gains "
+                    f"and suggests what to change{secs}.")
+        else:
+            text = ("<b>Next:</b> read the verdict and the suggestion below. <i>Test suggested pair</i> re-measures with the "
+                    "suggested gains; <i>Stage in Params tab</i> hands a pair to the Parameters tab. Repeat until the "
+                    "verdict is good.")
+        self.hint_label.setText(text)
 
     # ------------------------------------------------------------------ logging
     def _log(self, text):
@@ -979,6 +1108,7 @@ class TuningTab(QtWidgets.QWidget):
         self._suggestions = sugg
         ld = W.LOOPS.get(res.loop, self.loop_def)
         self.detail_text.setHtml(format_result_html(res, v, sugg, ld))
+        self.detail_tabs.setCurrentIndex(0)                   # the plots of the selected test
         self.btn_prior.setEnabled(res.model is not None)
         for p in (self.plot1, self.plot2):
             p.clear()
