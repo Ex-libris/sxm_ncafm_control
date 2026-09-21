@@ -1,4 +1,5 @@
 import datetime
+import math
 import numpy as np
 from scipy.optimize import curve_fit
 from PyQt5 import QtWidgets, QtCore, QtGui
@@ -73,6 +74,7 @@ class SuggestedTab(QtWidgets.QWidget):
         self.dde = dde_client
         self.params_tab = params_tab
         self._last_fit = None
+        self._spectrum = None   # (freq, phase, amp) of the loaded file, sorted by freq
 
         main_layout = QtWidgets.QHBoxLayout(self)
 
@@ -119,6 +121,16 @@ class SuggestedTab(QtWidgets.QWidget):
         self.kp_out = QtWidgets.QLineEdit(); self.kp_out.setReadOnly(True)
         self.tau_amp = QtWidgets.QLineEdit(); self.tau_amp.setReadOnly(True)
         self.tpll_out = QtWidgets.QLineEdit(); self.tpll_out.setReadOnly(True)
+        # Derived from the resonator alone (no rule of thumb involved): use them to sanity-check
+        # the suggestions above.
+        self.bw_res_out = QtWidgets.QLineEdit(); self.bw_res_out.setReadOnly(True)
+        self.tau_ring_out = QtWidgets.QLineEdit(); self.tau_ring_out.setReadOnly(True)
+        self.tau_amp.setToolTip("Rule of thumb: amplitude loop time constant = 10 * Q / f0.\n"
+                                "It grows with Q: a sharper resonance responds more slowly.")
+        self.tpll_out.setToolTip("Rule of thumb: PLL time constant = 1 / (10 * PLL bandwidth).")
+        self.bw_res_out.setToolTip("Full width at half maximum of the resonance, f0 / Q.")
+        self.tau_ring_out.setToolTip("Amplitude ring-down time of the resonator, Q / (pi * f0).\n"
+                                     "The amplitude loop cannot usefully be faster than this.")
 
         form.addWidget(QtWidgets.QLabel("Suggested Amplitude Ki:"), r, 0)
         form.addWidget(self.ki_out, r, 1); r += 1
@@ -128,6 +140,10 @@ class SuggestedTab(QtWidgets.QWidget):
         form.addWidget(self.tau_amp, r, 1); r += 1
         form.addWidget(QtWidgets.QLabel("PLL TimeConstant (ms):"), r, 0)
         form.addWidget(self.tpll_out, r, 1); r += 1
+        form.addWidget(QtWidgets.QLabel("Resonator bandwidth f₀/Q (Hz):"), r, 0)
+        form.addWidget(self.bw_res_out, r, 1); r += 1
+        form.addWidget(QtWidgets.QLabel("Amplitude ring-down Q/(π·f₀) (ms):"), r, 0)
+        form.addWidget(self.tau_ring_out, r, 1); r += 1
 
         left.addLayout(form)
 
@@ -135,12 +151,18 @@ class SuggestedTab(QtWidgets.QWidget):
         note = QtWidgets.QTextEdit()
         note.setReadOnly(True)
         note.setPlainText(
-            "Formulas:\n"
-            "  • Ki ≈ 5×10⁸/Q (for 1 V output gain), Kp ≈ 10⁴·Ki.\n"
-            "  • Amplitude bandwidth ≈ 10·Q / f₀.\n"
-            "  • PLL τ ≈ 1 / (10·BW_PLL). Default BW_PLL = 50 Hz → τ = 2 ms."
+            "Derived from the resonator (f₀ in Hz, Q dimensionless):\n"
+            "  • Bandwidth (FWHM) = f₀/Q;  amplitude ring-down time = Q/(π·f₀).\n"
+            "\n"
+            "Rules of thumb (empirical, from the SXM notes; check them against your SXM version):\n"
+            "  • Amplitude Ki ≈ 5×10⁸/Q (\"for 1 V output gain\", SXM units), Kp ≈ 10⁴·Ki.\n"
+            "  • Amplitude loop time constant ≈ 10·Q/f₀ (grows with Q).\n"
+            "  • PLL time constant ≈ 1/(10·BW_PLL); BW_PLL = 50 Hz → 2 ms.\n"
+            "\n"
+            "Only Amplitude Ki/Kp are sent to SXM. PLL Kp/Ki (Edit27/Edit22) are not suggested: "
+            "that needs SXM's PLL gain normalisation."
         )
-        note.setMaximumHeight(100)
+        note.setMaximumHeight(190)
         left.addWidget(note)
 
         # Buttons
@@ -213,11 +235,23 @@ class SuggestedTab(QtWidgets.QWidget):
         -------
         Updates Ki, Kp, amplitude tau, and PLL time constant fields.
         """
-        Q = float(self.q_val.value()); f0 = float(self.f0_val.value()); BW_PLL = float(self.bw_pll.value())
-        Ki = 5e8 / max(Q, 1e-9); Kp = 1e4 * Ki; BW_amp = 10 * Q / f0
-        tau_amp = 1.0 / BW_amp * 1000; tau_pll = 1.0 / (10.0 * max(BW_PLL, 1e-9)) * 1000
+        Q = max(float(self.q_val.value()), 1e-9)
+        f0 = max(float(self.f0_val.value()), 1e-9)
+        BW_PLL = max(float(self.bw_pll.value()), 1e-9)
+
+        # Rules of thumb (see the note in the tab). Ki/Kp are in SXM units.
+        Ki = 5e8 / Q
+        Kp = 1e4 * Ki
+        tau_amp_ms = 10.0 * Q / f0 * 1000.0        # a TIME: proportional to Q/f0, so it grows with Q
+        tau_pll_ms = 1.0 / (10.0 * BW_PLL) * 1000.0
+
+        # Straight resonator physics, for sanity-checking the above.
+        bw_res_hz = f0 / Q
+        tau_ring_ms = Q / (math.pi * f0) * 1000.0
+
         self.ki_out.setText(f"{Ki:.6g}"); self.kp_out.setText(f"{Kp:.6g}")
-        self.tau_amp.setText(f"{tau_amp:.6g}"); self.tpll_out.setText(f"{tau_pll:.6g}")
+        self.tau_amp.setText(f"{tau_amp_ms:.6g}"); self.tpll_out.setText(f"{tau_pll_ms:.6g}")
+        self.bw_res_out.setText(f"{bw_res_hz:.6g}"); self.tau_ring_out.setText(f"{tau_ring_ms:.6g}")
 
     def _stage(self):
         """
@@ -288,8 +322,7 @@ class SuggestedTab(QtWidgets.QWidget):
         if not path: return
 
         try:
-            data = np.genfromtxt(path, comments="#", skip_header=1, delimiter=None, dtype=float)
-            if data.ndim == 1 and data.size >= 3: data = data.reshape(1, -1)
+            data = self._read_spectrum_file(path)
             data = data[~np.isnan(data).any(axis=1)]
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Error", f"Could not read file:\n{e}"); return
@@ -298,9 +331,47 @@ class SuggestedTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "Error", f"Spectrum file must have 3 columns (freq | phase | amplitude). Got {data.shape[1]}."); return
 
         freq, phase, amp = data[:, 0], data[:, 1], data[:, 2]
-        sort_idx = np.argsort(freq); freq, phase, amp = freq[sort_idx], phase[sort_idx], amp[sort_idx]
-        
-        
+        sort_idx = np.argsort(freq)
+        self._spectrum = (freq[sort_idx], phase[sort_idx], amp[sort_idx])
+        self._show_spectrum()
+
+    @staticmethod
+    def _read_spectrum_file(path):
+        """
+        Read a numeric table from a .txt/.csv file.
+
+        Accepts tab / space / semicolon / comma separated columns and decimal
+        points or commas. Blank lines, '#' comments and non-numeric title or
+        header lines are skipped; if rows differ in width, the most common
+        width wins.
+        """
+        rows = []
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if ";" in line:
+                    tokens = line.split(";")
+                elif "\t" in line or " " in line:
+                    tokens = line.split()
+                else:
+                    tokens = line.split(",")
+                try:
+                    vals = [float(t.strip().replace(",", ".")) for t in tokens if t.strip()]
+                except ValueError:
+                    continue                      # title / header line
+                if vals:
+                    rows.append(vals)
+        if not rows:
+            raise ValueError("no numeric rows found")
+        widths = [len(r) for r in rows]
+        ncols = max(set(widths), key=widths.count)
+        return np.array([r for r in rows if len(r) == ncols], dtype=float)
+
+    def _show_spectrum(self):
+        """Fit (if enabled) and plot the cached spectrum."""
+        freq, phase, amp = self._spectrum
 
         # Estimate from amplitude
         A0_guess, f0_guess = amp.max(), freq[np.argmax(amp)]
@@ -366,7 +437,8 @@ class SuggestedTab(QtWidgets.QWidget):
         Updates spectrum plot.
         """
         """Reload spectrum with or without fit depending on checkbox."""
-        self._load_spectrum()
+        if self._spectrum is not None:      # re-plot the loaded data; do not ask for the file again
+            self._show_spectrum()
 
     def _apply_from_spectrum(self):
         """
