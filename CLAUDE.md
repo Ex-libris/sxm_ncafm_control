@@ -15,7 +15,14 @@ Windows-only (pywin32 + ctypes on `user32`). `device_driver.py` imports `win32fi
 
 ## Commands
 
-There is no build step, test suite, or linter configured.
+There is no build step or linter. The only tests are unit tests of the pure-logic `tuning/` package (stdlib `unittest`, no Qt or hardware; 58 tests, ~20 s). Run from the **parent** folder:
+
+```bash
+PYTHONPATH=. python -m unittest discover -s sxm_ncafm_control/tests -v      # all
+PYTHONPATH=. python -m unittest sxm_ncafm_control.tests.test_metrics         # one module
+```
+
+The GUI has no automated tests; it was smoke-tested offscreen (`QT_QPA_PLATFORM=offscreen`) with fake drivers.
 
 ```bash
 # Setup (Python 3.11; conda recommended)
@@ -74,6 +81,15 @@ Amp Ref `Edit23`, Amp Ki `Edit24`, Amp Kp `Edit32`, PLL Kp `Edit27`, PLL Ki `Edi
 - `QplusCalibrationTab(dde)` — sweeps `Edit23`, reads topography via DDE `read_topography()` (constructed without a driver, so the IOCTL fallback is unused), fits pm/mV with `scipy.stats.linregress`.
 - `ZConstAcquisition(dde, driver)` — 100 ms `QTimer` polls `Topo` via the driver for live Z (plain lists trimmed to a time window). "Disable Feedback" calls `feed_para("enable", 1)` (note the inverted-looking sense: 1 = feedback off) and re-enabling sends `0`. Manual mode is in **absolute Z (nm)** but the write goes to DDE channel 0, so it maps through a reference captured at disable time: `CH0 = ch0_base + ch0_sign * (z_target - abs_ref_z)`. `ch0_sign` (+1) is a manual knob if the piezo direction is inverted. Re-enabling feedback first presets CH0 to the spinbox target. Has its own font-scale combo, independent of the global accessibility manager.
 - `gui_accessibility_manager.py` — `AccessibilityManager` is stashed on the `QApplication` instance (`app.accessibility_manager`), persists to `~/.scientific_gui_accessibility.json`, and emits `settings_changed` (font scale, high contrast, dark mode). `MainWindow.apply_accessibility_to_all_tabs()` iterates an explicit tab list, so **a new tab must be added there** (and to `addTab`).
+
+### Loop-tuning toolkit (`tuning/`, pure numpy/scipy, no Qt/hardware)
+Groundwork for a guided PLL / amplitude-loop autotuner (goal and manual protocols: the manual in `manuals/`). **Design rule: SXM's Kp/Ki are arbitrary units, so nothing here assumes what a raw gain means** — gains are judged only from measured responses and searched as multiples of the user's known-good baseline. One loop is tuned per session; the user approves each trial ("guided").
+- `trial.py` — `StepProtocol` (the manual's ±1 Hz toggle of `DNC use`: offsets alternate ∓`step_hz`, steps are ±2·`step_hz`) and `TrialResult` (t, df, phase, raw Kp/Ki). Every backend returns these.
+- `metrics.py` — step metrics (10–90 % rise, 5 % settling, overshoot, ringing extrema, damping), `average_steps` (folds ± steps together; pass commanded `signs` for signals that return to rest, e.g. Phase), `error_transient_metrics` (Phase peak/decay/IAE), noise metrics. Noise-aware: overshoot counts only above 5σ, settling band ≥ 4σ; `StepNotDetectable` is raised when the step is buried or the loop rings/runs away.
+- `simulator.py` — virtual qPlus + 2-stage lock-in + PI (`simulate_pll`, `run_step_trial`, `SimulatedPLLBackend`). **`SXMScale` (raw → physical gain) is an assumption** tuned so Kp=-100 with Ki=-1e3/-1e4/-5e4 reproduces the manual's slow/good/overshoot figure; its absolute time scale is a guess. Assumes Q≈f₀≈25k. In this model Kp does the fast df tracking against the sensor's slow pole (ring-down Q/(π·f₀) ≈ 0.3 s) while Ki only removes the residual — visible as the *Phase* tail — so both channels must be scored; df noise ∝ gain^~1.0 and ∝ 1/√(lock-in τ), i.e. the DNC `TimeConstant` is a third noise knob (not yet searched).
+- `identify.py` — `identify_scale` fits `SXMScale` from real trials at known gains (sign-convention independent); the identified model then predicts untested gains. Verified only on simulator data so far.
+- `planner.py` — `ScanSpec` (pixel dwell = t_line/n_px; rise ≤ ½ dwell, 5 % settle ≤ 1 dwell, overshoot ≤ 10 %, Phase decay ≤ 10 % of a line — all adjustable rules of thumb), `analyze_trial`, and `GuidedTuner`: a generator (`proposals()`; call `record()`/`skip()` after each) running baseline → Ki:Kp ratio scan → scale along the ratio → geometric bisection → verify, bounded by `Limits`. It picks the lowest-noise feasible gains; when none are feasible it reports the cleanest response and which constraint fails. Offline demo: `run_guided(GuidedTuner(-100, -1e4, ScanSpec(...)), SimulatedPLLBackend())`.
+- **Not written yet:** the hardware backend (`run_trial(kp, ki) -> TrialResult` via DDE writes + IOCTL capture) and the GUI tab. DDE calls must stay on the GUI thread (they block in `GetMessage`), so the tuner has to be driven by a `QTimer` state machine; only capture may use a worker thread. SXM parameters cannot be read back (`GetScanPara` does not work that way), so the baseline must be typed in / remembered by the app.
 
 ### Gotchas
 - `MainWindow` sets `step_tab.scope_tab_index = 2` (hard-coded); reordering tabs breaks the "jump to Scope" behaviour.
