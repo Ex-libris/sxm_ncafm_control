@@ -202,7 +202,7 @@ class StepTestTab(QtWidgets.QWidget):
             return False
 
         self._events.append((QtCore.QDateTime.currentDateTime(),
-                             f"{label}={value:g}" + (" (base)" if base else "")))
+                             f"{label}={value:.10g}" + (" (base)" if base else "")))
 
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         code_text = pcode if ptype == "EDIT" else f"DNC{pcode}"

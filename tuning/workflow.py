@@ -119,6 +119,7 @@ class StepTestPlan:
     lead_s: float = 1.0
     tail_s: float = 0.5
     settle_s: float = 2.0
+    start_high: bool = False      # the first (settled) level is the high one; the first event goes low
 
     def __post_init__(self):
         if self.loop not in LOOPS:
@@ -146,7 +147,8 @@ class StepTestPlan:
 
     @property
     def levels(self) -> List[float]:
-        return [self.low if k % 2 == 0 else self.high for k in range(self.n_events + 1)]
+        first, second = (self.high, self.low) if self.start_high else (self.low, self.high)
+        return [first if k % 2 == 0 else second for k in range(self.n_events + 1)]
 
     @property
     def event_times(self) -> List[float]:
@@ -367,7 +369,9 @@ def analyze_test(ct: CapturedTest, *, li_tau: Optional[float] = None, li_stages:
         try:
             y_in = np.asarray(ct.channels[det.names[ld.y_channel]], float)
             u_out = np.asarray(ct.channels[det.names[ld.u_channel]], float)
-            train = StepTrain(tuple(nominal), tuple(plan.levels))
+            # host-clock event times jitter by several ms (timers, DDE); the onsets detected in the data do not
+            times = aligned if len(finite) == len(nominal) and all(b > a for a, b in zip(aligned, aligned[1:])) else nominal
+            train = StepTrain(tuple(times), tuple(plan.levels))
             cap = LoopCapture(kind=plan.loop, t=t, y=y_in, u=u_out, train=train, kp_raw=ct.kp, ki_raw=ct.ki,
                               meta={"block_s": dt})
             res.model = identify_loop(cap, li_tau=li_tau, li_stages=li_stages, ctrl_tau=ctrl_tau, f0=f0, q=q)

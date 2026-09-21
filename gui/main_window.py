@@ -15,6 +15,7 @@ Tabs:
     - Suggested Setup: View recommended starting values.
     - QPlus Calibration: Sweep amplitude and calibrate delta-topography response.
     - Constant Height: Control Z in constant-height mode.
+    - Tuning: guided PLL / amplitude-loop tuning (step trains, (Kp, Ki) map, advice).
 
 Safety:
     Displays a footer warning if voltage-like parameters exceed ±10 V.
@@ -36,6 +37,7 @@ from sxm_ncafm_control.gui.scope_tab import ScopeTab
 from sxm_ncafm_control.gui.live_scope_tab import LiveScopeTab
 from sxm_ncafm_control.gui.qplus_calibration_tab import QplusCalibrationTab
 from sxm_ncafm_control.gui.z_const_acquisition import ZConstAcquisition
+from sxm_ncafm_control.gui.tuning_tab import TuningTab
 from sxm_ncafm_control.gui.gui_accessibility_manager import (
     AccessibilityManager, 
     AccessibilityToolbar,
@@ -136,6 +138,7 @@ class MainWindow(QtWidgets.QWidget):
         self.suggest_tab = SuggestedTab(conn.dde, self.params_tab)
         self.qplus_tab = QplusCalibrationTab(conn.dde)
         self.topo_hold_tab = ZConstAcquisition(conn.dde, conn.driver)
+        self.tuning_tab = TuningTab(conn.dde, conn.driver, scope_tab=self.scope_tab, params_tab=self.params_tab)
 
         # Link StepTest to Scope and Tabs
         self.step_tab.scope_tab = self.scope_tab
@@ -151,6 +154,7 @@ class MainWindow(QtWidgets.QWidget):
         self.tabs.addTab(self.suggest_tab, "Suggested Setup")
         self.tabs.addTab(self.qplus_tab, "QPlus Amplitude calibration")
         self.tabs.addTab(self.topo_hold_tab, "Constant Height")
+        self.tabs.addTab(self.tuning_tab, "Tuning")
 
         # Connect custom parameters from ParamsTab to StepTestTab
         self.params_tab.custom_params_changed.connect(self.step_tab.set_custom_params)
@@ -193,6 +197,9 @@ class MainWindow(QtWidgets.QWidget):
         self.qplus_tab.driver = self.conn.driver
         self.topo_hold_tab.dde = self.conn.dde
         self.topo_hold_tab.driver = self.conn.driver
+        self.tuning_tab.dde = self.conn.dde
+        self.tuning_tab.driver = self.conn.driver
+        self.tuning_tab._update_enabled()
         self.scope_tab.driver = self.conn.driver
         self.live_scope_tab.driver = self.conn.driver
 
@@ -208,6 +215,9 @@ class MainWindow(QtWidgets.QWidget):
         explicitly pushed out again - just replacing self.conn.dde/driver
         would not reach them.
         """
+        if self.tuning_tab.runner_active():          # it writes gains: never pull the handles from under it
+            self.tuning_tab.stop()
+
         scope_was_capturing = (
             self.scope_tab.capture_thread is not None
             and self.scope_tab.capture_thread.isRunning()
@@ -353,7 +363,8 @@ class MainWindow(QtWidgets.QWidget):
             self.live_scope_tab,
             self.suggest_tab,
             self.qplus_tab,
-            self.topo_hold_tab
+            self.topo_hold_tab,
+            self.tuning_tab
         ]
         
         for tab in tabs_to_update:
@@ -554,6 +565,8 @@ class MainWindow(QtWidgets.QWidget):
         # only the top-level MainWindow is closed, so this is done centrally.)
         if self.live_scope_tab.capture_thread is not None:
             self.live_scope_tab.stop_live()
+        if self.tuning_tab.runner_active():          # restores the baseline gains before the driver closes
+            self.tuning_tab.stop()
 
         # The IOCTL driver is shared across tabs (Scope, Constant Height), so it
         # is closed once here rather than by any individual tab.

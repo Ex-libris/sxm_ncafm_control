@@ -49,6 +49,12 @@ class Plan(unittest.TestCase):
         self.assertEqual(p.commands()[0], (p.lead_s, 25001.0))
         self.assertEqual(p.train().step_sizes, [2.0, -2.0] * 3 + [2.0])
 
+    def test_a_plan_can_start_on_the_high_level(self):
+        p = W.StepTestPlan(loop="pll", base=25000.0, start_high=True)
+        self.assertEqual(p.levels[:3], [25001.0, 24999.0, 25001.0])
+        self.assertEqual(p.train().step_sizes[:2], [-2.0, 2.0])
+        self.assertEqual(p.commands()[0][1], 24999.0)
+
     def test_amplitude_step_is_relative(self):
         p = W.StepTestPlan(loop="afl", base=6.0, step=0.10)
         self.assertAlmostEqual(p.low, 5.4)
@@ -136,7 +142,18 @@ class AnalysePLL(unittest.TestCase):
         self.assertIsNotNone(res.model)
         self.assertAlmostEqual(abs(res.model.scale_p) / PLL_SCALE.kp_hz_per_deg, 1.0, delta=0.03)
         self.assertAlmostEqual(abs(res.model.scale_i) / PLL_SCALE.ki_hz_per_deg_s, 1.0, delta=0.03)
-        self.assertAlmostEqual(res.model.delay_s, 0.008, delta=0.001)
+        # the model's delay is relative to the onsets detected in the data; the command latency is reported separately
+        self.assertGreater(res.latency_s, 0.008)
+        self.assertLess(abs(res.model.delay_s), 0.006)
+
+    def test_identification_is_robust_to_event_timing_jitter(self):
+        plan = pll_plan(hold_s=0.5)
+        ct, _ = record_pll(plan, -100, -1e4, jitter_s=0.008, seed=4)            # +-8 ms scatter of the host-clock event times
+        res = W.analyze_test(ct, li_tau=PLL_SETUP.lockin_tau, li_stages=2, f0=PLL_SETUP.f0, q=PLL_SETUP.q)
+        self.assertIsNotNone(res.model)
+        self.assertAlmostEqual(abs(res.model.scale_p) / PLL_SCALE.kp_hz_per_deg, 1.0, delta=0.05)
+        self.assertAlmostEqual(abs(res.model.scale_i) / PLL_SCALE.ki_hz_per_deg_s, 1.0, delta=0.05)
+        self.assertGreater(res.model.delay_s, -0.004)                            # not pinned at the edge of the search
 
     def test_missing_phase_still_analyses_df(self):
         plan = pll_plan(hold_s=1.0)
