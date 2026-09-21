@@ -5,8 +5,9 @@ from scipy.optimize import curve_fit
 from PyQt5 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 
-from ..common import PARAMS_BASE, confirm_high_voltage
+from ..common import PARAMS_BASE, confirm_high_voltage, format_number
 from ..tuning.workflow import AFL_OUTPUT_GAINS, afl_start_values
+from .sci_spinbox import SciDoubleSpinBox
 
 
 def lorentzian_amp(f, A0, f0, Q):
@@ -85,18 +86,18 @@ class SuggestedTab(QtWidgets.QWidget):
         # Input form
         form = QtWidgets.QGridLayout()
         r = 0
-        self.q_val = QtWidgets.QDoubleSpinBox()
+        self.q_val = SciDoubleSpinBox()          # scientific notation in and out: Q up to 1e9, gains 2.5e8
         self.q_val.setRange(1, 1e9)
         self.q_val.setDecimals(1)
         self.q_val.setValue(30000.0)
 
-        self.f0_val = QtWidgets.QDoubleSpinBox()
+        self.f0_val = SciDoubleSpinBox()
         self.f0_val.setRange(1.0, 1e9)
         self.f0_val.setDecimals(1)
         self.f0_val.setValue(300000.0)
         self.f0_val.setSuffix(" Hz")
 
-        self.bw_pll = QtWidgets.QDoubleSpinBox()
+        self.bw_pll = SciDoubleSpinBox()
         self.bw_pll.setRange(1.0, 5000.0)
         self.bw_pll.setDecimals(1)
         self.bw_pll.setValue(50.0)
@@ -261,7 +262,7 @@ class SuggestedTab(QtWidgets.QWidget):
         bw_res_hz = f0 / Q
         tau_ring_ms = Q / (math.pi * f0) * 1000.0
 
-        self.ki_out.setText(f"{Ki:.6g}"); self.kp_out.setText(f"{Kp:.6g}")
+        self.ki_out.setText(format_number(Ki, 6, 1e4)); self.kp_out.setText(format_number(Kp, 6, 1e4))
         self.tau_amp.setText(f"{tau_amp_ms:.6g}"); self.tpll_out.setText(f"{tau_pll_ms:.6g}")
         self.bw_res_out.setText(f"{bw_res_hz:.6g}"); self.tau_ring_out.setText(f"{tau_ring_ms:.6g}")
 

@@ -38,7 +38,8 @@ from sxm_ncafm_control.device_driver import CHANNELS
 from sxm_ncafm_control.tuning import metrics as M
 from sxm_ncafm_control.tuning import workflow as W
 
-from ..common import append_log_line
+from ..common import append_log_line, format_number
+from .sci_spinbox import SciDoubleSpinBox
 
 CATEGORY_COLOR = {
     "good": (70, 175, 95), "overshoot": (240, 200, 60), "ringing": (240, 140, 50), "slow_tail": (120, 170, 230),
@@ -455,7 +456,8 @@ or is aborted.</p>
 
 <h3>How to use it</h3>
 <ol>
-<li><b>Test</b> (left, 1): pick the loop. The defaults follow the manual.</li>
+<li><b>Test</b> (left, 1): pick the loop. The defaults follow the manual. Every number field accepts scientific notation
+(type <code>2.5e8</code>) and shows large or small values that way.</li>
 <li><b>Baseline</b> (left, 2): type the Kp / Ki that are set in SXM right now. SXM cannot be read back, so this is
 what every change is measured against and what is restored afterwards.</li>
 <li><b>Target</b> (left, 3): your scan (line time, pixels) or a response time. It sets the limits used for the verdict.</li>
@@ -538,8 +540,9 @@ class TuningTab(QtWidgets.QWidget):
         self._update_enabled()
 
     # ------------------------------------------------------------------ construction
-    def _spin(self, lo, hi, val, dec=3, step=None, suffix=""):
-        s = QtWidgets.QDoubleSpinBox()
+    def _spin(self, lo, hi, val, dec=3, step=None, suffix="", sci_above=1e6):
+        """Number field: accepts scientific notation ('2.5e8') and shows large / small values that way."""
+        s = SciDoubleSpinBox(sci_above=sci_above)
         s.setDecimals(dec)
         s.setRange(lo, hi)
         s.setValue(val)
@@ -601,8 +604,8 @@ class TuningTab(QtWidgets.QWidget):
         # 2. baseline
         g = QtWidgets.QGroupBox("2. Baseline (currently set in SXM - it cannot be read back)")
         f = QtWidgets.QFormLayout(g)
-        self.kp_spin = self._spin(-1e12, 1e12, -100.0, 4)
-        self.ki_spin = self._spin(-1e12, 1e12, -1e4, 4)
+        self.kp_spin = self._spin(-1e12, 1e12, -100.0, 4, sci_above=1e4)      # raw gains span decades: 1e4 and up in e-notation
+        self.ki_spin = self._spin(-1e12, 1e12, -1e4, 4, sci_above=1e4)
         f.addRow("Kp:", self.kp_spin)
         f.addRow("Ki:", self.ki_spin)
         # amplitude loop only: the gains scale with the DNC Output Gain, and span decades with Q
@@ -851,7 +854,8 @@ class TuningTab(QtWidgets.QWidget):
             self.start_label.setText("Set Q and f0 (from the sweep) to get the manual's start values.")
             return
         self.start_label.setText(f"Manual start for Q={self.q_spin.value():.0f}, f0={self.f0_spin.value():.0f} Hz, "
-                                 f"+-{self.gain_combo.currentData():g} V:<br>Kp = {s.kp:.4g}, Ki = {s.ki:.4g}, "
+                                 f"+-{self.gain_combo.currentData():g} V:<br>Kp = {format_number(s.kp, 4, 1e4)}, "
+                                 f"Ki = {format_number(s.ki, 4, 1e4)}, "
                                  f"Tau = {s.tau_s * 1e3:.3g} ms<br>Ring-down Q/(pi f0) = {s.ring_down_s:.2f} s "
                                  f"-> hold {s.hold_s:g} s, settle {s.settle_s:g} s")
         self._update_hint()

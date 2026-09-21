@@ -27,6 +27,7 @@ from ..common import (
     NumericItemDelegate,
     VOLTAGE_LIMIT_ABS,
     append_log_line,
+    format_number,
 )
 
 
@@ -199,7 +200,7 @@ class ParamsTab(QtWidgets.QWidget):
         row = mapping.get((ptype, str(pcode)))
         if row is None:
             return False
-        self.table.item(row, 4).setText(str(float(value)))
+        self.table.item(row, 4).setText(format_number(value))
         self.table.item(row, 4).setBackground(QtGui.QColor("#e6ffe6"))
         return True
 
@@ -283,7 +284,7 @@ class ParamsTab(QtWidgets.QWidget):
             return
 
         # Update Current
-        self.table.item(row, 3).setText(str(value))
+        self.table.item(row, 3).setText(format_number(value))
         self.table.item(row, 3).setBackground(QtGui.QColor("#fff2b3"))
         QtCore.QTimer.singleShot(
             700, lambda: self.table.item(row, 3).setBackground(QtGui.QColor("#e0e0e0"))
@@ -389,7 +390,7 @@ class ParamsTab(QtWidgets.QWidget):
         lookup = self._row_lookup_by_code()
 
         def stage_row(row: int, val: float):
-            self.table.item(row, 4).setText(str(val))
+            self.table.item(row, 4).setText(format_number(val))
             self.table.item(row, 4).setBackground(QtGui.QColor("#e6ffe6"))
 
         if isinstance(payload, dict) and "params" in payload and isinstance(payload["params"], list):

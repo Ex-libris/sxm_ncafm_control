@@ -1,5 +1,6 @@
 # gui/common.py
 
+import math
 from typing import Optional
 from PyQt5 import QtWidgets, QtGui
 
@@ -48,6 +49,26 @@ def append_log_line(log_widget: QtWidgets.QTextEdit, text: str, max_blocks: int 
         cursor.movePosition(QtGui.QTextCursor.Start)
         cursor.movePosition(QtGui.QTextCursor.NextBlock, QtGui.QTextCursor.KeepAnchor, excess)
         cursor.removeSelectedText()
+
+
+def format_number(value: float, sig: int = 15, sci_above: float = 1e6, sci_below: float = 1e-3) -> str:
+    """
+    Compact text for a number: plain up to ``sci_above`` (and down to ``sci_below``), scientific
+    beyond ('2.5e8', '-1e4', '3e-4'), trailing zeros trimmed, ``sig`` significant digits at most.
+    ``float()`` reads the result back, so it is safe in fields the user edits.
+    """
+    v = float(value)
+    if v == 0 or not math.isfinite(v):
+        return "0" if v == 0 else str(v)
+    a = abs(v)
+    if a >= sci_above or a < sci_below:
+        mant, exp = f"{v:.{sig - 1}e}".split("e")
+        if "." in mant:
+            mant = mant.rstrip("0").rstrip(".")
+        return f"{mant}e{int(exp)}"
+    places = max(0, sig - 1 - int(math.floor(math.log10(a))))
+    text = f"{v:.{places}f}"
+    return text.rstrip("0").rstrip(".") if "." in text else text
 
 
 def _to_float(text: str) -> Optional[float]:
@@ -160,7 +181,7 @@ class NumericItemDelegate(QtWidgets.QStyledItemDelegate):
         """
         editor = QtWidgets.QLineEdit(parent)
         validator = QtGui.QDoubleValidator(self._lo, self._hi, self._dec, editor)
-        validator.setNotation(QtGui.QDoubleValidator.StandardNotation)
+        validator.setNotation(QtGui.QDoubleValidator.ScientificNotation)      # '2.5e8' for gains that span decades
         editor.setValidator(validator)
         return editor
     

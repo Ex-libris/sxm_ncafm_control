@@ -19,6 +19,7 @@ from PyQt5 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 
 from ..common import PARAMS_BASE, confirm_high_voltage, append_log_line
+from .sci_spinbox import SciDoubleSpinBox
 
 
 class StepTestTab(QtWidgets.QWidget):
@@ -43,9 +44,9 @@ class StepTestTab(QtWidgets.QWidget):
         self.param = QtWidgets.QComboBox()
         self._populate_params()
 
-        self.low = QtWidgets.QDoubleSpinBox()
+        self.low = SciDoubleSpinBox()          # Low / High / Base take and show scientific notation (Kp, Ki: 2.5e8)
         self.low.setDecimals(6); self.low.setRange(-1e12, 1e12); self.low.setValue(10.0)
-        self.high = QtWidgets.QDoubleSpinBox()
+        self.high = SciDoubleSpinBox()
         self.high.setDecimals(6); self.high.setRange(-1e12, 1e12); self.high.setValue(101.0)
         self.period = QtWidgets.QDoubleSpinBox()
         self.period.setDecimals(3); self.period.setRange(0, 3600); self.period.setValue(1.0)
@@ -62,7 +63,7 @@ class StepTestTab(QtWidgets.QWidget):
             "Stop, write the Base value back to the parameter so the test does not leave it\n"
             "at Low or High."
         )
-        self.base = QtWidgets.QDoubleSpinBox()
+        self.base = SciDoubleSpinBox()
         self.base.setDecimals(6); self.base.setRange(-1e12, 1e12)
         self.base.setEnabled(False)
         self.base.setToolTip(
