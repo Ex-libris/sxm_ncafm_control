@@ -175,13 +175,27 @@ class AccessibilityManager(QtCore.QObject):
         QtGui.QFont
             Scaled font.
         """
-        app = QtWidgets.QApplication.instance()
         if base_size is None:
-            base_size = app.font().pointSize() or 10
-        scaled = max(6, int(base_size * self.settings["font_scale"]))
+            base_size = self._base_point_size()
         font = QtGui.QFont()
-        font.setPointSize(scaled)
+        font.setPointSizeF(max(6.0, base_size * self.settings["font_scale"]))
         return font
+
+    @staticmethod
+    def _base_point_size() -> float:
+        """
+        The application font's size in points. ``pointSize()`` is -1 when the font is defined in pixels
+        (common on scaled Windows displays); the old ``pointSize() or 10`` then produced a 6 pt interface.
+        """
+        app = QtWidgets.QApplication.instance()
+        font = app.font() if app is not None else QtGui.QFont()
+        if font.pointSizeF() > 0:
+            return font.pointSizeF()
+        if font.pixelSize() > 0:
+            screen = QtGui.QGuiApplication.primaryScreen()
+            dpi = screen.logicalDotsPerInchY() if screen is not None else 96.0
+            return font.pixelSize() * 72.0 / (dpi or 96.0)
+        return 10.0
 
     def get_scaled_size(self, base_size: int) -> int:
         """

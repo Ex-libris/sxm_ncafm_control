@@ -15,6 +15,7 @@ import sys
 from PyQt5 import QtWidgets
 
 from sxm_ncafm_control.connection import SXMConnection
+from sxm_ncafm_control.gui import hidpi
 from sxm_ncafm_control.gui.main_window import MainWindow
 
 
@@ -79,8 +80,14 @@ def main() -> int:
     int
         Qt exit code (0 on normal termination).
     """
+    # High-DPI scaling has to be enabled BEFORE the QApplication exists (a 4K / scaled screen otherwise
+    # gets a tiny interface); pen widths are scaled once the application (and its screen) is known.
+    hidpi.enable_high_dpi()
+
     # Create the Qt application instance first.
     app = QtWidgets.QApplication(sys.argv)
+    hidpi.install_pen_scaling()
+    print(f"[DISPLAY] {hidpi.describe_display()}")
 
     # Ensure the package directory is in sys.path so local modules (e.g., SXMRemote.py)
     # can be found when the connection layer tries to import them.

@@ -3,6 +3,7 @@ from collections import deque
 from PyQt5 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 from sxm_ncafm_control.device_driver import CHANNELS
+from sxm_ncafm_control.gui.gui_accessibility_manager import AccessibilityManager
 
 
 class FlexibleDoubleSpinBox(QtWidgets.QDoubleSpinBox):
@@ -265,7 +266,7 @@ class ZConstAcquisition(QtWidgets.QWidget):
 
         self.change_markers = []
         self.font_scale = 1.0
-        self.base_font_size = QtWidgets.QApplication.font().pointSize() or 10
+        self.base_font_size = AccessibilityManager._base_point_size()       # pointSize() is -1 for pixel-sized fonts
 
         layout = QtWidgets.QVBoxLayout(self)
 

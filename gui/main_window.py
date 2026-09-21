@@ -30,6 +30,7 @@ Accessibility:
 
 from PyQt5 import QtWidgets, QtCore, QtGui
 
+from sxm_ncafm_control.gui import hidpi
 from sxm_ncafm_control.gui.params_tab import ParamsTab
 from sxm_ncafm_control.gui.step_test_tab import StepTestTab
 from sxm_ncafm_control.gui.suggested_tab import SuggestedTab
@@ -91,7 +92,7 @@ class MainWindow(QtWidgets.QWidget):
         """
         super().__init__()
         self.setWindowTitle("NC-AFM Control Suite")
-        self.resize(768,768)
+        self.resize(hidpi.initial_window_size(self))          # sized to the screen it opens on, not a fixed 768 x 768
         self.conn = conn
         # Initialize accessibility manager
         self.setup_accessibility()
