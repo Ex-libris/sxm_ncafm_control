@@ -188,7 +188,27 @@ class ScopeTab(QtWidgets.QWidget):
 
         self.status_label = QtWidgets.QLabel("No capture yet.")
         self.status_label.setStyleSheet("QLabel { color: #555; }")
-        vbox.addWidget(self.status_label)
+
+        # Step-test overlays: dashed vertical lines are cheap and unobtrusive, the text
+        # labels ("Used Frequency (f0)=...") are not, so they are opt-in. The value of
+        # every marker is also available as a tooltip when hovering its line.
+        self.chk_markers = QtWidgets.QCheckBox("Step markers")
+        self.chk_markers.setChecked(True)
+        self.chk_markers.setToolTip("Draw a dashed vertical line at each step-test event.")
+        self.chk_marker_labels = QtWidgets.QCheckBox("Marker labels")
+        self.chk_marker_labels.setChecked(False)
+        self.chk_marker_labels.setToolTip(
+            "Also write the parameter and value next to each marker.\n"
+            "(Off by default: it clutters the plot. Hover a marker line to see its value.)"
+        )
+        self.chk_markers.toggled.connect(self._on_marker_options_changed)
+        self.chk_marker_labels.toggled.connect(self._on_marker_options_changed)
+
+        status_row = QtWidgets.QHBoxLayout()
+        status_row.addWidget(self.status_label, 1)
+        status_row.addWidget(self.chk_markers)
+        status_row.addWidget(self.chk_marker_labels)
+        vbox.addLayout(status_row)
 
         # Create dual plots with shared X-axis
         self.plot_widget = pg.GraphicsLayoutWidget()
@@ -496,6 +516,10 @@ class ScopeTab(QtWidgets.QWidget):
         # Clear existing markers first
         self._clear_markers()
 
+        if not self.chk_markers.isChecked():
+            return
+        show_labels = self.chk_marker_labels.isChecked()
+
         skipped = 0
         for dt, label in self._event_markers:
             try:
@@ -517,20 +541,26 @@ class ScopeTab(QtWidgets.QWidget):
                 # Plot 1
                 line1 = pg.InfiniteLine(pos=x, angle=90,
                                        pen=pg.mkPen('r', width=1, style=QtCore.Qt.DashLine))
+                line1.setToolTip(label)
                 self.plot1.addItem(line1)
-                txt1 = pg.TextItem(label, anchor=(0, 1), color='r')
-                txt1.setPos(x, ymax1)
-                self.plot1.addItem(txt1)
-                self._marker_items1.extend([line1, txt1])
+                self._marker_items1.append(line1)
+                if show_labels:
+                    txt1 = pg.TextItem(label, anchor=(0, 1), color='r')
+                    txt1.setPos(x, ymax1)
+                    self.plot1.addItem(txt1)
+                    self._marker_items1.append(txt1)
 
                 # Plot 2
                 line2 = pg.InfiniteLine(pos=x, angle=90,
                                        pen=pg.mkPen('r', width=1, style=QtCore.Qt.DashLine))
+                line2.setToolTip(label)
                 self.plot2.addItem(line2)
-                txt2 = pg.TextItem(label, anchor=(0, 1), color='r')
-                txt2.setPos(x, ymax2)
-                self.plot2.addItem(txt2)
-                self._marker_items2.extend([line2, txt2])
+                self._marker_items2.append(line2)
+                if show_labels:
+                    txt2 = pg.TextItem(label, anchor=(0, 1), color='r')
+                    txt2.setPos(x, ymax2)
+                    self.plot2.addItem(txt2)
+                    self._marker_items2.append(txt2)
             except Exception as e:
                 print(f"Error adding marker '{label}' at {x}s: {e}")
 
@@ -539,6 +569,11 @@ class ScopeTab(QtWidgets.QWidget):
             suffix = f" - {skipped} event(s) occurred after the capture ended and are not shown"
             if suffix not in current:
                 self.status_label.setText(current + suffix)
+
+    def _on_marker_options_changed(self, _checked=False):
+        """Redraw the step-test overlays after toggling markers / labels."""
+        self.chk_marker_labels.setEnabled(self.chk_markers.isChecked())
+        self._update_markers()
 
     def set_test_tab_reference(self, test_tab):
         """Set reference to test tab for repeat functionality."""
