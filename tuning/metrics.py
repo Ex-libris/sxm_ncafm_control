@@ -97,7 +97,7 @@ class StepMetrics:
 
 
 def step_response_metrics(t, y, t_step, *, hold_end=None, pre_tail_frac=0.3,
-                          final_frac=0.25, band=0.05, target_step=None) -> StepMetrics:
+                          final_frac=0.25, band=0.05, target_step=None, step_override=None) -> StepMetrics:
     """
     Measure a single step response.
 
@@ -117,6 +117,10 @@ def step_response_metrics(t, y, t_step, *, hold_end=None, pre_tail_frac=0.3,
         Nominal settling band as a fraction of the step (0.05 = 5 %).
     target_step : float, optional
         Commanded step size, for the steady-state error.
+    step_override : float, optional
+        Size of the step to normalise by (only its magnitude is used; the direction comes from the
+        data). Use it when the hold is too short for the response to settle, so the tail of the hold
+        is not the final value: e.g. the expected amplitude change of a Ref step.
 
     Raises
     ------
@@ -143,6 +147,8 @@ def step_response_metrics(t, y, t_step, *, hold_end=None, pre_tail_frac=0.3,
     sigma = max(detrended_std(tail), detrended_std(pre_tail))
     if abs(step) < 4.0 * sigma or step == 0.0:
         raise StepNotDetectable("step is not distinguishable from the noise")
+    if step_override is not None:      # normalise by the expected size (the direction still comes from the data)
+        step = abs(float(step_override)) * (1.0 if step >= 0 else -1.0)
 
     z = (yy - y0) / step
     sigma_z = sigma / abs(step)
@@ -174,7 +180,7 @@ def step_response_metrics(t, y, t_step, *, hold_end=None, pre_tail_frac=0.3,
 
     # Ringing: alternating extrema of the deviation from the final value.
     e = zs - 1.0
-    h = max(4.0 * sigma_zs, 0.02)
+    h = max(4.0 * sigma_zs, 0.05)      # ringing must be material: >= 5 % of the step
     pk_pos, _ = signal.find_peaks(e, height=h, prominence=h)
     pk_neg, _ = signal.find_peaks(-e, height=h, prominence=h)
     extrema = sorted([(int(i), float(e[i])) for i in pk_pos] + [(int(i), float(e[i])) for i in pk_neg])
@@ -256,8 +262,14 @@ class ErrorMetrics:
     noise_rms: float
 
 
-def error_transient_metrics(t, e, t_step, *, hold_end=None, final_frac=0.25, band=0.05) -> ErrorMetrics:
-    """Measure how an error signal (already sign-folded, see :func:`average_steps`) decays after a step."""
+def error_transient_metrics(t, e, t_step, *, hold_end=None, final_frac=0.25, band=0.05, rest_value=None) -> ErrorMetrics:
+    """
+    Measure how an error signal (already sign-folded, see :func:`average_steps`) decays after a step.
+
+    ``rest_value`` is the level the signal returns to. By default it is the median of the last part of
+    the window, which is wrong when the hold is too short for the transient to finish: pass the
+    known level (e.g. the pre-step baseline) then.
+    """
     t, e = _prep(t, e)
     if hold_end is None:
         hold_end = float(t[-1])
@@ -267,7 +279,7 @@ def error_transient_metrics(t, e, t_step, *, hold_end=None, final_frac=0.25, ban
     tt = t[m] - t_step
     ee = e[m]
     n_final = max(5, int(final_frac * len(ee)))
-    rest = float(np.median(ee[-n_final:]))
+    rest = float(np.median(ee[-n_final:])) if rest_value is None else float(rest_value)
     sigma = detrended_std(ee[-n_final:])
     d = ee - rest
     ad = np.abs(d)

@@ -1,5 +1,6 @@
 """
-Virtual qPlus + lock-in + PLL, for developing and testing the tuner offline.
+TEST FIXTURE (not part of the product): virtual qPlus + lock-in + PI loops with known ground truth,
+used to test the tuning code without an instrument.
 
 Physics (all standard, ideal amplitude loop assumed)
 ----------------------------------------------------
@@ -38,7 +39,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .trial import StepProtocol, TrialResult
+from sxm_ncafm_control.tuning.trial import LoopCapture, StepProtocol, StepTrain, TrialResult
 
 
 @dataclass(frozen=True)
@@ -156,3 +157,114 @@ class SimulatedPLLBackend:
         self.n_trials += 1
         self._seed += 1
         return run_step_trial(kp_raw, ki_raw, self.protocol, self.setup, self.scale, self._seed)
+
+
+# ---------------------------------------------------------------------------
+# arbitrary step trains (what real captures look like)
+# ---------------------------------------------------------------------------
+def _input_samples(train: StepTrain, dt: float, tail_s: float, latency_s: float):
+    n = int(round((train.step_times[-1] + tail_s) / dt))
+    t = np.arange(n) * dt
+    return train.value_at(t, latency_s)
+
+
+def run_pll_capture(kp_raw, ki_raw, train: StepTrain, setup=PLLSetup(), scale=SXMScale(), seed=0,
+                    latency_s=0.0, offset_hz=0.0, tail_s=0.5, out_fs=2000.0) -> LoopCapture:
+    """
+    Record the PLL responding to an arbitrary train of ``use`` steps.
+
+    ``latency_s`` delays every step relative to its commanded time and ``offset_hz``
+    puts f_use off the resonance - both are unknown in a real capture, and the
+    fitter has to cope with them. ``train`` stays the *nominal* command.
+    """
+    dF = _input_samples(train, setup.dt, tail_s, latency_s) + offset_hz
+    df, ph, locked = simulate_pll(kp_raw, ki_raw, dF, setup, scale, seed)
+    k = max(1, int(round(1.0 / (out_fs * setup.dt))))
+    df_d, ph_d = _decimate(df, k), _decimate(ph, k)
+    t = (np.arange(len(df_d)) + 0.5) * k * setup.dt
+    return LoopCapture(kind="pll", t=t, y=ph_d, u=df_d, train=train, kp_raw=kp_raw, ki_raw=ki_raw,
+                       meta={"simulated": True, "locked": locked, "latency_s": latency_s, "offset_hz": offset_hz,
+                             "block_s": k * setup.dt})
+
+
+@dataclass(frozen=True)
+class AFLScale:
+    """Assumed raw SXM amplitude-loop gain -> physical gain mapping (placeholder, like SXMScale)."""
+
+    kp_per_raw: float = 5.6e-9        # drive per amplitude, per unit of raw Kp (loop gain kp*g ~ 3 at the manual's Kp=8.9e7)
+    ki_per_raw: float = 2.0e-4        # drive per (amplitude*s), per unit of raw Ki
+
+
+@dataclass(frozen=True)
+class AFLSetup:
+    """The virtual sensor, amplitude loop and lock-in (amplitude and drive in arbitrary equal units, e.g. mV)."""
+
+    f0: float = 25e3
+    q: float = 25e3
+    plant_gain: float = 6.0           # resonance amplitude per unit drive
+    kappa: float = 1.0                # amplitude reached per unit of Ref (channel vs Ref units)
+    tau: float = 10e-3                # AFL input low-pass 'Tau' (does not filter the recorded amplitude channel)
+    lockin_tau: float = 2e-3          # DNC TimeConstant (filters the recorded channels)
+    lockin_stages: int = 2
+    amp_noise_rthz: float = 0.003     # white detector noise [amplitude units/sqrt(Hz)]
+    dt: float = 2.5e-4
+
+    @property
+    def gamma(self) -> float:
+        return math.pi * self.f0 / self.q
+
+
+def simulate_afl(kp_raw, ki_raw, ref, setup=AFLSetup(), scale=AFLScale(), seed=0):
+    """
+    Integrate the amplitude loop:  plant  A' = -gamma*A + gamma*g*Drive,  controller
+    Drive = kp*e + ki*int(e) with e = kappa*Ref - lowpass_tau(A + noise).
+
+    Returns (amplitude_channel, drive, ok). The amplitude channel is what the scope records:
+    the measured amplitude through the lock-in (not through Tau).
+    """
+    ref = np.asarray(ref, dtype=float)
+    n = len(ref)
+    dt = setup.dt
+    gamma, g = setup.gamma, setup.plant_gain
+    kp, ki = kp_raw * scale.kp_per_raw, ki_raw * scale.ki_per_raw
+    a_tau = 1.0 - math.exp(-dt / setup.tau)
+    a_li = 1.0 - math.exp(-dt / setup.lockin_tau)
+    sigma = setup.amp_noise_rthz / math.sqrt(2.0 * dt)
+    noise = np.random.default_rng(seed).normal(0.0, sigma, n) if sigma > 0 else np.zeros(n)
+
+    amp = np.empty(n)
+    drv = np.empty(n)
+    A = setup.kappa * ref[0]                 # start in steady state
+    u0 = A / g
+    integ = u0
+    af = lp1 = lp2 = A
+    ok = True
+    for k in range(n):
+        e = setup.kappa * ref[k] - af
+        u = kp * e + integ
+        A += dt * (-gamma * A + gamma * g * u)
+        if not (abs(A) < 1e9):
+            ok = False
+            amp[k:] = lp2
+            drv[k:] = u
+            break
+        meas = A + noise[k]
+        af += a_tau * (meas - af)
+        lp1 += a_li * (meas - lp1)
+        lp2 = lp1 if setup.lockin_stages < 2 else lp2 + a_li * (lp1 - lp2)
+        integ += ki * e * dt
+        amp[k] = lp2
+        drv[k] = u
+    return amp, drv, ok
+
+
+def run_afl_capture(kp_raw, ki_raw, train: StepTrain, setup=AFLSetup(), scale=AFLScale(), seed=0,
+                    latency_s=0.0, tail_s=0.5, out_fs=2000.0) -> LoopCapture:
+    """Record the amplitude loop responding to a train of Ref steps (``train`` holds Ref levels)."""
+    ref = _input_samples(train, setup.dt, tail_s, latency_s)
+    amp, drv, ok = simulate_afl(kp_raw, ki_raw, ref, setup, scale, seed)
+    k = max(1, int(round(1.0 / (out_fs * setup.dt))))
+    amp_d, drv_d = _decimate(amp, k), _decimate(drv, k)
+    t = (np.arange(len(amp_d)) + 0.5) * k * setup.dt
+    return LoopCapture(kind="afl", t=t, y=amp_d, u=drv_d, train=train, kp_raw=kp_raw, ki_raw=ki_raw,
+                       meta={"simulated": True, "locked": ok, "latency_s": latency_s, "block_s": k * setup.dt})

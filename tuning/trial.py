@@ -7,7 +7,7 @@ never needs to know where it came from.
 """
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Sequence, Tuple
 
 import numpy as np
 
@@ -56,4 +56,85 @@ class TrialResult:
     phase: np.ndarray               # PLL phase error [deg]
     protocol: StepProtocol
     locked: bool = True             # False if the loop lost lock / was aborted
+    meta: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class StepTrain:
+    """
+    A commanded piecewise-constant input: a train of steps with arbitrary timing.
+
+    ``levels[0]`` holds until ``step_times[0]``, ``levels[1]`` until
+    ``step_times[1]``, and so on, so ``len(levels) == len(step_times) + 1``.
+    Times are seconds from the start of the recording. Unlike
+    :class:`StepProtocol` the holds may differ (0.2 s ... 2 s is typical) and the
+    levels may be anything, so real captures with events typed into the Step
+    Test tab fit here.
+    """
+
+    step_times: Tuple[float, ...]
+    levels: Tuple[float, ...]
+
+    def __post_init__(self):
+        if len(self.levels) != len(self.step_times) + 1:
+            raise ValueError("need exactly one more level than step times")
+        if any(b <= a for a, b in zip(self.step_times, self.step_times[1:])):
+            raise ValueError("step times must be strictly increasing")
+
+    @classmethod
+    def from_steps(cls, step_times: Sequence[float], step_sizes: Sequence[float], initial_level: float = 0.0):
+        levels = [float(initial_level)]
+        for s in step_sizes:
+            levels.append(levels[-1] + float(s))
+        return cls(tuple(float(t) for t in step_times), tuple(levels))
+
+    @classmethod
+    def from_holds(cls, holds: Sequence[float], levels: Sequence[float]):
+        """``holds[k]`` is how long ``levels[k]`` is held (the last hold's length is not needed for the times)."""
+        times = np.cumsum(holds)[:-1]
+        return cls(tuple(float(t) for t in times), tuple(float(v) for v in levels))
+
+    @classmethod
+    def from_protocol(cls, p: StepProtocol):
+        return cls.from_holds([p.hold_s] * p.n_holds, p.levels)
+
+    @property
+    def step_sizes(self) -> List[float]:
+        return [b - a for a, b in zip(self.levels, self.levels[1:])]
+
+    def holds(self, t_end: float) -> List[float]:
+        """Duration of the hold after each step (the last one runs to ``t_end``)."""
+        ends = list(self.step_times[1:]) + [t_end]
+        return [e - s for s, e in zip(self.step_times, ends)]
+
+    def value_at(self, t, delay: float = 0.0):
+        """The input at times ``t`` if every step reaches the system ``delay`` seconds late."""
+        idx = np.searchsorted(np.asarray(self.step_times) + delay, np.asarray(t, dtype=float), side="right")
+        return np.asarray(self.levels)[idx]
+
+
+@dataclass
+class LoopCapture:
+    """
+    A recording of one PI loop responding to a train of steps.
+
+    ``kind`` selects which channels these are:
+
+    ========  ===========================  ==============================  ==========================
+    kind      ``y`` (controller input)     ``u`` (controller output)       ``train`` (commanded)
+    ========  ===========================  ==============================  ==========================
+    ``pll``   ``Phase`` [deg]              ``df`` [Hz]                     ``use`` offset from f_res [Hz]
+    ``afl``   amplitude (``QPlusAmpl``)    ``Drive``                       amplitude ``Ref``
+    ========  ===========================  ==============================  ==========================
+
+    ``kp_raw`` / ``ki_raw`` are the SXM values that were set while recording.
+    """
+
+    kind: str
+    t: np.ndarray
+    y: np.ndarray
+    u: np.ndarray
+    train: StepTrain
+    kp_raw: float
+    ki_raw: float
     meta: dict = field(default_factory=dict)

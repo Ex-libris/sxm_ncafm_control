@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 
 from sxm_ncafm_control.tuning import metrics as M
-from sxm_ncafm_control.tuning.simulator import PLLSetup, SXMScale, run_step_trial, simulate_pll
+from sxm_ncafm_control.tests.sim import PLLSetup, SXMScale, run_step_trial, simulate_pll
 from sxm_ncafm_control.tuning.trial import StepProtocol
 
 PROTO = StepProtocol(step_hz=1.0, hold_s=3.0, n_holds=7)

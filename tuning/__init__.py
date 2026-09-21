@@ -1,19 +1,19 @@
 """
 Loop-tuning toolkit for the SXM nc-AFM controller (PLL and amplitude feedback).
 
-Pure numpy/scipy: nothing here imports Qt or talks to hardware, so everything
-can be developed and tested offline.
+Pure numpy/scipy: nothing here imports Qt or talks to hardware, so it can be tested offline.
+The instrument I/O and the GUI live in ``gui/tuning_tab.py``.
 
-Design rule: SXM's Kp/Ki are in arbitrary internal units, so nothing in this
-package assumes what a raw gain means physically. Gains are judged only from
-*measured responses* (see metrics.py) and searched relative to a known-good
-baseline (see planner.py). The simulator's raw->physical mapping is an
-assumption that identify.py can recover from real step responses.
+Design rule: SXM's Kp/Ki are in arbitrary internal units, so nothing assumes what a raw gain means.
+Loops are judged from *measured responses* to step trains; the physical loop is identified from the
+same recording by regression (loopid), which also lets the tool predict untested gains.
 
 Modules
 -------
-metrics    step-response and noise metrics from (t, y) arrays
-simulator  virtual qPlus + lock-in + PLL for offline development
-planner    scan-speed requirements, trial analysis and the guided search
-identify   fit the unknown raw->physical gain scales from measured trials
+trial     StepTrain (a step train with arbitrary timing) and LoopCapture (a recording of one loop)
+metrics   step-response, error-transient and noise metrics from (t, y) arrays
+loopid    identify a PI loop (physical Kp/Ki, sensor pole, latency, noise) from ONE recorded train,
+          and predict step metrics / stability / noise for other gains
+workflow  the tuning workflow: define the test, detect the loop from the channels, analyse, classify,
+          advise, and screen a (Kp, Ki) grid into a 2D map with islands of good response
 """
