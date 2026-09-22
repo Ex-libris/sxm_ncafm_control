@@ -8,11 +8,12 @@ Workflow (the manual's, made systematic)
    (PLL: ``df`` + ``Phase``; amplitude loop: ``QPlusAmpl`` + ``Drive``).
 2. Enter the known-good baseline gains (SXM cannot be read back, so the tab needs them).
 3. Set the target: an imaging scan (line time, pixels) or a response time.
-4. Run one test, or screen a log-spaced (Kp, Ki) grid around the baseline: every cell is a
-   step train, measured and classified. The 2D map shows *islands* of rectangular, well-controlled
-   response; moving up-right along a diagonal (raise both, same ratio) makes the loop faster, down-left
-   slower; across diagonals the shape changes. Click a cell for its averaged response and advice
-   (higher / lower / different pairing), then refine around it or around the suggested cell.
+4. Run one test, or screen a log-spaced grid around the baseline indexed by **Speed** (Kp and Ki raised or
+   lowered together, same ratio) and **Shape** (the Ki:Kp ratio, shifted relative to the baseline's): every
+   cell is a step train, measured and classified. The 2D map shows *islands* of rectangular, well-controlled
+   response; moving up (faster speed, same shape) makes the loop faster, down slower; moving sideways changes
+   the shape. Click a cell for its averaged response and advice (higher / lower / different pairing), then
+   refine around it (by hand, or with "Narrow search": one confirmed round of hardware writes at a time).
 5. "Analyze Scope capture" applies the same analysis to a step train already recorded in the Scope tab.
 
 Safety: the loop is only driven inside limits around the baseline; a running test is aborted if the
@@ -26,7 +27,9 @@ capture runs in a worker thread.
 
 import dataclasses
 import functools
+import json
 import math
+import os
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -38,13 +41,92 @@ from sxm_ncafm_control.device_driver import CHANNELS
 from sxm_ncafm_control.tuning import metrics as M
 from sxm_ncafm_control.tuning import workflow as W
 
-from ..common import append_log_line, format_number
+from ..common import VOLTAGE_LIMIT_ABS, append_log_line, format_number
 from .sci_spinbox import SciDoubleSpinBox
 
 CATEGORY_COLOR = {
     "good": (70, 175, 95), "overshoot": (240, 200, 60), "ringing": (240, 140, 50), "slow_tail": (120, 170, 230),
     "too_slow": (175, 175, 175), "lost": (205, 65, 65), "skipped": (95, 95, 95), "untested": (238, 238, 238),
 }
+
+
+# ---------------------------------------------------------------------------
+# persisted UI state: left panel width, which sections are expanded (same JSON-in-home-dir pattern
+# as gui_accessibility_manager.py, scoped to this tab instead of the whole app)
+# ---------------------------------------------------------------------------
+_LAYOUT_FILE = os.path.join(os.path.expanduser("~"), ".scientific_gui_tuning_layout.json")
+
+
+def _load_tuning_layout() -> dict:
+    try:
+        with open(_LAYOUT_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _write_tuning_layout(state: dict) -> None:
+    try:
+        with open(_LAYOUT_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception:
+        pass
+
+
+class CollapsibleSection(QtWidgets.QWidget):
+    """
+    A QGroupBox-like section that can fold away to a one-line header. Collapsing never hides
+    information: the header keeps showing a live summary of the section's current values (set with
+    ``set_summary()``), so you never have to expand a section just to read what it is set to - only
+    to change it.
+    """
+
+    toggled = QtCore.pyqtSignal(bool)          # emits the new expanded state
+
+    def __init__(self, title: str, expanded: bool = True, parent=None):
+        super().__init__(parent)
+        self._title = title
+        self._summary = ""
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(2)
+        self.header = QtWidgets.QToolButton()
+        self.header.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        self.header.setCheckable(True)
+        self.header.setChecked(expanded)
+        self.header.setStyleSheet("QToolButton { border: none; font-weight: bold; text-align: left; }")
+        self.header.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        v.addWidget(self.header)
+        self.content = QtWidgets.QWidget()
+        self.content.setVisible(expanded)
+        v.addWidget(self.content)
+        self.header.toggled.connect(self._on_toggled)
+        self._on_toggled(expanded)
+
+    def set_content_layout(self, layout: QtWidgets.QLayout) -> None:
+        self.content.setLayout(layout)
+
+    def set_summary(self, text: str) -> None:
+        self._summary = text
+        self._refresh_header()
+
+    def is_expanded(self) -> bool:
+        return self.header.isChecked()
+
+    def set_expanded(self, expanded: bool) -> None:
+        self.header.setChecked(expanded)
+
+    def _on_toggled(self, checked: bool) -> None:
+        self.header.setArrowType(QtCore.Qt.DownArrow if checked else QtCore.Qt.RightArrow)
+        self.content.setVisible(checked)
+        self._refresh_header()
+        self.toggled.emit(checked)
+
+    def _refresh_header(self) -> None:
+        if self.header.isChecked() or not self._summary:
+            self.header.setText(self._title)
+        else:
+            self.header.setText(f"{self._title}  —  {self._summary}")
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +272,9 @@ class TuningRunner(QtCore.QObject):
         self.running = False
         if was_running:
             self._restore()
-            self.message.emit("Baseline gains and the stepped parameter were restored.")
+            kp, ki = self.baseline
+            step_label = "DNC use" if self.loop.key == "pll" else "Ref"
+            self.message.emit(f"Baseline restored: Kp={kp:.4g}, Ki={ki:.4g}, {step_label}={self.plan.base:.4g}.")
             self.finished.emit(reason)
 
     def _later(self, ms, fn, *args):
@@ -465,6 +549,9 @@ what every change is measured against and what is restored afterwards.</li>
 <li><b>Run single test (baseline)</b>: measures the loop as it is now. The verdict, the measured times and the suggested
 new gains appear in the results panel and the plots.</li>
 <li><b>Test suggested pair</b>: re-measures with the suggested gains. Repeat until the verdict is <i>good</i>.</li>
+<li><b>Narrow search</b> (on the Speed &times; Shape map): one button, one confirmed round - fills the map if it
+isn't already, zooms a finer grid onto the best cell, fills that too, then reports what changed and stops.
+Click again for another round, until it reports the pair has converged.</li>
 <li><b>Stage in Params tab</b>: hands the chosen pair to the Parameters tab. Apply it there.</li>
 </ol>
 
@@ -488,7 +575,8 @@ Imaging target: at most half a pixel dwell (line time / pixels).</td></tr>
 <h3>Rules of thumb</h3>
 <ul>
 <li>Kp does the fast tracking; Ki removes what is left (the Phase tail).</li>
-<li>The Ki:Kp <b>ratio</b> sets the shape. Raising or lowering <b>both</b> by the same factor makes the loop faster or slower.</li>
+<li>The map has two independent axes: <b>speed</b> (Kp and Ki raised or lowered <b>together</b>, same ratio - faster
+or slower) and <b>shape</b> (the Ki:Kp <b>ratio</b>, shifted from the baseline's - how it gets there).</li>
 <li>A faster loop is a noisier loop: stop at the slowest gains that still meet the target.</li>
 <li>Kp and Ki are SXM's raw units. Nothing here assumes what a value means: gains are judged only from measured responses.</li>
 </ul>
@@ -503,16 +591,21 @@ Q, f0 and the gain, and the hold / settle times from the ring-down time Q/(&pi;f
 <li><b>Run scale scan</b>: tests the baseline, then both gains together in steps of the step factor (default &times;10, three down and three up).
 Ki:Kp stays; only the speed changes. It stops going further once a test loses the loop.</li>
 <li>Read the scan on the map: grey = still too slow, green = the right decade, orange / red = too high.</li>
-<li>Click the best cell and <i>Suggest / refine zoom</i>: a finer 3&times;3 map in steps of &radic;(factor), which now also varies the ratio. Repeat once more, then use single tests.</li>
+<li>Click the best cell and <i>Suggest / refine zoom</i> (or press <i>Narrow search</i> to fill-and-zoom in one click): a finer
+3&times;3 map in steps of &radic;(factor), which now also varies the shape. Repeat once more, then use single tests.</li>
 <li>Check the <b>Drive</b> line of each result: the manual asks you to avoid a strong (saturating) overshoot there, and Kp amplifies its noise.</li>
 </ol>
 <p><i>Max gain change vs baseline</i> (left, 4) limits how far from your baseline any test may go (default &times;1000 for this loop, &times;16 for the PLL).
 If the baseline warning above the results appears, check first that the output gain here matches the DNC window.</p>
 
-<h3>The (Kp, Ki) map (optional)</h3>
-<p>Runs one test per cell of a log-spaced grid around the baseline. Up-right = both higher (faster), down-left = both lower (slower).
-Cell colours are the verdict colours above; grey = skipped (more aggressive than a cell that lost the loop), pale = not tested yet.
-Click a cell to see its response and advice; <i>Suggest / refine zoom</i> maps the neighbourhood of a good cell in finer steps.</p>
+<h3>The Speed &times; Shape map (optional)</h3>
+<p>Runs one test per cell of a log-spaced grid around the baseline. The <b>vertical</b> axis is speed: Kp and Ki raised or
+lowered together (same ratio) - up is faster, down slower. The <b>horizontal</b> axis is shape: the Ki:Kp ratio shifted
+from the baseline's - right is more integral-heavy (higher Ki:Kp), left more proportional-heavy. The crosshair marks the
+baseline row and column. Cell colours are the verdict colours above; grey = skipped (more aggressive than a cell that
+lost the loop), pale = not tested yet. Click a cell to see its response and advice; <i>Suggest / refine zoom</i> maps the
+neighbourhood of a good cell in finer steps by hand, and <i>Narrow search</i> does the fill-and-zoom automatically, one
+confirmed round of hardware writes at a time, until it reports the pair has converged.</p>
 """
 
 
@@ -520,7 +613,7 @@ Click a cell to see its response and advice; <i>Suggest / refine zoom</i> maps t
 # the tab
 # ---------------------------------------------------------------------------
 class TuningTab(QtWidgets.QWidget):
-    """Guided PLL / amplitude-loop tuning: define, run, analyse, screen a (Kp, Ki) map, refine."""
+    """Guided PLL / amplitude-loop tuning: define, run, analyse, screen a Speed x Shape map, refine."""
 
     LEAD_S = 1.0            # settled recording before the first event
     TAIL_S = 0.5            # recording after the last event's hold
@@ -535,8 +628,10 @@ class TuningTab(QtWidgets.QWidget):
         self.selected: Optional[Tuple[int, int]] = None
         self._single_result: Optional[W.StepTestResult] = None
         self._map_texts: list = []
+        self._confirmed_baseline: Dict[str, Tuple[float, float]] = {}     # per loop, this session only
         self._build()
         self._on_loop_changed()
+        self._paint_map()          # the clean empty state, not pyqtgraph's raw default axis
         self._update_enabled()
 
     # ------------------------------------------------------------------ construction
@@ -557,15 +652,45 @@ class TuningTab(QtWidgets.QWidget):
         return s
 
     def _build(self):
-        root = QtWidgets.QHBoxLayout(self)
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # pinned bar: live "what am I about to do" context, and the Stop control, never scrolled away.
+        pinned = QtWidgets.QFrame()
+        pinned.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        pb = QtWidgets.QHBoxLayout(pinned)
+        pb.setContentsMargins(8, 4, 8, 4)
+        self.context_label = QtWidgets.QLabel()
+        self.context_label.setWordWrap(True)
+        self.context_label.setTextFormat(QtCore.Qt.RichText)
+        pb.addWidget(self.context_label, 1)
+        self.btn_stop = QtWidgets.QPushButton("Stop && restore baseline")
+        self.btn_stop.setToolTip("Aborts the running test and immediately writes the baseline Kp/Ki back. "
+                                 "Shortcuts: Esc, Ctrl+.")
+        self.btn_stop.clicked.connect(self.stop)
+        pb.addWidget(self.btn_stop)
+        outer.addWidget(pinned)
+        self._stop_shortcuts = []
+        for seq in ("Esc", "Ctrl+."):
+            sc = QtWidgets.QShortcut(QtGui.QKeySequence(seq), self)
+            sc.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
+            sc.activated.connect(self.stop)
+            self._stop_shortcuts.append(sc)
+
+        root = QtWidgets.QHBoxLayout()
+        root.setContentsMargins(0, 0, 0, 0)
+        outer.addLayout(root, 1)
+        self.main_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.main_split.setChildrenCollapsible(False)     # the left panel can be resized, never dragged to hidden
+        root.addWidget(self.main_split)
         left_scroll = QtWidgets.QScrollArea()
         left_scroll.setWidgetResizable(True)
-        left_scroll.setMinimumWidth(330)
-        left_scroll.setMaximumWidth(420)
+        left_scroll.setMinimumWidth(260)
         left = QtWidgets.QWidget()
         lv = QtWidgets.QVBoxLayout(left)
         left_scroll.setWidget(left)
-        root.addWidget(left_scroll)
+        self.main_split.addWidget(left_scroll)
 
         # 1. test
         g = QtWidgets.QGroupBox("1. Test")
@@ -579,6 +704,7 @@ class TuningTab(QtWidgets.QWidget):
         self.channels_label.setWordWrap(True)
         f.addRow("Records:", self.channels_label)
         self.base_spin = self._spin(-1e12, 1e12, 25000.0, 4, plain=True)     # `use` frequency in Hz (or Ref): fixed decimals
+        self.base_spin.valueChanged.connect(lambda *_: self._update_hint())  # the AFL voltage warning follows it
         self.base_label = QtWidgets.QLabel()
         f.addRow(self.base_label, self.base_spin)
         self.step_spin = self._spin(0.001, 1e6, 1.0, 3)
@@ -633,11 +759,12 @@ class TuningTab(QtWidgets.QWidget):
         self.btn_fill.clicked.connect(lambda: self._fill_afl_start())
         for w in (self.kp_spin, self.ki_spin):
             w.valueChanged.connect(lambda *_: self._update_hint())          # the baseline warning follows what is typed
+            w.valueChanged.connect(self._reset_checklist)                   # a different baseline needs re-verifying
         lv.addWidget(g)
 
         # 3. target
-        g = QtWidgets.QGroupBox("3. Target")
-        f = QtWidgets.QFormLayout(g)
+        self.target_section = CollapsibleSection("3. Target", expanded=False)
+        f = QtWidgets.QFormLayout()
         self.target_combo = QtWidgets.QComboBox()
         self.target_combo.addItems(["Imaging scan", "Response time"])
         self.target_combo.currentIndexChanged.connect(self._on_target_changed)
@@ -656,34 +783,43 @@ class TuningTab(QtWidgets.QWidget):
         self.target_note = QtWidgets.QLabel()
         self.target_note.setWordWrap(True)
         f.addRow(self.target_note)
-        lv.addWidget(g)
+        self.target_section.set_content_layout(f)
+        lv.addWidget(self.target_section)
+        for w in (self.line_spin, self.px_spin, self.rise_spin, self.os_spin):
+            w.valueChanged.connect(self._on_target_changed)
 
         # 4. grid
-        g = QtWidgets.QGroupBox("4. Search (log-spaced around the baseline)")
-        f = QtWidgets.QFormLayout(g)
+        self.search_section = CollapsibleSection("4. Search span", expanded=False)
+        f = QtWidgets.QFormLayout()
         self.factor_spin = self._spin(1.2, 10.0, 2.0, 2, 0.1, " x")
-        self.factor_spin.setToolTip("Gain ratio between neighbouring tests. x2 for a fine PLL search; x10 (a decade) "
+        self.factor_spin.setToolTip("How far apart each step is. x2 for a fine PLL search; x10 (a decade) "
                                     "for the amplitude loop, whose gains span many orders of magnitude.")
         self.scan_lo = self._spin(0, 6, 2, 0)
         self.scan_hi = self._spin(0, 6, 2, 0)
-        self.kp_lo = self._spin(0, 4, 2, 0)
-        self.kp_hi = self._spin(0, 4, 2, 0)
-        self.ki_lo = self._spin(0, 5, 3, 0)
-        self.ki_hi = self._spin(0, 5, 2, 0)
+        self.speed_lo = self._spin(0, 4, 2, 0)
+        self.speed_hi = self._spin(0, 4, 2, 0)
+        self.shape_lo = self._spin(0, 5, 3, 0)
+        self.shape_hi = self._spin(0, 5, 2, 0)
         self.range_spin = self._spin(2.0, 1e6, 16.0, 0, 10.0, " x")
         self.range_spin.setToolTip("No test is written with a Kp or Ki more than this factor above or below the baseline "
                                    "(map, scale scan and suggested pairs).")
         f.addRow("Step factor:", self.factor_spin)
-        f.addRow("Scale scan steps down / up:", self._pair(self.scan_lo, self.scan_hi))
-        f.addRow("Map: Kp steps down / up:", self._pair(self.kp_lo, self.kp_hi))
-        f.addRow("Map: Ki steps down / up:", self._pair(self.ki_lo, self.ki_hi))
+        f.addRow("Scale scan steps down / up (speed):", self._pair(self.scan_lo, self.scan_hi))
+        f.addRow("Map: Speed steps down / up (slower / faster):", self._pair(self.speed_lo, self.speed_hi))
+        f.addRow("Map: Shape steps down / up (more P / more I):", self._pair(self.shape_lo, self.shape_hi))
         f.addRow("Max gain change vs baseline:", self.range_spin)
         self.est_label = QtWidgets.QLabel()
         self.est_label.setWordWrap(True)
         f.addRow(self.est_label)
-        lv.addWidget(g)
-        for w in (self.factor_spin, self.scan_lo, self.scan_hi, self.kp_lo, self.kp_hi, self.ki_lo, self.ki_hi, self.range_spin,
-                  self.hold_spin, self.settle_spin, self.events_spin, self.step_spin):
+        self.preview_label = QtWidgets.QLabel()
+        self.preview_label.setWordWrap(True)
+        self.preview_label.setStyleSheet("color: #444;")
+        self.preview_label.setToolTip("The actual Kp / Ki values a map with these settings would write to SXM.")
+        f.addRow(self.preview_label)
+        self.search_section.set_content_layout(f)
+        lv.addWidget(self.search_section)
+        for w in (self.factor_spin, self.scan_lo, self.scan_hi, self.speed_lo, self.speed_hi, self.shape_lo, self.shape_hi,
+                  self.range_spin, self.hold_spin, self.settle_spin, self.events_spin, self.step_spin):
             w.valueChanged.connect(self._update_estimate)
 
         # 5. checklist + buttons
@@ -700,16 +836,14 @@ class TuningTab(QtWidgets.QWidget):
         self.btn_scan.setToolTip("Tests the baseline, then both gains scaled together in steps of the step factor: Ki:Kp is "
                                  "kept and only the speed changes. Use it first when the right decade of gain is unknown.")
         self.btn_map = QtWidgets.QPushButton("Run / continue map")
-        self.btn_stop = QtWidgets.QPushButton("Stop && restore baseline")
         self.btn_clear = QtWidgets.QPushButton("Clear map")
         self.btn_scope = QtWidgets.QPushButton("Analyze Scope capture")
         self.btn_scope.setToolTip("Analyze the step train recorded in the Scope tab (needs the Step Test events on it).")
-        for b in (self.btn_single, self.btn_scan, self.btn_map, self.btn_stop, self.btn_clear, self.btn_scope):
+        for b in (self.btn_single, self.btn_scan, self.btn_map, self.btn_clear, self.btn_scope):
             v.addWidget(b)
         self.btn_single.clicked.connect(self._run_single)
         self.btn_scan.clicked.connect(self._run_scan)
         self.btn_map.clicked.connect(self._run_map)
-        self.btn_stop.clicked.connect(self.stop)
         self.btn_clear.clicked.connect(self._clear_map)
         self.btn_scope.clicked.connect(self._analyze_scope)
         lv.addWidget(g)
@@ -726,17 +860,19 @@ class TuningTab(QtWidgets.QWidget):
         self.hint_label.setMargin(6)
         rb.addWidget(self.hint_label)
         right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        right.setChildrenCollapsible(False)
         rb.addWidget(right, 1)
-        root.addWidget(right_box, 1)
+        self.main_split.addWidget(right_box)
         top = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        top.setChildrenCollapsible(False)
         right.addWidget(top)
 
-        self.map_plot = pg.PlotWidget(title="(Kp, Ki) map: click a cell")
+        self.map_plot = pg.PlotWidget(title="Speed x Shape map: click a cell")
         self.map_plot.setBackground("w")
         self.map_plot.setMouseEnabled(False, False)
-        self.map_plot.setLabel("bottom", "Ki  (raw, log-spaced)")
-        self.map_plot.setLabel("left", "Kp  (raw, log-spaced)")
-        self.map_plot.setMinimumSize(360, 260)
+        self.map_plot.setLabel("bottom", "Shape  (Ki:Kp ratio vs baseline)")
+        self.map_plot.setLabel("left", "Speed  (Kp vs baseline)")
+        self.map_plot.setMinimumSize(260, 200)
         self.map_img = pg.ImageItem()
         self.map_plot.addItem(self.map_img)
         self.map_marks = pg.PlotDataItem()
@@ -756,11 +892,15 @@ class TuningTab(QtWidgets.QWidget):
         self.btn_zoom = QtWidgets.QPushButton("Suggest / refine zoom")
         self.btn_back = QtWidgets.QPushButton("Back to coarse map")
         self.btn_prior = QtWidgets.QPushButton("Predict map (model)")
-        for n, b in enumerate((self.btn_test_sug, self.btn_apply, self.btn_zoom, self.btn_back, self.btn_prior)):
+        self.btn_narrow = QtWidgets.QPushButton("Narrow search")
+        self.btn_narrow.setToolTip("Fills the current map (if needed), zooms a finer grid onto its best cell and fills "
+                                   "that too - one button, one confirmed round of hardware writes. Click again to "
+                                   "narrow further.")
+        for n, b in enumerate((self.btn_test_sug, self.btn_apply, self.btn_zoom, self.btn_back, self.btn_prior, self.btn_narrow)):
             b.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)   # never force the panel wider
             grid.addWidget(b, n // 2, n % 2)
         sv.addLayout(grid)
-        side.setMinimumWidth(280)
+        side.setMinimumWidth(220)
         top.addWidget(side)
         top.setStretchFactor(0, 3)
         top.setStretchFactor(1, 2)
@@ -801,7 +941,34 @@ class TuningTab(QtWidgets.QWidget):
         self.btn_back.clicked.connect(self._back)
         self.btn_prior.clicked.connect(self._predict_prior)
         self.btn_test_sug.clicked.connect(self._test_suggestion)
+        self.btn_narrow.clicked.connect(self._narrow_search)
         self._suggestions: List[W.Suggestion] = []
+        self._narrow_active = False
+        self._narrow_stage: Optional[str] = None
+        self._narrow_round = 0
+        self._narrow_converged = False
+
+        # left/right split: sane default, then the user's remembered width and section states (if any)
+        self.main_split.setStretchFactor(0, 0)
+        self.main_split.setStretchFactor(1, 1)
+        self.main_split.setSizes([360, 900])
+        layout_state = _load_tuning_layout()
+        self.target_section.set_expanded(bool(layout_state.get("target_expanded", False)))
+        self.search_section.set_expanded(bool(layout_state.get("search_expanded", False)))
+        if "left_width" in layout_state:
+            w = int(layout_state["left_width"])
+            QtCore.QTimer.singleShot(0, lambda: self.main_split.setSizes([w, max(500, self.width() - w)]))
+        self.main_split.splitterMoved.connect(self._save_layout_state)
+        self.target_section.toggled.connect(self._save_layout_state)
+        self.search_section.toggled.connect(self._save_layout_state)
+
+    def _save_layout_state(self, *_):
+        sizes = self.main_split.sizes()
+        _write_tuning_layout({
+            "left_width": sizes[0] if sizes else 360,
+            "target_expanded": self.target_section.is_expanded(),
+            "search_expanded": self.search_section.is_expanded(),
+        })
 
     @staticmethod
     def _pair(a, b):
@@ -846,6 +1013,7 @@ class TuningTab(QtWidgets.QWidget):
         self.rise_spin.setValue(50.0 if pll else 500.0)
         self._on_target_changed()
         self._update_estimate()
+        self._update_enabled()
 
     def _afl_start(self) -> W.AflStart:
         return W.afl_start_values(self.q_spin.value(), self.f0_spin.value(), self.gain_combo.currentData())
@@ -893,13 +1061,61 @@ class TuningTab(QtWidgets.QWidget):
                 f"Q, f0 and output gain. Is the output gain selected here the one set in the DNC window? "
                 f"(It may be right for your sensor: a Scale scan will tell.)</span>")
 
-    def _on_target_changed(self):
+    def _confirmed_baseline_warning(self) -> str:
+        """Either loop: flag that the typed Kp/Ki no longer matches what was last confirmed (this or a
+        previous session) - a reminder to re-check SXM before the next run re-confirms it."""
+        last = self._load_confirmed_baseline(self.loop_def.key)
+        if last is None:
+            return ""
+        kp, ki = self.kp_spin.value(), self.ki_spin.value()
+        if math.isclose(last[0], kp, rel_tol=1e-9) and math.isclose(last[1], ki, rel_tol=1e-9):
+            return ""
+        return (f"<br><span style='color:#a06000'><b>Note:</b> this differs from the baseline last confirmed for this "
+               f"loop (Kp={last[0]:.4g}, Ki={last[1]:.4g}). The next run will ask you to confirm the new one.</span>")
+
+    def _voltage_warning(self) -> str:
+        """
+        Amplitude loop only: its stepped parameter is Ref, the same voltage-guarded value as
+        common.PARAMS_BASE's 'amp_ref' elsewhere in the app. Rather than a permanent app-wide banner,
+        warn here, inline, only when the levels this test would actually write exceed the limit.
+        """
+        if self.loop_def.key != "afl":
+            return ""
+        base, step_frac = self.base_spin.value(), self.step_spin.value() / 100.0
+        high, low = base * (1 + step_frac), base * (1 - step_frac)
+        worst = max(abs(high), abs(low))
+        if worst <= VOLTAGE_LIMIT_ABS:
+            return ""
+        return (f"<br><span style='color:#a06000'><b>Check:</b> stepping Ref to {high:.4g} / {low:.4g} exceeds "
+               f"&plusmn;{VOLTAGE_LIMIT_ABS:g} V. Do not proceed without a divider/attenuator.</span>")
+
+    def _on_target_changed(self, *_):
         scan = self.target_combo.currentIndex() == 0
         for w in (self.line_spin, self.px_spin, self.line_label, self.px_label):
             w.setVisible(scan)
         for w in (self.rise_spin, self.rise_label):
             w.setVisible(not scan)
         self._target_note()
+        self._reset_checklist()
+
+    def _update_context_label(self):
+        """The pinned bar's live 'what am I about to do' line: never scrolled out of view."""
+        ld = self.loop_def
+        conn = "OFFLINE" if not self._online() else "ONLINE"
+        kp, ki = format_number(self.kp_spin.value(), 4, 1e4), format_number(self.ki_spin.value(), 4, 1e4)
+        running = self.runner_active()
+        state = " &middot; <b>RUNNING</b>" if running else ""
+        self.context_label.setText(
+            f"Tuning: {ld.key.upper()} ({ld.primary_channel}) &middot; Baseline Kp {kp} / Ki {ki} &middot; {conn}{state}")
+
+    def _reset_checklist(self, *_):
+        """
+        Untick every checklist item: the loop, baseline or target changed (or a run just finished), so a
+        previous tick no longer vouches for the current state and the user should re-verify each item.
+        None of these are currently driver-verifiable (no lock-state channel exists to tick one automatically).
+        """
+        for c in self.checks:
+            c.setChecked(False)
 
     def _target_note(self):
         t = self.target()
@@ -907,6 +1123,7 @@ class TuningTab(QtWidgets.QWidget):
         if t.decay_max:
             txt += f", Phase tail gone within {t.decay_max * 1e3:.0f} ms"
         self.target_note.setText(txt)
+        self.target_section.set_summary(txt)          # same real numbers, shown on the collapsed header too
 
     def target(self) -> W.Target:
         os_max = self.os_spin.value() / 100.0
@@ -925,8 +1142,8 @@ class TuningTab(QtWidgets.QWidget):
 
     def grid(self) -> W.GridSpec:
         return W.GridSpec(self.kp_spin.value(), self.ki_spin.value(), factor=self.factor_spin.value(),
-                          kp_exps=tuple(range(-int(self.kp_lo.value()), int(self.kp_hi.value()) + 1)),
-                          ki_exps=tuple(range(-int(self.ki_lo.value()), int(self.ki_hi.value()) + 1)))
+                          speed_exps=tuple(range(-int(self.speed_lo.value()), int(self.speed_hi.value()) + 1)),
+                          shape_exps=tuple(range(-int(self.shape_lo.value()), int(self.shape_hi.value()) + 1)))
 
     def scan_grid(self) -> W.GridSpec:
         return W.GridSpec.scan(self.kp_spin.value(), self.ki_spin.value(), self.factor_spin.value(),
@@ -949,13 +1166,43 @@ class TuningTab(QtWidgets.QWidget):
             g, p = self.grid(), self.plan()
         except ValueError:
             return
-        n = g.shape[0] * g.shape[1]
+        nk, ni = g.dims
+        n = nk * ni
         n_scan = int(self.scan_lo.value()) + int(self.scan_hi.value()) + 1
         each = p.settle_s + p.duration + 0.3
+        minutes = n * each / 60
         self.est_label.setText(f"Each test takes about {each:.0f} s. Scale scan: {n_scan} tests, about {n_scan * each / 60:.1f} min. "
-                               f"Map: {n} tests, about {n * each / 60:.1f} min (worst case; unstable regions are skipped).")
+                               f"Map: {n} tests, about {minutes:.1f} min (worst case; unstable regions are skipped).")
+        self.preview_label.setText(self._preview_text(g))
+        self.search_section.set_summary(self._search_summary_text(g, n, minutes))
         self._target_note()
         self._update_hint()
+
+    def _preview_text(self, g: W.GridSpec) -> str:
+        """Plain-number preview of what a map with this grid would actually write to SXM (no factor^n mental math)."""
+        i0 = g.speed_exps.index(0) if 0 in g.speed_exps else 0
+        kps = [(g.kp(i), g.speed_exps[i] == 0) for i in range(len(g.speed_exps))]
+        kis = [(g.ki(i0, j), g.shape_exps[j] == 0) for j in range(len(g.shape_exps))]
+
+        def fmt(pairs):
+            return ", ".join(format_number(v, 4, 1e4) + (" (baseline)" if base else "") for v, base in pairs)
+        lo = self.range_spin.value()
+        return (f"Kp tested (speed axis): {fmt(kps)}\n"
+               f"Ki tested at baseline speed (shape axis): {fmt(kis)}\n"
+               f"Max gain change vs baseline keeps both within x{1 / lo:.3g} .. x{lo:.3g} of the baseline.")
+
+    def _search_summary_text(self, g: W.GridSpec, n: int, minutes: float) -> str:
+        """
+        One-line, real-number summary for the section's collapsed header. Deliberately does NOT report
+        step counts or the step factor (e.g. 'speed +-2, shape +-3, step x2') - that notation was exactly
+        the log-scale mental math this tab is trying to get rid of. Report the actual Kp/Ki span instead.
+        """
+        i0 = g.speed_exps.index(0) if 0 in g.speed_exps else 0
+        kp_a, kp_b = g.kp(0), g.kp(len(g.speed_exps) - 1)
+        ki_a, ki_b = g.ki(i0, 0), g.ki(i0, len(g.shape_exps) - 1)
+        return (f"Kp {format_number(kp_a, 4, 1e4)} to {format_number(kp_b, 4, 1e4)}, "
+               f"Ki {format_number(ki_a, 4, 1e4)} to {format_number(ki_b, 4, 1e4)} "
+               f"— {n} pairs, ~{minutes:.1f} min")
 
     def _gains_valid(self) -> Optional[str]:
         ld = self.loop_def
@@ -969,27 +1216,53 @@ class TuningTab(QtWidgets.QWidget):
     def _online(self) -> bool:
         return self.driver is not None and not type(self.dde).__name__.startswith("Mock")
 
+    @staticmethod
+    def _accessibility_manager():
+        """The app-wide AccessibilityManager, or None (e.g. a bare TuningTab built without one, in tests)."""
+        app = QtWidgets.QApplication.instance()
+        return getattr(app, "accessibility_manager", None)
+
     def _update_enabled(self, *_):
         running = self.runner is not None and self.runner.running
         ready = self._online() and all(c.isChecked() for c in self.checks) and not running
         for b in (self.btn_single, self.btn_scan, self.btn_map, self.btn_test_sug):
             b.setEnabled(ready)
+        self.btn_narrow.setEnabled(ready and not self._narrow_converged)
         self.btn_stop.setEnabled(running)
+        mgr = self._accessibility_manager()
+        self.btn_stop.setStyleSheet(mgr.stop_button_style(running) if mgr else "")
+        self.btn_stop.setToolTip("Aborts the running test and immediately writes the baseline Kp/Ki back. "
+                                 "Shortcuts: Esc, Ctrl+." if running else "Nothing is running.")
         self.btn_clear.setEnabled(not running)
+        self.btn_clear.setToolTip("Disabled while a test is running." if running else "")
         self.btn_scope.setEnabled(self.scope_tab is not None and not running)
+        self.btn_scope.setToolTip(
+            "Disabled while a test is running." if running else
+            "No Scope tab to read from." if self.scope_tab is None else
+            "Analyze the step train recorded in the Scope tab (needs the Step Test events on it).")
         if not self._online():
             tip = "Offline: running tests needs the real SXM and driver."
         elif not all(c.isChecked() for c in self.checks):
             tip = "Tick every item in '5. Before running' first."
         else:
             tip = ""
-        for b in (self.btn_single, self.btn_map):
+        for b in (self.btn_single, self.btn_map, self.btn_test_sug):
             b.setToolTip(tip)
         if tip:
             self.btn_scan.setToolTip(tip)
         else:
             self.btn_scan.setToolTip("Tests the baseline, then both gains scaled together in steps of the step factor: Ki:Kp is "
                                      "kept and only the speed changes. Use it first when the right decade of gain is unknown.")
+        if tip:
+            self.btn_narrow.setToolTip(tip)
+        elif self._narrow_converged:
+            self.btn_narrow.setToolTip("Converged: another round would not move this pair. Change the baseline or "
+                                       "search span to narrow further.")
+        else:
+            self.btn_narrow.setToolTip("Fills the current map (if needed), zooms a finer grid onto its best cell and fills "
+                                       "that too - one button, one confirmed round of hardware writes. Click again to "
+                                       "narrow further.")
+        self._update_context_label()
         self._update_hint()
 
     def _update_hint(self):
@@ -1022,6 +1295,8 @@ class TuningTab(QtWidgets.QWidget):
                     "verdict is good.")
         if not self.runner_active():
             text += self._baseline_warning()
+            text += self._confirmed_baseline_warning()
+            text += self._voltage_warning()
         self.hint_label.setText(text)
 
     # ------------------------------------------------------------------ logging
@@ -1037,14 +1312,68 @@ class TuningTab(QtWidgets.QWidget):
             m = W.ScreeningMap(self.grid(), self.target(), limits=self.safety_limits(),
                                reference=(self.kp_spin.value(), self.ki_spin.value()))
             self.maps.append(m)
+            self._narrow_converged = False
             self._paint_map()
         return self.maps[-1]
 
     def _clear_map(self):
         self.maps.clear()
         self.selected = None
+        self._narrow_converged = False
+        self._narrow_active = False
+        self._narrow_stage = None
+        self._narrow_round = 0
         self._paint_map()
         self._refresh_table()
+        self._update_enabled()
+
+    # -- baseline confirmation (SXM cannot be read back, so this is what gets restored) --------------
+    @staticmethod
+    def _baseline_settings() -> QtCore.QSettings:
+        return QtCore.QSettings("SXM-NCAFM", "TuningTab")
+
+    def _load_confirmed_baseline(self, loop_key: str) -> Optional[Tuple[float, float]]:
+        s = self._baseline_settings()
+        kp_key, ki_key = f"confirmed_baseline/{loop_key}/kp", f"confirmed_baseline/{loop_key}/ki"
+        # QSettings.value(key, None, type=float) silently returns 0.0 (not None) for a missing key -
+        # check existence explicitly, or a never-confirmed baseline reads back as a spurious (0, 0).
+        if not (s.contains(kp_key) and s.contains(ki_key)):
+            return None
+        return (s.value(kp_key, type=float), s.value(ki_key, type=float))
+
+    def _save_confirmed_baseline(self, loop_key: str, kp: float, ki: float) -> None:
+        s = self._baseline_settings()
+        s.setValue(f"confirmed_baseline/{loop_key}/kp", kp)
+        s.setValue(f"confirmed_baseline/{loop_key}/ki", ki)
+
+    def _confirm_baseline(self, kp: float, ki: float) -> bool:
+        """
+        Gate for every run. If this exact (kp, ki) was already confirmed once this session for the
+        current loop, proceed silently - this is what keeps 'Narrow search' (two internal runs per
+        round) and repeated manual runs at an unchanged baseline from re-prompting every time. A
+        genuinely new or edited baseline always asks, since this is what gets written back to SXM
+        when the run stops or aborts, and SXM cannot be read back to check it independently.
+        """
+        loop_key = self.loop_def.key
+        confirmed = self._confirmed_baseline.get(loop_key)
+        if confirmed is not None and math.isclose(confirmed[0], kp, rel_tol=1e-9) and math.isclose(confirmed[1], ki, rel_tol=1e-9):
+            return True
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Question)
+        box.setWindowTitle("Confirm baseline")
+        box.setText(f"Will restore Kp = {kp:.4g}, Ki = {ki:.4g} when this run ends or is stopped.\n\n"
+                   "This must match what is actually set in SXM right now - it cannot be read back.")
+        box.setStandardButtons(QtWidgets.QMessageBox.Cancel | QtWidgets.QMessageBox.Ok)
+        box.setDefaultButton(QtWidgets.QMessageBox.Ok)
+        mgr = self._accessibility_manager()
+        if mgr:
+            mgr.apply_to_widget(box)
+        if box.exec_() != QtWidgets.QMessageBox.Ok:
+            return False
+        self._confirmed_baseline[loop_key] = (kp, ki)
+        self._save_confirmed_baseline(loop_key, kp, ki)
+        self._update_hint()          # the "differs from last confirmed" warning, if shown, clears now
+        return True
 
     def _start_runner(self, next_item):
         err = self._gains_valid()
@@ -1055,6 +1384,9 @@ class TuningTab(QtWidgets.QWidget):
             plan = self.plan()
         except ValueError as e:
             QtWidgets.QMessageBox.warning(self, "Test", str(e))
+            return
+        if not self._confirm_baseline(self.kp_spin.value(), self.ki_spin.value()):
+            self._log("Run not started: baseline not confirmed.")
             return
         self.runner = TuningRunner(self.dde, self.driver, plan, (self.kp_spin.value(), self.ki_spin.value()),
                                    self.analysis_kwargs(), parent=self)
@@ -1094,9 +1426,10 @@ class TuningTab(QtWidgets.QWidget):
     def _run_scan(self):
         """Scale scan: the baseline, then Kp and Ki scaled together (Ki:Kp kept) up and down by the step factor."""
         m = W.ScreeningMap(self.scan_grid(), self.target(), limits=self.safety_limits(),
-                           reference=(self.kp_spin.value(), self.ki_spin.value()), ratio_locked=True)
+                           reference=(self.kp_spin.value(), self.ki_spin.value()))
         self.maps.append(m)                          # on top of the stack: 'Back to coarse map' returns to the previous one
         self.selected = None
+        self._narrow_converged = False
         self._paint_map()
         self._refresh_table()
         self._run_map()
@@ -1123,6 +1456,14 @@ class TuningTab(QtWidgets.QWidget):
         self._log(f"run {reason}")
         self._update_enabled()
         self._paint_map()
+        if self._narrow_active:
+            if reason == "done":
+                self._continue_narrow()
+            else:
+                self._narrow_active = False
+                self._narrow_stage = None
+        if not self._narrow_active:                  # not mid-sequence: 'Narrow search' chains two runs
+            self._reset_checklist()                   # internally and should only reset once, at the end
 
     def _on_test_finished(self, cell, res: W.StepTestResult):
         m = self.current_map()
@@ -1186,11 +1527,20 @@ class TuningTab(QtWidgets.QWidget):
         if m is None:
             self.map_img.clear()
             self.map_marks.setData([], [])
+            # a clean, honest empty state: no map yet, so no axis numbers that could be mistaken for data
+            # (pyqtgraph's own auto-range default is an arbitrary, misleadingly round-looking grid).
+            self.map_plot.setXRange(0, 1)
+            self.map_plot.setYRange(0, 1)
+            self.map_plot.getAxis("left").setTicks([[]])
+            self.map_plot.getAxis("bottom").setTicks([[]])
+            placeholder = pg.TextItem("Run a test to see the map here", color=(140, 150, 160), anchor=(0.5, 0.5))
+            placeholder.setPos(0.5, 0.5)
+            self.map_plot.addItem(placeholder)
+            self._map_texts.append(placeholder)
             return
-        nk, ni = m.grid.shape
+        nk, ni = m.grid.dims
         cat = m.category_grid()
         img = np.zeros((ni, nk, 4), dtype=np.uint8)
-        active = set(m.cells())
         for i in range(nk):
             for j in range(ni):
                 c = cat[i, j]
@@ -1198,15 +1548,17 @@ class TuningTab(QtWidgets.QWidget):
                 alpha = 255
                 if c == "untested" and m.prior.get((i, j)) in CATEGORY_COLOR:      # faint model prediction
                     col, alpha = CATEGORY_COLOR[m.prior[(i, j)]], 70
-                if (i, j) not in active:                                            # scale scan: only the diagonal exists
-                    alpha = 0
                 img[j, i] = (*col, alpha)
         self.map_img.setImage(img, autoLevels=False)
         self.map_img.setRect(QtCore.QRectF(0, 0, ni, nk))
         self.map_plot.setXRange(-0.2, ni + 0.2)
         self.map_plot.setYRange(-0.2, nk + 0.2)
-        self.map_plot.getAxis("bottom").setTicks([[(j + 0.5, f"{m.grid.ki(j):.3g}") for j in range(ni)]])
+        # left axis (speed) is a real Kp number - Kp depends only on speed; bottom axis (shape) is a ratio
+        # multiple of the baseline's Ki:Kp - real Ki depends on speed *and* shape, so a per-column number
+        # would be misleading (see tuning/workflow.py GridSpec docstring).
         self.map_plot.getAxis("left").setTicks([[(i + 0.5, f"{m.grid.kp(i):.3g}") for i in range(nk)]])
+        self.map_plot.getAxis("bottom").setTicks(
+            [[(j + 0.5, f"x{m.grid.factor ** m.grid.shape_exps[j]:.3g}") for j in range(ni)]])
         rise = m.value_grid("rise")
         for i in range(nk):
             for j in range(ni):
@@ -1220,22 +1572,18 @@ class TuningTab(QtWidgets.QWidget):
                     t.setPos(j + 0.5, i + 0.5)
                     self.map_plot.addItem(t)
                     self._map_texts.append(t)
-        # baseline marker, constant-ratio diagonal (raise both = faster) and the selected cell
+        # crosshair through the baseline's speed row and shape column, and an outline on the selected cell
         xs, ys = [], []
         b = m.baseline
         if b[0] is not None and b[1] is not None:
-            d = b[1] - b[0]
-            xs += [max(0, d) + 0.0, min(ni, nk + d)]
-            ys += [max(0, -d) + 0.0, min(nk, ni - d)]
+            xs += [b[1] + 0.5, b[1] + 0.5, float("nan"), 0.0, ni]
+            ys += [0.0, nk, float("nan"), b[0] + 0.5, b[0] + 0.5]
         if self.selected is not None:
             i, j = self.selected
             xs += [float("nan"), j, j + 1, j + 1, j, j]
             ys += [float("nan"), i, i, i + 1, i + 1, i]
         self.map_marks.setData(xs, ys, pen=pg.mkPen((30, 30, 30), width=2), connect="finite")
-        title = "(Kp, Ki) map: up-right = raise both (faster), down-left = lower both (slower)"
-        if m.ratio_locked:
-            title = "Scale scan (Ki:Kp kept): up-right = both higher (faster), down-left = both lower (slower)"
-        self.map_plot.setTitle(title)
+        self.map_plot.setTitle("Speed x Shape map: up = faster, right = more integral (Ki-heavy)")
 
     def _on_map_click(self, ev):
         if ev.button() != QtCore.Qt.LeftButton:
@@ -1245,7 +1593,7 @@ class TuningTab(QtWidgets.QWidget):
             return
         vb = self.map_plot.getPlotItem().vb
         pos = vb.mapSceneToView(ev.scenePos())
-        nk, ni = m.grid.shape
+        nk, ni = m.grid.dims
         i, j = int(math.floor(pos.y())), int(math.floor(pos.x()))
         if 0 <= i < nk and 0 <= j < ni and (i, j) in m.cells():
             self.select_cell((i, j))
@@ -1353,13 +1701,15 @@ class TuningTab(QtWidgets.QWidget):
             self.select_cell(cell)
             return
         sub = m.refined(cell)
-        center = (sub.grid.kp_exps.index(0), sub.grid.ki_exps.index(0))
+        center = (sub.grid.speed_exps.index(0), sub.grid.shape_exps.index(0))
         sub.results[center] = m.results[cell]                # already measured: do not repeat it
         self.maps.append(sub)
         self.selected = center
+        self._narrow_converged = False
         self._log(f"Refined map around Kp={sub.grid.kp0:.4g}, Ki={sub.grid.ki0:.4g} (step x{sub.grid.factor:.3g}). Run / continue map to fill it.")
         self._paint_map()
         self._refresh_table()
+        self._update_enabled()
 
     def _back(self):
         if len(self.maps) > 1:
@@ -1367,6 +1717,71 @@ class TuningTab(QtWidgets.QWidget):
             self.selected = None
             self._paint_map()
             self._refresh_table()
+
+    # ------------------------------------------------------------------ auto-zoom ("Narrow search")
+    def _narrow_search(self):
+        """
+        One click, one confirmed round: fill the current map if it isn't already, zoom a finer grid onto
+        its best (or nearest-miss) cell, fill that too, then report what changed and stop. Click again for
+        another round. Reuses the same building blocks as 'Run / continue map' and 'Suggest / refine zoom'.
+        """
+        if self.runner_active():
+            return
+        m = self.current_map()
+        if m is None:
+            self._log("Nothing to narrow yet: run the map or scale scan first.")
+            return
+        self._narrow_active = True
+        self._narrow_stage = None
+        if m.next_cell() is not None:
+            self._run_map()                # fills the base map; _on_run_finished() calls back into _continue_narrow()
+        else:
+            self._continue_narrow()        # already full: go straight to the zoom step
+
+    def _continue_narrow(self):
+        m = self.current_map()
+        if self._narrow_stage != "zoomed":
+            sug = m.suggest_refinement()
+            if sug is None:
+                self._narrow_active = False
+                self._log("Narrow search: no island or near-miss to zoom onto yet - try a wider search span first.")
+                return
+            cell, why = sug
+            self._narrow_prev_pair = m.pair(cell)
+            sub = m.refined(cell)
+            center = (sub.grid.speed_exps.index(0), sub.grid.shape_exps.index(0))
+            sub.results[center] = m.results[cell]              # already measured: do not repeat it
+            self.maps.append(sub)
+            self.selected = center
+            self._narrow_stage = "zoomed"
+            self._narrow_round += 1
+            self._log(f"Narrow search, round {self._narrow_round}: zooming onto {why}.")
+            self._paint_map()
+            self._refresh_table()
+            self._run_map()                # fills the finer map; _on_run_finished() calls back in here again
+            return
+        self._narrow_active = False
+        self._narrow_stage = None
+        best = m.best()
+        pkp, pki = self._narrow_prev_pair
+        center = (m.grid.speed_exps.index(0), m.grid.shape_exps.index(0))
+        if best is None:
+            self._log(f"Narrow search, round {self._narrow_round}: no good cell in the finer grid around "
+                      f"Kp={pkp:.4g}, Ki={pki:.4g}. 'Max gain change vs baseline' may be too tight, or the loop is "
+                      "genuinely marginal here.")
+            self._update_enabled()
+            return
+        kp, ki = m.pair(best)
+        converged = best == center
+        self._narrow_converged = converged
+        msg = (f"Narrow search, round {self._narrow_round}: centred on Kp={kp:.4g}, Ki={ki:.4g} "
+              f"(speed x{kp / pkp:.3g}, shape x{(ki / kp) / (pki / pkp):.3g} of the previous round), "
+              f"step now x{m.grid.factor:.3g}.")
+        if converged:
+            msg += " Converged: another round would not move this pair."
+        self._log(msg)
+        self.select_cell(best)
+        self._update_enabled()
 
     def _predict_prior(self):
         m = self.current_map()

@@ -326,16 +326,16 @@ class MapLogic(unittest.TestCase):
         self.map = W.ScreeningMap(self.grid, TARGET)
 
     def test_grid_is_log_spaced_and_signed(self):
-        self.assertEqual(self.grid.shape, (5, 6))
+        self.assertEqual(self.grid.dims, (5, 6))
         self.assertAlmostEqual(self.grid.kp(2), -100.0)
         self.assertAlmostEqual(self.grid.kp(4), -400.0)
-        self.assertAlmostEqual(self.grid.ki(0), -1e4 / 8)
+        self.assertAlmostEqual(self.grid.ki(2, 0), -1e4 / 8)
         self.assertEqual(self.map.baseline, (2, 3))
 
     def test_order_starts_at_the_baseline_and_moves_outward(self):
         o = self.map.order()
         self.assertEqual(o[0], (2, 3))
-        dist = [math.hypot(self.grid.kp_exps[i], self.grid.ki_exps[j]) for i, j in o]
+        dist = [math.hypot(self.grid.speed_exps[i], self.grid.speed_exps[i] + self.grid.shape_exps[j]) for i, j in o]
         self.assertEqual(dist, sorted(dist))
         self.assertEqual(len(set(o)), 30)
 
@@ -363,8 +363,8 @@ class MapLogic(unittest.TestCase):
             seen.append(c)
             m.results[c] = _cat_result("good", *m.pair(c))
         for i, j in seen:
-            self.assertLessEqual(abs(self.grid.factor ** self.grid.kp_exps[i]), 2.0)
-            self.assertGreaterEqual(abs(self.grid.factor ** self.grid.ki_exps[j]), 0.5)
+            self.assertLessEqual(abs(self.grid.factor ** self.grid.speed_exps[i]), 2.0)
+            self.assertGreaterEqual(abs(self.grid.factor ** (self.grid.speed_exps[i] + self.grid.shape_exps[j])), 0.5)
         self.assertTrue(any("safety" in why for why in m.skipped.values()))
 
     def test_model_predicted_instability_is_skipped(self):
@@ -388,10 +388,10 @@ class MapLogic(unittest.TestCase):
         self.assertEqual([i.size for i in isl], [5, 1])
         self.assertEqual(isl[0].best, (1, 2))                                           # lowest noise in the big island
         self.assertEqual(m.best(), (0, 0))                                              # lowest noise overall
-        line = m.along_ratio((2, 3))
-        ratios = {round(m.grid.ki(j) / m.grid.kp(i), 6) for i, j in line}
+        line = m.speed_line((2, 3))
+        ratios = {round(m.grid.ki(i, j) / m.grid.kp(i), 6) for i, j in line}
         self.assertEqual(len(ratios), 1)
-        self.assertEqual([m.grid.kp_exps[i] for i, _ in line], sorted(m.grid.kp_exps[i] for i, _ in line))
+        self.assertEqual([m.grid.speed_exps[i] for i, _ in line], sorted(m.grid.speed_exps[i] for i, _ in line))
         self.assertIn("Island 1: 5 cells", m.summary())
 
     def test_value_and_category_grids(self):
@@ -406,9 +406,9 @@ class MapLogic(unittest.TestCase):
 
     def test_refine_centres_a_finer_grid(self):
         g = self.grid.refine(3, 4)
-        self.assertEqual(g.shape, (3, 3))
+        self.assertEqual(g.dims, (3, 3))
         self.assertAlmostEqual(g.kp(1), self.grid.kp(3))
-        self.assertAlmostEqual(g.ki(1), self.grid.ki(4))
+        self.assertAlmostEqual(g.ki(1, 1), self.grid.ki(3, 4))
         self.assertAlmostEqual(g.kp(2) / g.kp(1), math.sqrt(2))
 
 
@@ -455,7 +455,7 @@ class ModelPrior(unittest.TestCase):
         target = W.Target.from_scan(12.0, 128)
         ct, _ = record_pll(pll_plan(hold_s=0.5), -100, -1e4, seed=3)
         res = W.analyze_test(ct, li_tau=PLL_SETUP.lockin_tau, f0=PLL_SETUP.f0, q=PLL_SETUP.q)
-        m = W.ScreeningMap(W.GridSpec(-100.0, -1e4, kp_exps=(-1, 0, 1), ki_exps=(-2, -1, 0, 1)), target)
+        m = W.ScreeningMap(W.GridSpec(-100.0, -1e4, speed_exps=(-1, 0, 1), shape_exps=(-2, -1, 0, 1)), target)
         m.set_prior_from_model(res.model)
         agree = total = 0
         for c in m.cells():
@@ -474,7 +474,7 @@ class EndToEndScreening(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.target = SLOW_SCAN
-        cls.map = W.ScreeningMap(W.GridSpec(-100.0, -1e4, kp_exps=(-2, -1, 0, 1), ki_exps=(-2, -1, 0, 1, 2)), cls.target)
+        cls.map = W.ScreeningMap(W.GridSpec(-100.0, -1e4, speed_exps=(-2, -1, 0, 1), shape_exps=(-2, -1, 0, 1, 2)), cls.target)
         cls.plan = pll_plan(hold_s=1.5)
         n = 0
         while (c := cls.map.next_cell()) is not None:
@@ -490,20 +490,20 @@ class EndToEndScreening(unittest.TestCase):
     def test_map_has_islands_and_a_bad_corner(self):
         self.assertGreaterEqual(len(self.map.islands()), 1)
         self.assertEqual(self.cat(2, 2), "good")                                # the baseline
-        self.assertNotEqual(self.cat(3, 4), "good")                             # most aggressive corner (Kp x2, Ki x4)
+        self.assertNotEqual(self.cat(3, 4), "good")                             # most aggressive corner (Kp x2, shape x4 -> Ki x8)
 
     def test_shape_changes_across_the_ratio_and_speed_along_it(self):
-        self.assertEqual(self.cat(2, 4), "overshoot")                           # same Kp, Ki x4
-        base, low = self.map.results[(2, 2)], self.map.results[(2, 0)]                # same Kp, Ki /4
+        self.assertEqual(self.cat(2, 4), "overshoot")                           # same speed (Kp fixed), shape x4 (Ki x4)
+        base, low = self.map.results[(2, 2)], self.map.results[(2, 0)]                # same speed, shape /4 (Ki /4)
         self.assertGreater(low.error.decay_time, 2.0 * base.error.decay_time)         # a longer Phase tail
-        line = self.map.along_ratio((2, 2))                                     # constant Ki:Kp ratio
+        line = self.map.speed_line((2, 2))                                      # constant shape: constant Ki:Kp ratio
         rises = [self.map.results[c].primary.rise_time for c in line if c in self.map.results and self.map.results[c].primary]
         self.assertGreaterEqual(len(rises), 3)
         self.assertTrue(all(a > b for a, b in zip(rises, rises[1:])), rises)    # raising both = faster
 
     def test_lowering_both_gains_reduces_noise_and_the_best_cell_is_quieter_than_baseline(self):
         noise = self.map.value_grid("noise")
-        line = [c for c in self.map.along_ratio((2, 2)) if not np.isnan(noise[c])]
+        line = [c for c in self.map.speed_line((2, 2)) if not np.isnan(noise[c])]
         vals = [noise[c] for c in line]
         self.assertTrue(all(a < b for a, b in zip(vals, vals[1:])), vals)
         best = self.map.best()
@@ -558,49 +558,49 @@ class AmplitudeLoopSearch(unittest.TestCase):
 
     def scan_map(self):
         g = W.GridSpec.scan(2e8, 2e4, 10.0, 3, 3)
-        return g, W.ScreeningMap(g, TARGET, self.LIM, reference=(2e8, 2e4), ratio_locked=True)
+        return g, W.ScreeningMap(g, TARGET, self.LIM, reference=(2e8, 2e4))
 
     def test_scale_scan_moves_both_gains_together(self):
         g, m = self.scan_map()
-        self.assertEqual(g.kp_exps, tuple(range(-3, 4)))
+        self.assertEqual(g.speed_exps, tuple(range(-3, 4)))
+        self.assertEqual(g.shape_exps, (0,))                                    # pure speed: shape fixed at the baseline's
         self.assertEqual(len(m.cells()), 7)
         for i, j in m.cells():
-            self.assertAlmostEqual(g.ki(j) / g.kp(i), 1e-4)                     # Ki:Kp is the baseline's
-        self.assertEqual(m.order()[0], (3, 3))                                  # the baseline first
+            self.assertAlmostEqual(g.ki(i, j) / g.kp(i), 1e-4)                  # Ki:Kp is the baseline's
+        self.assertEqual(m.order()[0], (3, 0))                                  # the baseline first
         self.assertIn("7 untested", m.summary())
 
     def test_scale_scan_does_not_go_on_after_a_lost_cell(self):
         g, m = self.scan_map()
-        m.results[(3, 3)] = _cat_result("good", g.kp(3), g.ki(3))
-        m.results[(4, 4)] = _cat_result("lost", g.kp(4), g.ki(4))               # one decade up loses the loop
+        m.results[(3, 0)] = _cat_result("good", g.kp(3), g.ki(3, 0))
+        m.results[(4, 0)] = _cat_result("lost", g.kp(4), g.ki(4, 0))            # one decade up loses the loop
         visited = []
         while True:
             c = m.next_cell()
             if c is None:
                 break
             visited.append(c)
-            m.results[c] = _cat_result("too_slow", g.kp(c[0]), g.ki(c[1]))
-        self.assertEqual(sorted(visited), [(0, 0), (1, 1), (2, 2)])
-        self.assertEqual(sorted(m.skipped), [(5, 5), (6, 6)])
+            m.results[c] = _cat_result("too_slow", g.kp(c[0]), g.ki(c[0], c[1]))
+        self.assertEqual(sorted(visited), [(0, 0), (1, 0), (2, 0)])
+        self.assertEqual(sorted(m.skipped), [(5, 0), (6, 0)])
 
     def test_the_scan_is_bounded_by_the_gain_range(self):
         g = W.GridSpec.scan(2e8, 2e4, 10.0, 4, 4)
-        m = W.ScreeningMap(g, TARGET, self.LIM, reference=(2e8, 2e4), ratio_locked=True)
+        m = W.ScreeningMap(g, TARGET, self.LIM, reference=(2e8, 2e4))
         seen = []
         while True:
             c = m.next_cell()
             if c is None:
                 break
             seen.append(c)
-            m.results[c] = _cat_result("too_slow", g.kp(c[0]), g.ki(c[1]))
+            m.results[c] = _cat_result("too_slow", g.kp(c[0]), g.ki(c[0], c[1]))
         self.assertEqual(len(seen), 7)                                          # +-4 decades asked, +-3 allowed
-        self.assertEqual(sorted(m.skipped), [(0, 0), (8, 8)])
+        self.assertEqual(sorted(m.skipped), [(0, 0), (8, 0)])
 
     def test_refining_a_scan_gives_a_full_finer_map_with_the_same_limits(self):
         g, m = self.scan_map()
-        sub = m.refined((3, 3))
-        self.assertFalse(sub.ratio_locked)
-        self.assertEqual(len(sub.cells()), 9)
+        sub = m.refined((3, 0))
+        self.assertEqual(len(sub.cells()), 9)                                   # no longer locked to a single column
         self.assertAlmostEqual(sub.grid.factor, math.sqrt(10.0))
         self.assertIs(sub.limits, m.limits)
         self.assertEqual(sub.reference, m.reference)

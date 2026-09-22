@@ -57,18 +57,39 @@ class AccessibilityManager(QtCore.QObject):
 
     settings_changed = QtCore.pyqtSignal(dict)
 
+    # "Instrument console" dark theme: deep charcoal (not pure black), one accent, borrowed from real
+    # lab-electronics front panels rather than a generic flat gray reskin. Kept as named constants (the
+    # QSS equivalent of CSS variables) so every style method below draws from the same palette.
+    DARK_BG = "#12161b"
+    DARK_BG_ALT = "#181d24"
+    DARK_BG_INPUT = "#1f2630"
+    DARK_FG = "#dfe6ec"
+    DARK_FG_DIM = "#7c8896"
+    DARK_ACCENT = "#2fd0c0"
+    DARK_ACCENT_DIM = "#1c766e"
+    DARK_BORDER = "#2a323d"
+    DARK_DANGER = "#e0554d"
+    LIGHT_DANGER = "#b3261e"
+    # Both ship with Windows already (Bahnschrift since Win10, Cascadia Mono with Win11/Terminal), so
+    # nothing needs to be bundled; each falls back gracefully if genuinely absent.
+    HEADER_FONT_STACK = '"Bahnschrift", "Segoe UI Semibold", "Segoe UI", sans-serif'
+    MONO_FONT_STACK = '"Cascadia Mono", "Cascadia Code", "Consolas", "Courier New", monospace'
+
     def __init__(self):
         super().__init__()
         self.settings_file = os.path.join(
             os.path.expanduser("~"), ".scientific_gui_accessibility.json"
         )
 
-        # Default settings
+        # Default settings. dark_mode defaults on: the console theme below is meant to be what the app
+        # looks like out of the box, not something a user has to discover and opt into. The toggle in
+        # the accessibility toolbar still switches it off (back to the plain OS-native look) for anyone
+        # who prefers that.
         self.settings = {
             "font_scale": 1.0,
             "font_family": "default",
             "high_contrast": False,
-            "dark_mode": False,
+            "dark_mode": True,
             "plot_line_width": 2,
             "grid_alpha": 0.3,
             "button_height": "default",
@@ -213,6 +234,21 @@ class AccessibilityManager(QtCore.QObject):
         """
         return max(1, int(base_size * self.settings["font_scale"]))
 
+    def stop_button_style(self, active: bool) -> str:
+        """
+        Stylesheet for a single prominent "stop" control (e.g. Tuning's pinned Stop button): plain
+        while idle (inherits the ambient theme), a solid danger red while ``active``. The colour value
+        lives here so it stays centralized instead of being hardcoded where the button is used.
+        """
+        if not active:
+            return ""
+        red = self.DARK_DANGER if self.settings.get("dark_mode", False) else self.LIGHT_DANGER
+        fg = "#ffffff"
+        return (f"QPushButton {{ background-color: {red}; color: {fg}; border: 1px solid {red}; "
+               f"border-radius: 4px; font-weight: 700; padding: 8px 14px; }}"
+               f"QPushButton:hover {{ background-color: {red}; color: {fg}; }}"
+               f"QPushButton:pressed {{ background-color: {red}; color: {fg}; }}")
+
     # ---------------- Apply to widgets ----------------
     def apply_to_widget(self, widget: QtWidgets.QWidget):
         """
@@ -237,7 +273,7 @@ class AccessibilityManager(QtCore.QObject):
             for item in glw.ci.items.keys():
                 if isinstance(item, pg.PlotItem):
                     self.apply_to_plotitem(item)
-            glw.setBackground("k" if self.settings.get("dark_mode", False) else "w")
+            glw.setBackground(self.DARK_BG if self.settings.get("dark_mode", False) else "w")
 
         # Update tables
         for table in widget.findChildren(QtWidgets.QTableWidget):
@@ -270,11 +306,11 @@ class AccessibilityManager(QtCore.QObject):
         )
 
         if self.settings.get("dark_mode", False):
-            plot_widget.setBackground("k")
-            plot_widget.getAxis("left").setTextPen("w")
-            plot_widget.getAxis("left").setPen(pg.mkPen("w"))
-            plot_widget.getAxis("bottom").setTextPen("w")
-            plot_widget.getAxis("bottom").setPen(pg.mkPen("w"))
+            plot_widget.setBackground(self.DARK_BG)
+            plot_widget.getAxis("left").setTextPen(self.DARK_FG)
+            plot_widget.getAxis("left").setPen(pg.mkPen(self.DARK_FG_DIM))
+            plot_widget.getAxis("bottom").setTextPen(self.DARK_FG)
+            plot_widget.getAxis("bottom").setPen(pg.mkPen(self.DARK_FG_DIM))
             plot_widget.showGrid(x=True, y=True, alpha=grid_alpha)
         else:
             plot_widget.setBackground("w")
@@ -303,11 +339,11 @@ class AccessibilityManager(QtCore.QObject):
         )
 
         if self.settings.get("dark_mode", False):
-            plot_item.getViewBox().setBackgroundColor("k")
-            plot_item.getAxis("left").setTextPen("w")
-            plot_item.getAxis("left").setPen(pg.mkPen("w"))
-            plot_item.getAxis("bottom").setTextPen("w")
-            plot_item.getAxis("bottom").setPen(pg.mkPen("w"))
+            plot_item.getViewBox().setBackgroundColor(self.DARK_BG)
+            plot_item.getAxis("left").setTextPen(self.DARK_FG)
+            plot_item.getAxis("left").setPen(pg.mkPen(self.DARK_FG_DIM))
+            plot_item.getAxis("bottom").setTextPen(self.DARK_FG)
+            plot_item.getAxis("bottom").setPen(pg.mkPen(self.DARK_FG_DIM))
             plot_item.showGrid(x=True, y=True, alpha=grid_alpha)
         else:
             plot_item.getViewBox().setBackgroundColor("w")
@@ -400,43 +436,80 @@ class AccessibilityManager(QtCore.QObject):
 
     def apply_dark_mode_style(self, widget: QtWidgets.QWidget):
         """
-        Apply a dark mode stylesheet to a widget.
+        Apply the "instrument console" dark theme to a widget: deep charcoal background, one teal/cyan
+        accent used consistently for anything interactive or titled, monospace for numeric entry fields
+        so columns of numbers actually align. Only font *family* and *weight* are set here, never size -
+        ``apply_to_widget`` already governs size through the accessibility font scale, and this must not
+        fight that.
 
         Parameters
         ----------
         widget : QtWidgets.QWidget
             Target widget.
         """
-        style = """
-            QWidget { background-color: #121212; color: #f0f0f0; }
-            QPushButton { background-color: #333; border: 1px solid #555; padding: 6px; }
-            QPushButton:pressed { background-color: #444; }
-            QLabel { color: #f0f0f0; }
-            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
-                background-color: #222; color: #f0f0f0; border: 1px solid #555;
-            }
-            QTabWidget::pane { border: 1px solid #444; }
-            QTabBar::tab { background: #333; color: #f0f0f0; padding: 6px; }
-            QTabBar::tab:selected { background: #555; }
-            QTabBar::tab:hover { background: #444; }
-            QTableWidget, QTableView {
-                background-color: #121212; alternate-background-color: #1e1e1e;
-                color: #f0f0f0; gridline-color: #444;
-                selection-background-color: #333366; selection-color: #ffffff;
-            }
-            QHeaderView::section {
-                background-color: #222; color: #f0f0f0; border: 1px solid #444;
-            }
-            QGroupBox {
-                border: 1px solid #444; margin-top: 6px;
-            }
-            QGroupBox:title {
-                subcontrol-origin: margin; left: 7px; padding: 0 3px 0 3px;
-                color: #f0f0f0;
-            }
-            QGraphicsView {
-                background-color: #121212; border: 1px solid #444;
-            }
+        bg, bg_alt, bg_in = self.DARK_BG, self.DARK_BG_ALT, self.DARK_BG_INPUT
+        fg, fg_dim = self.DARK_FG, self.DARK_FG_DIM
+        accent, accent_dim, border = self.DARK_ACCENT, self.DARK_ACCENT_DIM, self.DARK_BORDER
+        head, mono = self.HEADER_FONT_STACK, self.MONO_FONT_STACK
+        style = f"""
+            QWidget {{ background-color: {bg}; color: {fg}; selection-background-color: {accent}; selection-color: {bg}; }}
+            QLabel {{ background: transparent; color: {fg}; }}
+            QGroupBox {{
+                background-color: {bg_alt}; border: 1px solid {border}; border-radius: 4px;
+                margin-top: 14px; padding-top: 6px;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin; left: 8px; padding: 0 4px;
+                color: {accent}; font-family: {head}; font-weight: 600;
+            }}
+            QToolButton {{ background: transparent; color: {accent}; font-family: {head}; font-weight: 600; }}
+            QToolButton:hover {{ color: {fg}; }}
+            QPushButton {{
+                background-color: {bg_in}; color: {fg}; border: 1px solid {border};
+                border-radius: 4px; padding: 6px 10px;
+            }}
+            QPushButton:hover {{ border-color: {accent}; color: {accent}; }}
+            QPushButton:pressed {{ background-color: {accent_dim}; color: {bg}; border-color: {accent_dim}; }}
+            QPushButton:disabled {{ color: {fg_dim}; border-color: {border}; background-color: {bg_alt}; }}
+            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QAbstractSpinBox {{
+                background-color: {bg_in}; color: {fg}; border: 1px solid {border};
+                border-radius: 3px; padding: 2px 4px; font-family: {mono};
+                selection-background-color: {accent}; selection-color: {bg};
+            }}
+            QLineEdit:disabled, QComboBox:disabled, QAbstractSpinBox:disabled {{ color: {fg_dim}; }}
+            QLineEdit:focus, QComboBox:focus, QAbstractSpinBox:focus {{ border: 1px solid {accent}; }}
+            QComboBox::drop-down {{ border: none; width: 18px; }}
+            QCheckBox {{ color: {fg}; spacing: 6px; }}
+            QCheckBox::indicator {{
+                width: 13px; height: 13px; border: 1px solid {border}; border-radius: 3px; background: {bg_in};
+            }}
+            QCheckBox::indicator:checked {{ background-color: {accent}; border-color: {accent}; }}
+            QTabWidget::pane {{ border: 1px solid {border}; background-color: {bg}; }}
+            QTabBar::tab {{
+                background: {bg_alt}; color: {fg_dim}; padding: 6px 12px; border: 1px solid {border};
+                border-bottom: none; border-top-left-radius: 4px; border-top-right-radius: 4px;
+            }}
+            QTabBar::tab:selected {{ color: {accent}; background: {bg}; border-bottom: 2px solid {accent}; }}
+            QTabBar::tab:hover {{ color: {fg}; }}
+            QTableWidget, QTableView {{
+                background-color: {bg}; alternate-background-color: {bg_alt}; color: {fg};
+                gridline-color: {border}; selection-background-color: {accent_dim}; selection-color: {fg};
+                font-family: {mono};
+            }}
+            QHeaderView::section {{
+                background-color: {bg_alt}; color: {fg_dim}; border: 1px solid {border};
+                font-family: {head}; padding: 4px;
+            }}
+            QSplitter::handle {{ background-color: {border}; }}
+            QSplitter::handle:hover {{ background-color: {accent}; }}
+            QSplitter::handle:horizontal {{ width: 3px; }}
+            QSplitter::handle:vertical {{ height: 3px; }}
+            QScrollBar:vertical, QScrollBar:horizontal {{ background: {bg}; border: none; }}
+            QScrollBar::handle {{ background: {border}; border-radius: 3px; }}
+            QScrollBar::handle:hover {{ background: {accent_dim}; }}
+            QScrollBar::add-line, QScrollBar::sub-line {{ background: none; border: none; }}
+            QGraphicsView {{ background-color: {bg}; border: 1px solid {border}; }}
+            QToolTip {{ background-color: {bg_alt}; color: {fg}; border: 1px solid {accent}; }}
         """
         if widget.property("_a11y_prev_stylesheet") is None:
             widget.setProperty("_a11y_prev_stylesheet", widget.styleSheet() or "")

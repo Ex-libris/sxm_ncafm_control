@@ -162,16 +162,14 @@ class MainWindow(QtWidgets.QWidget):
 
         layout.addWidget(self.tabs)
 
-        # Safety footer with enhanced accessibility styling
+        # Safety footer: a short one-line reminder, not a permanent alarm. The Tuning tab now also
+        # warns inline, only when a value it would actually write exceeds the limit (see
+        # TuningTab._voltage_warning); this stays as the general, always-true reminder for every tab.
         self.footer = QtWidgets.QLabel(
-            "⚠ Check SXM units & never exceed ±10 V without attenuation. <a href='#'>Details</a>"
+            "Check SXM units; never exceed ±10 V without attenuation. <a href='#'>Details</a>"
         )
         self.footer.setOpenExternalLinks(False)
         self.footer.linkActivated.connect(self.show_safety_details)
-        self.footer.setStyleSheet(
-            "color:#6b5900; background:#fff7da; border:1px solid #e6d9a2; "
-            "border-radius:6px; padding:8px; font-weight: bold;"
-        )
         self.footer.setWordWrap(True)
         layout.addWidget(self.footer)
 

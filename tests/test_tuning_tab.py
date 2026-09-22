@@ -47,6 +47,8 @@ def make_tab(inst, **kw):
     tab.ki_spin.setValue(-1e4)
     for c in tab.checks:
         c.setChecked(True)
+    # pre-confirm the baseline so a real (blocking) QMessageBox never pops up in these offscreen tests
+    tab._confirmed_baseline[tab.loop_def.key] = (tab.kp_spin.value(), tab.ki_spin.value())
     return tab
 
 
@@ -101,11 +103,11 @@ class Offline(unittest.TestCase):
         tab.px_spin.setValue(128)
         self.assertAlmostEqual(tab.target().rise_max, 0.5 * 12.0 / 128)
         g = tab.grid()
-        self.assertEqual(g.shape, (5, 6))
+        self.assertEqual(g.dims, (5, 6))
         self.assertEqual(g.kp0, -100.0)
-        tab.kp_lo.setValue(1)
-        tab.ki_hi.setValue(0)
-        self.assertEqual(tab.grid().shape, (4, 4))
+        tab.speed_lo.setValue(1)
+        tab.shape_hi.setValue(0)
+        self.assertEqual(tab.grid().dims, (4, 4))
 
     def test_gain_signs_are_validated(self):
         tab = T.TuningTab(FakeInstrument(), FakeInstrument())
@@ -217,10 +219,10 @@ class RunnerEndToEnd(unittest.TestCase):
     def test_a_small_map_fills_in_paints_and_restores(self):
         inst = FakeInstrument()
         tab = make_tab(inst)
-        tab.kp_lo.setValue(0)
-        tab.kp_hi.setValue(0)
-        tab.ki_lo.setValue(1)
-        tab.ki_hi.setValue(0)                                                   # 1 x 2 cells: Ki/2 and Ki
+        tab.speed_lo.setValue(0)
+        tab.speed_hi.setValue(0)
+        tab.shape_lo.setValue(1)
+        tab.shape_hi.setValue(0)                                                # 1 x 2 cells: Ki/2 and Ki
         done = []
         tab._run_map()
         tab.runner.finished.connect(done.append)
@@ -237,8 +239,8 @@ class RunnerEndToEnd(unittest.TestCase):
     def test_stop_restores_the_baseline_mid_run(self):
         inst = FakeInstrument()
         tab = make_tab(inst)
-        tab.kp_lo.setValue(1)
-        tab.kp_hi.setValue(1)
+        tab.speed_lo.setValue(1)
+        tab.speed_hi.setValue(1)
         tab._run_map()
         reasons = []
         tab.runner.finished.connect(reasons.append)
@@ -298,10 +300,10 @@ class MapInteraction(unittest.TestCase):
         cls.tab = T.TuningTab(FakeInstrument(), None)
         cls.tab.line_spin.setValue(12.0)
         cls.tab.px_spin.setValue(128)
-        cls.tab.kp_lo.setValue(1)
-        cls.tab.kp_hi.setValue(1)
-        cls.tab.ki_lo.setValue(1)
-        cls.tab.ki_hi.setValue(1)
+        cls.tab.speed_lo.setValue(1)
+        cls.tab.speed_hi.setValue(1)
+        cls.tab.shape_lo.setValue(1)
+        cls.tab.shape_hi.setValue(1)
         m = cls.tab._ensure_map()
         n = 0
         while (c := m.next_cell()) is not None:
@@ -345,7 +347,7 @@ class MapInteraction(unittest.TestCase):
         tab._zoom()
         self.assertEqual(len(tab.maps), before + 1)
         sub = tab.current_map()
-        self.assertEqual(sub.grid.shape, (3, 3))
+        self.assertEqual(sub.grid.dims, (3, 3))
         center = (1, 1)
         self.assertIn(center, sub.results)                                      # already measured: not repeated
         self.assertAlmostEqual(sub.grid.kp0, tab.maps[0].grid.kp(1))
@@ -460,25 +462,26 @@ class AmplitudeLoopUI(unittest.TestCase):
     def test_scale_scan_and_limits_come_from_the_widgets(self):
         tab = self.make()
         g = tab.scan_grid()
-        self.assertEqual(g.shape, (7, 7))
+        self.assertEqual(g.dims, (7, 1))                                        # pure speed: a single shape column
         self.assertEqual(g.factor, 10.0)
-        self.assertAlmostEqual(g.ki(6) / g.kp(6), tab.ki_spin.value() / tab.kp_spin.value())
+        self.assertAlmostEqual(g.ki(6, 0) / g.kp(6), tab.ki_spin.value() / tab.kp_spin.value())
         lim = tab.safety_limits()
         self.assertEqual(lim.max_gain_factor, 1000.0)
         self.assertAlmostEqual(lim.min_gain_factor, 1e-3)
         self.assertIn("Scale scan: 7 tests", tab.est_label.text())
 
-    def test_running_a_scale_scan_pushes_a_ratio_locked_map_and_stop_restores_the_baseline(self):
+    def test_running_a_scale_scan_pushes_a_speed_only_map_and_stop_restores_the_baseline(self):
         inst = FakeInstrument()
         tab = T.TuningTab(inst, inst)
         tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("afl"))
         for c in tab.checks:
             c.setChecked(True)
         kp, ki = tab.kp_spin.value(), tab.ki_spin.value()
+        tab._confirmed_baseline[tab.loop_def.key] = (kp, ki)
         tab._run_scan()
         self.assertTrue(tab.runner_active())
         m = tab.current_map()
-        self.assertTrue(m.ratio_locked)
+        self.assertEqual(m.grid.dims, (7, 1))
         self.assertEqual(len(m.cells()), 7)
         tab.stop()
         self.assertFalse(tab.runner_active())
@@ -498,6 +501,92 @@ class AmplitudeLoopUI(unittest.TestCase):
         html = T.guide_html()
         for word in ("Output Gain", "scale scan", "decades", "Drive"):
             self.assertIn(word.lower(), html.lower())
+
+
+class BaselineProtection(unittest.TestCase):
+    """Priority 1: confirmation gate, checklist hygiene, restored-value logging, voltage warning."""
+
+    def test_declining_the_confirmation_aborts_the_run(self):
+        inst = FakeInstrument()
+        tab = T.TuningTab(inst, inst)
+        for c in tab.checks:
+            c.setChecked(True)
+        tab._confirm_baseline = lambda kp, ki: False           # simulate Cancel, without a real dialog
+        tab._run_single()
+        self.assertIsNone(tab.runner)
+        self.assertIn("not started", tab.log.toPlainText())
+
+    def test_an_already_confirmed_baseline_does_not_reprompt(self):
+        tab = make_tab(FakeInstrument())                        # make_tab pre-confirms the baseline
+
+        def boom(*a, **k):
+            raise AssertionError("QMessageBox.exec_ must not be called for an already-confirmed baseline")
+        orig = QtWidgets.QMessageBox.exec_
+        QtWidgets.QMessageBox.exec_ = boom
+        try:
+            self.assertTrue(tab._confirm_baseline(tab.kp_spin.value(), tab.ki_spin.value()))
+        finally:
+            QtWidgets.QMessageBox.exec_ = orig
+
+    def test_an_edited_baseline_is_no_longer_considered_confirmed(self):
+        tab = make_tab(FakeInstrument())                        # pre-confirmed at Kp=-100, Ki=-1e4
+        tab.kp_spin.setValue(tab.kp_spin.value() * 2)            # edited: no longer matches the confirmed pair
+        orig = QtWidgets.QMessageBox.exec_
+        QtWidgets.QMessageBox.exec_ = lambda self: QtWidgets.QMessageBox.Cancel   # a real dialog is now shown
+        try:
+            self.assertFalse(tab._confirm_baseline(tab.kp_spin.value(), tab.ki_spin.value()))
+        finally:
+            QtWidgets.QMessageBox.exec_ = orig
+
+    def test_checklist_resets_when_the_baseline_or_target_changes(self):
+        tab = T.TuningTab(FakeInstrument(), None)
+        for c in tab.checks:
+            c.setChecked(True)
+        tab.kp_spin.setValue(tab.kp_spin.value() * 2)
+        self.assertFalse(any(c.isChecked() for c in tab.checks))
+        for c in tab.checks:
+            c.setChecked(True)
+        tab.rise_spin.setValue(tab.rise_spin.value() + 1)
+        self.assertFalse(any(c.isChecked() for c in tab.checks))
+
+    def test_checklist_resets_after_a_run_finishes(self):
+        tab = make_tab(FakeInstrument())
+        tab._start_runner(tab._one_shot(-100.0, -1e4))
+        self.assertTrue(wait_until(lambda: not tab.runner_active()))
+        self.assertFalse(any(c.isChecked() for c in tab.checks))
+
+    def test_restored_baseline_is_logged_with_real_values(self):
+        tab = make_tab(FakeInstrument())
+        tab._start_runner(tab._one_shot(-100.0, -1e4))
+        self.assertTrue(wait_until(lambda: not tab.runner_active()))
+        self.assertIn("Baseline restored: Kp=-100, Ki=-1e+04", tab.log.toPlainText())
+
+    def test_afl_voltage_warning_appears_only_beyond_the_limit(self):
+        tab = T.TuningTab(FakeInstrument(), None)
+        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("afl"))
+        tab.base_spin.setValue(6.0)
+        tab.step_spin.setValue(10.0)                            # +-10 % of 6 V: well inside +-10 V
+        self.assertEqual(tab._voltage_warning(), "")
+        tab.base_spin.setValue(12.0)                            # 12 V + 10 % = 13.2 V: over the limit
+        self.assertIn("Check:", tab._voltage_warning())
+        self.assertIn("Check:", tab.hint_label.text())
+
+    def test_pinned_stop_button_is_enabled_only_while_running(self):
+        tab = make_tab(FakeInstrument())
+        self.assertFalse(tab.btn_stop.isEnabled())
+        tab._start_runner(tab._one_shot(-100.0, -1e4))
+        self.assertTrue(tab.btn_stop.isEnabled())
+        tab.stop()
+        self.assertFalse(tab.btn_stop.isEnabled())
+
+    def test_context_label_reflects_loop_baseline_and_connection(self):
+        tab = T.TuningTab(FakeInstrument(), None)
+        text = tab.context_label.text()
+        self.assertIn("PLL", text)
+        self.assertIn("-100", text)
+        self.assertIn("OFFLINE", text)
+        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("afl"))
+        self.assertIn("AFL", tab.context_label.text())
 
 
 class SuggestedSetupGain(unittest.TestCase):

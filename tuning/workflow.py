@@ -586,38 +586,44 @@ def runaway_reason(plan: StepTestPlan, limits: SafetyLimits, channels: Dict[str,
 @dataclass(frozen=True)
 class GridSpec:
     """
-    Log-spaced grid of raw (Kp, Ki) pairs around a baseline.
+    Log-spaced grid of raw (Kp, Ki) pairs around a baseline, indexed by two physically meaningful axes
+    instead of raw Kp/Ki exponents:
 
-    Both axes use the same ``factor``, so cells on a diagonal share the same Ki:Kp ratio: moving
-    along it is the manual's "raise or lower both together" (faster / slower).
+    - ``speed``: Kp and Ki raised or lowered *together*, same ratio (the manual's "faster / slower").
+    - ``shape``: the Ki:Kp ratio shifted *relative to the baseline's ratio* (more integral- or
+      proportional-heavy), independent of speed.
+
+    ``kp`` depends only on ``speed``; ``ki`` depends on both, since a shape shift is applied on top of
+    whatever speed you're at. (The old diagonal-in-exponent-space "same ratio" line is now literally a
+    column: fixed shape index, varying speed index.)
     """
 
     kp0: float
     ki0: float
     factor: float = 2.0
-    kp_exps: Tuple[int, ...] = (-2, -1, 0, 1, 2)
-    ki_exps: Tuple[int, ...] = (-3, -2, -1, 0, 1, 2)
+    speed_exps: Tuple[int, ...] = (-2, -1, 0, 1, 2)
+    shape_exps: Tuple[int, ...] = (-3, -2, -1, 0, 1, 2)
 
     def kp(self, i: int) -> float:
-        return self.kp0 * self.factor ** self.kp_exps[i]
+        return self.kp0 * self.factor ** self.speed_exps[i]
 
-    def ki(self, j: int) -> float:
-        return self.ki0 * self.factor ** self.ki_exps[j]
+    def ki(self, i: int, j: int) -> float:
+        return self.ki0 * self.factor ** (self.speed_exps[i] + self.shape_exps[j])
 
     @property
-    def shape(self) -> Tuple[int, int]:
-        return len(self.kp_exps), len(self.ki_exps)
+    def dims(self) -> Tuple[int, int]:
+        return len(self.speed_exps), len(self.shape_exps)
 
     @classmethod
     def scan(cls, kp0: float, ki0: float, factor: float, n_down: int, n_up: int) -> "GridSpec":
-        """Grid whose diagonal is a scale scan: Kp and Ki move together, so Ki:Kp stays what the baseline has."""
+        """Pure speed scan: Ki:Kp stays at the baseline's ratio (shape fixed at 0), only speed varies."""
         exps = tuple(range(-int(n_down), int(n_up) + 1))
-        return cls(kp0=kp0, ki0=ki0, factor=factor, kp_exps=exps, ki_exps=exps)
+        return cls(kp0=kp0, ki0=ki0, factor=factor, speed_exps=exps, shape_exps=(0,))
 
     def refine(self, i: int, j: int, factor: Optional[float] = None) -> "GridSpec":
         """A finer 3x3 grid (step factor**0.5 by default) centred on cell (i, j)."""
-        return GridSpec(kp0=self.kp(i), ki0=self.ki(j), factor=factor or math.sqrt(self.factor),
-                        kp_exps=(-1, 0, 1), ki_exps=(-1, 0, 1))
+        return GridSpec(kp0=self.kp(i), ki0=self.ki(i, j), factor=factor or math.sqrt(self.factor),
+                        speed_exps=(-1, 0, 1), shape_exps=(-1, 0, 1))
 
 
 @dataclass
@@ -639,45 +645,42 @@ class ScreeningMap:
     """
 
     def __init__(self, grid: GridSpec, target: Target, limits: SafetyLimits = SafetyLimits(),
-                 reference: Optional[Tuple[float, float]] = None, ratio_locked: bool = False):
-        """
-        ``reference`` = the known-good baseline the safety limits are measured against (default: the grid centre).
-        ``ratio_locked`` = only the diagonal cells (equal Kp and Ki exponents) exist: a scale scan at the baseline's Ki:Kp.
-        """
+                 reference: Optional[Tuple[float, float]] = None):
+        """``reference`` = the known-good baseline the safety limits are measured against (default: the grid centre)."""
         self.grid, self.target, self.limits = grid, target, limits
-        self.ratio_locked = ratio_locked
         self.reference = reference or (grid.kp0, grid.ki0)
         self.results: Dict[Tuple[int, int], StepTestResult] = {}
         self.skipped: Dict[Tuple[int, int], str] = {}
         self.prior: Dict[Tuple[int, int], str] = {}          # optional model-predicted category per cell
-        nk, ni = grid.shape
-        self.baseline = (grid.kp_exps.index(0) if 0 in grid.kp_exps else None,
-                         grid.ki_exps.index(0) if 0 in grid.ki_exps else None)
+        self.baseline = (grid.speed_exps.index(0) if 0 in grid.speed_exps else None,
+                         grid.shape_exps.index(0) if 0 in grid.shape_exps else None)
 
     # -- ordering and safety --------------------------------------------------------------
     def _in_limits(self, i, j) -> bool:
-        return gain_within_limits(self.grid.kp(i), self.grid.ki(j), self.reference, self.limits)
+        return gain_within_limits(self.grid.kp(i), self.grid.ki(i, j), self.reference, self.limits)
 
     def cells(self) -> List[Tuple[int, int]]:
-        nk, ni = self.grid.shape
-        out = [(i, j) for i in range(nk) for j in range(ni)]
-        if self.ratio_locked:
-            out = [(i, j) for i, j in out if self.grid.kp_exps[i] == self.grid.ki_exps[j]]
-        return out
+        nk, ni = self.grid.dims
+        return [(i, j) for i in range(nk) for j in range(ni)]
 
     def order(self) -> List[Tuple[int, int]]:
         """Cells nearest the baseline first (in log-gain distance); ties: lower gains first (safer)."""
         def key(c):
             i, j = c
-            e_k, e_i = self.grid.kp_exps[i], self.grid.ki_exps[j]
+            e_k = self.grid.speed_exps[i]
+            e_i = e_k + self.grid.shape_exps[j]        # effective Ki exponent at this (speed, shape)
             return (math.hypot(e_k, e_i), e_k + e_i, e_k)
         return sorted(self.cells(), key=key)
 
     def _dominating_failure(self, i, j) -> Optional[Tuple[int, int]]:
+        kp_e = self.grid.speed_exps[i]
+        ki_e = kp_e + self.grid.shape_exps[j]
         for (a, b), r in self.results.items():
             v = r.verdict
             if v is not None and v.category == "lost":
-                if self.grid.kp_exps[i] >= self.grid.kp_exps[a] and self.grid.ki_exps[j] >= self.grid.ki_exps[b]:
+                a_kp = self.grid.speed_exps[a]
+                a_ki = a_kp + self.grid.shape_exps[b]
+                if kp_e >= a_kp and ki_e >= a_ki:
                     return (a, b)
         return None
 
@@ -707,7 +710,7 @@ class ScreeningMap:
 
     # -- views for plotting / decisions --------------------------------------------------------
     def category_grid(self) -> np.ndarray:
-        nk, ni = self.grid.shape
+        nk, ni = self.grid.dims
         out = np.full((nk, ni), "untested", dtype=object)
         for c, why in self.skipped.items():
             out[c] = "skipped"
@@ -716,8 +719,8 @@ class ScreeningMap:
         return out
 
     def value_grid(self, what: str) -> np.ndarray:
-        """Array (kp index, ki index) of 'rise' [s], 'overshoot', 'noise' or 'score'; nan where untested."""
-        nk, ni = self.grid.shape
+        """Array (speed index, shape index) of 'rise' [s], 'overshoot', 'noise' or 'score'; nan where untested."""
+        nk, ni = self.grid.dims
         out = np.full((nk, ni), np.nan)
         for c, r in self.results.items():
             if r.primary is None:
@@ -751,15 +754,14 @@ class ScreeningMap:
         cands = [c for i in isl for c in i.cells]
         return min(cands, key=lambda c: (math.inf if math.isnan(noise[c]) else noise[c], abs(self.grid.kp(c[0]))))
 
-    def along_ratio(self, cell: Tuple[int, int]) -> List[Tuple[int, int]]:
-        """Cells with the same Ki:Kp ratio as ``cell``, slowest (lowest gains) first: the bandwidth line."""
-        i, j = cell
-        d = self.grid.ki_exps[j] - self.grid.kp_exps[i]
-        cs = [(a, b) for (a, b) in self.cells() if self.grid.ki_exps[b] - self.grid.kp_exps[a] == d]
-        return sorted(cs, key=lambda c: self.grid.kp_exps[c[0]])
+    def speed_line(self, cell: Tuple[int, int]) -> List[Tuple[int, int]]:
+        """Cells with the same shape (Ki:Kp ratio) as ``cell``, slowest (lowest gains) first: the bandwidth line."""
+        j = cell[1]
+        cs = [c for c in self.cells() if c[1] == j]
+        return sorted(cs, key=lambda c: self.grid.speed_exps[c[0]])
 
     def pair(self, cell: Tuple[int, int]) -> Tuple[float, float]:
-        return self.grid.kp(cell[0]), self.grid.ki(cell[1])
+        return self.grid.kp(cell[0]), self.grid.ki(cell[0], cell[1])
 
     def refined(self, cell: Tuple[int, int]) -> "ScreeningMap":
         """A finer 3x3 map centred on ``cell``, with the same target and the same safety reference."""
@@ -814,7 +816,7 @@ class ScreeningMap:
             lines.append("No island of good response found yet.")
         for n, i in enumerate(isl, 1):
             kps = sorted({self.grid.kp(c[0]) for c in i.cells})
-            kis = sorted({self.grid.ki(c[1]) for c in i.cells})
+            kis = sorted({self.grid.ki(c[0], c[1]) for c in i.cells})
             kp, ki = self.pair(i.best)
             lines.append(f"Island {n}: {i.size} cells, Kp {kps[0]:.4g}..{kps[-1]:.4g}, Ki {kis[0]:.4g}..{kis[-1]:.4g}; "
                          f"best (lowest noise) Kp={kp:.4g}, Ki={ki:.4g}")
