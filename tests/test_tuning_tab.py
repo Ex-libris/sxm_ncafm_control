@@ -179,6 +179,14 @@ class ScopeAdapter(unittest.TestCase):
         self.assertIn("gains assumed", html)                                  # tells the user which gains it assumed
         self.assertEqual(tab.table.rowCount(), 1)
 
+    def test_split_rising_falling_traces_are_plotted_when_both_directions_are_present(self):
+        plan = pll_plan(hold_s=1.5)                                          # default 7 events: both directions
+        _, cap = record_pll(plan, -100, -1e4, seed=5)
+        tab = T.TuningTab(FakeInstrument(), None, scope_tab=FakeScope(cap, plan))
+        tab._analyze_scope()
+        self.assertEqual(len(tab.plot1.listDataItems()), 2)                  # rising + falling, not one folded trace
+        self.assertIn("rising vs falling", tab.detail_text.toPlainText())
+
 
 class RunnerEndToEnd(unittest.TestCase):
     def test_single_test_writes_the_train_and_restores_everything(self):

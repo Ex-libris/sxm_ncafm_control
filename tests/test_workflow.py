@@ -224,6 +224,13 @@ class AnalyseAmplitude(unittest.TestCase):
         self.assertIsNotNone(res.primary_falling)
         self.assertIsNotNone(res.secondary_rising)
         self.assertIsNotNone(res.secondary_falling)
+        # the curves themselves are kept too (not just their summary metrics) - a plot needs them,
+        # and they must be genuinely different arrays, not the same folded-together one reused
+        for arr in (res.mean_primary_rising, res.mean_primary_falling,
+                   res.mean_secondary_rising, res.mean_secondary_falling):
+            self.assertIsNotNone(arr)
+            self.assertEqual(len(arr), len(res.grid))
+        self.assertFalse(np.array_equal(res.mean_primary_rising, res.mean_primary_falling))
         # a symmetric synthetic loop should give closely matched rise and fall times
         self.assertAlmostEqual(res.primary_rising.rise_time, res.primary_falling.rise_time,
                                delta=0.3 * res.primary.rise_time)

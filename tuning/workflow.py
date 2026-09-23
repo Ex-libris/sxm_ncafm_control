@@ -274,6 +274,15 @@ class StepTestResult:
     mean_primary: Optional[np.ndarray] = None
     std_primary: Optional[np.ndarray] = None
     mean_secondary: Optional[np.ndarray] = None   # Phase (PLL) or Drive (amplitude loop), sign-folded
+    # the same direction split as primary_rising/falling etc., but the curves themselves (not just their
+    # metrics) - what a plot needs to actually show the rising and falling shapes as two traces, since
+    # mean_primary/mean_secondary above are folded over *both* directions and can hide a real asymmetry
+    # between them (e.g. the amplitude loop kicking Drive hard to raise QPlusAmpl but just cutting it
+    # near zero to let the resonator's own damping bring it back down).
+    mean_primary_rising: Optional[np.ndarray] = None
+    mean_primary_falling: Optional[np.ndarray] = None
+    mean_secondary_rising: Optional[np.ndarray] = None
+    mean_secondary_falling: Optional[np.ndarray] = None
     model: Optional[LoopModel] = None
     warnings: List[str] = field(default_factory=list)
     verdict: Optional["Verdict"] = None
@@ -403,12 +412,14 @@ def analyze_test(ct: CapturedTest, *, li_tau: Optional[float] = None, li_stages:
         try:
             _, mean_up, _, _ = M.average_steps(t, y, [aligned[i] for i in rising_idx], pre_s, post_s, dt,
                                                signs=[signs_arr[i] for i in rising_idx])
+            res.mean_primary_rising = mean_up
             res.primary_rising = M.step_response_metrics(grid, mean_up, 0.0, step_override=expected, target_step=expected)
         except M.StepNotDetectable:
             pass
         try:
             _, mean_dn, _, _ = M.average_steps(t, y, [aligned[i] for i in falling_idx], pre_s, post_s, dt,
                                                signs=[signs_arr[i] for i in falling_idx])
+            res.mean_primary_falling = mean_dn
             res.primary_falling = M.step_response_metrics(grid, mean_dn, 0.0, step_override=expected, target_step=expected)
         except M.StepNotDetectable:
             pass
@@ -438,12 +449,14 @@ def analyze_test(ct: CapturedTest, *, li_tau: Optional[float] = None, li_stages:
             try:
                 _, dr_up, _, _ = M.average_steps(t, drive_y, [aligned[i] for i in rising_idx], pre_s, post_s, dt,
                                                  signs=[signs_arr[i] for i in rising_idx])
+                res.mean_secondary_rising = dr_up
                 res.secondary_rising = M.step_response_metrics(grid, dr_up, 0.0)
             except M.StepNotDetectable:
                 pass
             try:
                 _, dr_dn, _, _ = M.average_steps(t, drive_y, [aligned[i] for i in falling_idx], pre_s, post_s, dt,
                                                  signs=[signs_arr[i] for i in falling_idx])
+                res.mean_secondary_falling = dr_dn
                 res.secondary_falling = M.step_response_metrics(grid, dr_dn, 0.0)
             except M.StepNotDetectable:
                 pass

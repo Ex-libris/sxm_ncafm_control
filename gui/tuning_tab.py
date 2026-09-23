@@ -481,12 +481,21 @@ def format_result_html(res: W.StepTestResult, verdict: W.Verdict, suggestions: L
         settle = "not settled in the hold" if math.isinf(p.settling_time) else f"{p.settling_time * 1e3:.0f} ms"
         rows.append(f"{loop.primary_channel}: rise {rise}, 5 % settling {settle}, overshoot {p.overshoot * 100:.1f} %, "
                     f"{p.n_extrema} ringing extrema; scatter {r.noise_rms:.3g}")
+    if r.primary_rising is not None and r.primary_falling is not None:
+        ru = "n/a" if math.isnan(r.primary_rising.rise_time) else f"{r.primary_rising.rise_time * 1e3:.1f} ms"
+        rd = "n/a" if math.isnan(r.primary_falling.rise_time) else f"{r.primary_falling.rise_time * 1e3:.1f} ms"
+        rows.append(f"{loop.primary_channel} rising vs falling: rise {ru} / {rd}, "
+                    f"overshoot {r.primary_rising.overshoot * 100:.0f} % / {r.primary_falling.overshoot * 100:.0f} % "
+                    "(see the plot below: folding both directions together can hide a real asymmetry)")
     if r.error is not None:
         d = "not decayed within the hold" if math.isinf(r.error.decay_time) else f"{r.error.decay_time * 1e3:.0f} ms"
         rows.append(f"Phase: peak {r.error.peak:.2f} deg, decays in {d}")
     if r.secondary is not None:
         rows.append(f"Drive: overshoot {r.secondary.overshoot * 100:.0f} % of its final change; "
                     f"post-settling noise {r.secondary.noise_rms:.3g}")
+    if r.secondary_rising is not None and r.secondary_falling is not None:
+        rows.append(f"Drive rising vs falling: overshoot {r.secondary_rising.overshoot * 100:.0f} % / "
+                    f"{r.secondary_falling.overshoot * 100:.0f} % of their own final change")
     if r.n_steps:
         rows.append(f"{r.n_steps} events averaged, window {r.window_s * 1e3:.0f} ms, response onset lag {r.latency_s * 1e3:.1f} ms")
     if r.model is not None:
@@ -1812,24 +1821,41 @@ class TuningTab(QtWidgets.QWidget):
         self.btn_prior.setEnabled(res.model is not None)
         for p in (self.plot1, self.plot2):
             p.clear()
+            p.setTitle(None)
         if res.grid is None or res.mean_primary is None:
             return
         g = res.grid * 1e3
-        pen = pg.mkPen((40, 90, 200), width=2)
-        self.plot1.plot(g, res.mean_primary, pen=pen)
-        if res.std_primary is not None and res.n_steps > 1:
-            for sgn in (1, -1):
-                self.plot1.plot(g, res.mean_primary + sgn * res.std_primary, pen=pg.mkPen((120, 150, 230), style=QtCore.Qt.DashLine))
+        # rising and falling are shown as two traces, not folded into one: folding can hide a real
+        # asymmetry (e.g. the amplitude loop kicking Drive hard to raise QPlusAmpl but just cutting it
+        # near zero and letting the resonator's own damping bring it back down on the way down).
+        split = res.mean_primary_rising is not None and res.mean_primary_falling is not None
+        if split:
+            self.plot1.plot(g, res.mean_primary_rising, pen=pg.mkPen((40, 90, 200), width=2))
+            self.plot1.plot(g, res.mean_primary_falling, pen=pg.mkPen((40, 90, 200), width=2, style=QtCore.Qt.DashLine))
+            self.plot1.setTitle("solid = rising, dashed = falling (each folded over its own direction only)")
+        else:
+            pen = pg.mkPen((40, 90, 200), width=2)
+            self.plot1.plot(g, res.mean_primary, pen=pen)
+            if res.std_primary is not None and res.n_steps > 1:
+                for sgn in (1, -1):
+                    self.plot1.plot(g, res.mean_primary + sgn * res.std_primary,
+                                    pen=pg.mkPen((120, 150, 230), style=QtCore.Qt.DashLine))
         p = res.primary
         if p is not None:
             for level in (p.y_initial, p.y_final):
                 self.plot1.addLine(y=level, pen=pg.mkPen((150, 150, 150), style=QtCore.Qt.DotLine))
         self.plot1.addLine(x=0, pen=pg.mkPen((200, 60, 60), style=QtCore.Qt.DashLine))
-        self.plot1.setLabel("left", f"{ld.primary_channel} (averaged, sign-folded)")
-        if res.mean_secondary is not None:
+        self.plot1.setLabel("left", f"{ld.primary_channel}" + (" (rising / falling)" if split else " (averaged, sign-folded)"))
+        sec_split = res.mean_secondary_rising is not None and res.mean_secondary_falling is not None
+        if sec_split:
+            self.plot2.plot(g, res.mean_secondary_rising, pen=pg.mkPen((200, 60, 60), width=2))
+            self.plot2.plot(g, res.mean_secondary_falling, pen=pg.mkPen((200, 60, 60), width=2, style=QtCore.Qt.DashLine))
+            self.plot2.setTitle("solid = rising, dashed = falling")
+        elif res.mean_secondary is not None:
             self.plot2.plot(g, res.mean_secondary, pen=pg.mkPen((200, 60, 60), width=2))
+        if res.mean_secondary is not None or sec_split:
             self.plot2.addLine(x=0, pen=pg.mkPen((200, 60, 60), style=QtCore.Qt.DashLine))
-        self.plot2.setLabel("left", "Phase" if ld.key == "pll" else "Drive")
+        self.plot2.setLabel("left", ("Phase" if ld.key == "pll" else "Drive") + (" (rising / falling)" if sec_split else ""))
         self.plot2.setLabel("bottom", "time after the step (ms)")
 
     def _suggestion_row(self) -> Optional[int]:
