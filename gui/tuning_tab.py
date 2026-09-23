@@ -636,6 +636,7 @@ class TuningTab(QtWidgets.QWidget):
         self._single_result: Optional[W.StepTestResult] = None
         self._map_texts: list = []
         self._confirmed_baseline: Dict[str, Tuple[float, float]] = {}     # per loop, this session only
+        self._last_gain_v: Optional[float] = None      # AFL output gain at the last change, for auto-rescale
         self._sweep_gs: List[float] = []
         self._sweep_results: List[Optional[W.StepTestResult]] = []
         self._sweep_active = False
@@ -753,8 +754,10 @@ class TuningTab(QtWidgets.QWidget):
         for v in W.AFL_OUTPUT_GAINS:
             self.gain_combo.addItem(f"+-{v:g} V", v)
         self.gain_combo.setCurrentIndex(W.AFL_OUTPUT_GAINS.index(1.0))
-        self.gain_combo.setToolTip("DNC window > Output Gain, as set in SXM. Kp and Ki scale with it: x10 for each range lower "
-                                   "(manual: +-1 V -> +-0.1 V). +-10 V (/10) is the same rule extrapolated.")
+        self.gain_combo.setToolTip("DNC window > Output Gain, as set in SXM. Changing it automatically rescales the "
+                                   "current Kp/Ki below by the inverse change (x10 for each range lower - manual: "
+                                   "+-1 V -> +-0.1 V; +-10 V is the same rule extrapolated), preserving whatever "
+                                   "multiplier you already have and the Ki:Kp ratio.")
         f.addRow(self.gain_label, self.gain_combo)
         self.start_label = QtWidgets.QLabel()
         self.start_label.setWordWrap(True)
@@ -764,8 +767,10 @@ class TuningTab(QtWidgets.QWidget):
                                  "from the ring-down time (this app's rule of thumb).")
         f.addRow(self.btn_fill)
         self._afl_rows = (self.gain_label, self.gain_combo, self.start_label, self.btn_fill)
-        for w in (self.q_spin, self.f0_spin, self.gain_combo):
-            (w.currentIndexChanged if isinstance(w, QtWidgets.QComboBox) else w.valueChanged).connect(self._update_start_label)
+        self.q_spin.valueChanged.connect(self._update_start_label)
+        self.f0_spin.valueChanged.connect(self._update_start_label)
+        self.gain_combo.currentIndexChanged.connect(self._on_gain_changed)
+        self._last_gain_v = self.gain_combo.currentData()   # seed at the constructed default: no rescale yet
         self.btn_fill.clicked.connect(lambda: self._fill_afl_start())
         for w in (self.kp_spin, self.ki_spin):
             w.valueChanged.connect(lambda *_: self._update_hint())          # the baseline warning follows what is typed
@@ -1074,6 +1079,25 @@ class TuningTab(QtWidgets.QWidget):
                                  f"Tau = {s.tau_s * 1e3:.3g} ms<br>Ring-down Q/(pi f0) = {s.ring_down_s:.2f} s "
                                  f"-> hold {s.hold_s:g} s, settle {s.settle_s:g} s")
         self._update_hint()
+
+    def _on_gain_changed(self, *_):
+        """
+        Rescale the current Kp/Ki (whatever they are - baseline or already scaled by some common
+        multiplier) by the inverse change in AFL output gain, preserving both that multiplier and the
+        Kp:Ki ratio - the manual's rule is defined at +-1 V; changing the range does not mean 'start
+        over', it means 'the same setting now reads differently'. 'Use the manual's start values'
+        remains the explicit hard reset to the pure baseline.
+        """
+        new_v = self.gain_combo.currentData()
+        old_v = self._last_gain_v
+        self._last_gain_v = new_v
+        if old_v is not None and new_v is not None and old_v != new_v and self.loop_def.key == "afl":
+            ratio = old_v / new_v
+            self.kp_spin.setValue(self.kp_spin.value() * ratio)
+            self.ki_spin.setValue(self.ki_spin.value() * ratio)
+            self._log(f"AFL output gain +-{old_v:g} V -> +-{new_v:g} V: Kp and Ki scaled by x{ratio:.4g} "
+                      "(Ki:Kp ratio unchanged).")
+        self._update_start_label()
 
     def _fill_afl_start(self, log: bool = True):
         """Baseline gains, Tau and test timing from the manual's rules for the Q, f0 and output gain on screen."""

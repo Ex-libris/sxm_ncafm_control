@@ -426,15 +426,36 @@ class AmplitudeLoopUI(unittest.TestCase):
         self.assertTrue(tab.gain_combo.isHidden())
         self.assertEqual((tab.factor_spin.value(), tab.range_spin.value()), (2.0, 16.0))
 
-    def test_a_lower_output_gain_needs_ten_times_larger_gains(self):
+    def test_a_lower_output_gain_automatically_scales_the_current_gains_by_ten(self):
         tab = self.make()
         ki1, kp1 = tab.ki_spin.value(), tab.kp_spin.value()
         tab.gain_combo.setCurrentIndex(tab.gain_combo.findData(0.1))
-        self.assertEqual(tab.ki_spin.value(), ki1)                              # the selector alone never touches the baseline
-        self.assertIn("+-0.1 V", tab.start_label.text())
-        tab.btn_fill.click()
-        self.assertAlmostEqual(tab.ki_spin.value() / ki1, 10.0)
+        self.assertAlmostEqual(tab.ki_spin.value() / ki1, 10.0)                 # the selector itself now rescales
         self.assertAlmostEqual(tab.kp_spin.value() / kp1, 10.0)
+        self.assertIn("+-0.1 V", tab.start_label.text())
+        self.assertIn("x10", tab.log.toPlainText())
+
+    def test_gain_change_preserves_a_multiplier_already_applied_by_the_user(self):
+        tab = self.make()                                                       # +-1 V baseline: Ki=2e4, Kp=2e8
+        tab.ki_spin.setValue(tab.ki_spin.value() * 3)                           # user scaled up by x3
+        tab.kp_spin.setValue(tab.kp_spin.value() * 3)
+        tab.gain_combo.setCurrentIndex(tab.gain_combo.findData(0.1))            # +-1 V -> +-0.1 V: x10
+        self.assertAlmostEqual(tab.ki_spin.value(), 3 * 2e4 * 10, delta=1.0)    # x3 preserved, not reset to baseline
+        self.assertAlmostEqual(tab.kp_spin.value(), 3 * 2e8 * 10, delta=1e4)
+        self.assertAlmostEqual(tab.kp_spin.value() / tab.ki_spin.value(), 1e4)  # ratio still exact
+
+    def test_gain_change_only_rescales_while_on_the_amplitude_loop(self):
+        tab = T.TuningTab(FakeInstrument(), None)                              # default loop: PLL
+        kp0, ki0 = tab.kp_spin.value(), tab.ki_spin.value()
+        tab.gain_combo.setCurrentIndex(tab.gain_combo.findData(0.1))           # hidden, but exists
+        self.assertEqual((tab.kp_spin.value(), tab.ki_spin.value()), (kp0, ki0))
+
+    def test_use_the_manuals_start_values_still_resets_to_the_pure_baseline(self):
+        tab = self.make()
+        tab.ki_spin.setValue(tab.ki_spin.value() * 3)                          # some arbitrary current value
+        tab.btn_fill.click()
+        self.assertAlmostEqual(tab.ki_spin.value(), 2e4)                       # back to the exact manual baseline
+        self.assertAlmostEqual(tab.kp_spin.value(), 2e8)
 
     def test_a_baseline_far_from_the_manual_start_is_flagged(self):
         tab = self.make()
@@ -443,8 +464,17 @@ class AmplitudeLoopUI(unittest.TestCase):
         self.assertNotIn("Check:", tab.hint_label.text())
         tab.ki_spin.setValue(tab.ki_spin.value() * 100)
         self.assertIn("Check:", tab.hint_label.text())
-        tab.gain_combo.setCurrentIndex(tab.gain_combo.findData(0.1))            # x10 explains part of it: x10 left
-        self.assertNotIn("Check:", tab.hint_label.text())
+
+    def test_the_mismatch_warning_survives_a_gain_change_since_both_sides_scale_together(self):
+        # a real x100 mismatch is not "explained away" by relabelling the output gain: auto-rescale
+        # moves the (already wrong) Ki by the same factor as the baseline it is compared against.
+        tab = self.make()
+        for c in tab.checks:
+            c.setChecked(True)
+        tab.ki_spin.setValue(tab.ki_spin.value() * 100)
+        self.assertIn("Check:", tab.hint_label.text())
+        tab.gain_combo.setCurrentIndex(tab.gain_combo.findData(0.1))
+        self.assertIn("Check:", tab.hint_label.text())
 
     def test_the_checklist_follows_the_loop_and_starts_unticked(self):
         tab = T.TuningTab(FakeInstrument(), FakeInstrument())
