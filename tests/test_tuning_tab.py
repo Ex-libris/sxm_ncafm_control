@@ -589,6 +589,57 @@ class BaselineProtection(unittest.TestCase):
         self.assertIn("AFL", tab.context_label.text())
 
 
+class ScaleSweepUI(unittest.TestCase):
+    """The amplitude-loop guided scale-sweep protocol, driven end to end against FakeInstrument."""
+
+    def make_afl_tab(self, inst):
+        tab = T.TuningTab(inst, inst)
+        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("afl"))
+        tab.LEAD_S, tab.TAIL_S = 0.2, 0.1
+        tab.hold_spin.setValue(0.15)
+        tab.events_spin.setValue(FAST["events"])
+        tab.settle_spin.setValue(0.2)
+        for c in tab.checks:
+            c.setChecked(True)
+        tab._confirmed_baseline[tab.loop_def.key] = (tab.kp_spin.value(), tab.ki_spin.value())
+        return tab
+
+    def test_scale_list_parsing_rejects_garbage(self):
+        tab = self.make_afl_tab(FakeInstrument())
+        for bad in ("0.1, abc, 2", "", "0, 1", "-1, 1"):
+            tab.scale_list_edit.setText(bad)
+            with self.assertRaises(ValueError):
+                tab._parse_scale_list()
+        tab.scale_list_edit.setText("0.1, 0.3, 1")
+        self.assertEqual(tab._parse_scale_list(), [0.1, 0.3, 1.0])
+
+    def test_an_invalid_scale_list_warns_instead_of_running(self):
+        tab = self.make_afl_tab(FakeInstrument())
+        tab.scale_list_edit.setText("not, numbers")
+        orig = QtWidgets.QMessageBox.warning
+        QtWidgets.QMessageBox.warning = staticmethod(lambda *a, **k: None)      # a real dialog would block here
+        try:
+            tab._run_scale_sweep()
+        finally:
+            QtWidgets.QMessageBox.warning = orig
+        self.assertFalse(tab.runner_active())
+
+    def test_running_a_short_sweep_fills_the_table_and_logs_a_recommendation(self):
+        inst = FakeInstrument()
+        tab = self.make_afl_tab(inst)
+        tab.scale_list_edit.setText("1, 2")
+        tab._run_scale_sweep()
+        self.assertTrue(tab.runner_active())
+        self.assertIs(tab.detail_tabs.currentWidget(), tab.sweep_tab)           # watch it fill, no per-point tab jump
+        self.assertTrue(wait_until(lambda: not tab.runner_active(), 40), "sweep did not finish")
+        self.assertGreaterEqual(tab.sweep_table.rowCount(), 1)
+        self.assertTrue(any(r is not None for r in tab._sweep_results))
+        self.assertIn("Scale sweep finished", tab.log.toPlainText())
+        # the baseline (not the last-tested scale point) is what got restored, via Kp/Ki/Ref in that order
+        kp, ki = tab.kp_spin.value(), tab.ki_spin.value()
+        self.assertEqual(inst.writes[-3:], [("Edit32", kp), ("Edit24", ki), ("Edit23", tab.base_spin.value())])
+
+
 class SuggestedSetupGain(unittest.TestCase):
     def test_output_gain_scales_the_amplitude_gains(self):
         from sxm_ncafm_control.gui.suggested_tab import SuggestedTab

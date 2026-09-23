@@ -201,6 +201,42 @@ class AnalyseAmplitude(unittest.TestCase):
         res = W.analyze_test(ct)
         self.assertEqual(W.classify(res, W.Target.manual(rise_max=0.5, overshoot_max=0.10)).category, "overshoot")
 
+    def test_steady_state_error_is_populated_for_the_amplitude_loop(self):
+        # was always nan before: analyze_test never passed target_step to the primary channel
+        plan = afl_plan()
+        ct, _ = record_afl(plan, 8.9e7, 8900)
+        res = W.analyze_test(ct)
+        self.assertFalse(math.isnan(res.primary.steady_state_error))
+        self.assertLess(abs(res.primary.steady_state_error), 0.2)              # QPlusAmpl tracks Ref closely here
+
+    def test_2pct_settling_is_at_least_as_slow_as_5pct(self):
+        plan = afl_plan()
+        ct, _ = record_afl(plan, 8.9e7, 8900)
+        res = W.analyze_test(ct)
+        self.assertIsNotNone(res.primary_2pct)
+        self.assertGreaterEqual(res.primary_2pct.settling_time, res.primary.settling_time)
+
+    def test_rising_and_falling_are_split_when_both_directions_are_present(self):
+        plan = afl_plan()                                                      # default 7 events: both directions
+        ct, _ = record_afl(plan, 8.9e7, 8900)
+        res = W.analyze_test(ct)
+        self.assertIsNotNone(res.primary_rising)
+        self.assertIsNotNone(res.primary_falling)
+        self.assertIsNotNone(res.secondary_rising)
+        self.assertIsNotNone(res.secondary_falling)
+        # a symmetric synthetic loop should give closely matched rise and fall times
+        self.assertAlmostEqual(res.primary_rising.rise_time, res.primary_falling.rise_time,
+                               delta=0.3 * res.primary.rise_time)
+
+    def test_drive_excursion_and_peak_are_populated(self):
+        plan = afl_plan()
+        ct, _ = record_afl(plan, 8.9e7, 8900)
+        res = W.analyze_test(ct)
+        self.assertFalse(math.isnan(res.drive_peak_abs))
+        self.assertFalse(math.isnan(res.drive_rms_excursion))
+        self.assertGreaterEqual(res.drive_peak_abs, 0.0)
+        self.assertGreaterEqual(res.drive_rms_excursion, 0.0)
+
 
 def _metrics(**kw):
     d = dict(step_size=1.0, y_initial=0.0, y_final=1.0, delay_time=0.0, rise_time=0.01, settling_time=0.05,
@@ -623,6 +659,68 @@ class AmplitudeLoopSearch(unittest.TestCase):
         s = W.advise(r, W.classify(r, t), t)
         self.assertAlmostEqual(s[0].kp / r.kp, 10.0)
         self.assertIn("Scale scan", s[0].why)
+
+
+class ScaleSweepAssessment(unittest.TestCase):
+    """assess_scale_sweep: tiering, the stopping rule, and the recommended gain - synthetic StepTestResults."""
+
+    TARGET = W.Target(rise_max=0.1, overshoot_max=0.10, max_extrema=3)
+
+    def _point(self, kp, ki, rise, overshoot=0.0, n_extrema=0, primary_noise=0.02, secondary_noise=0.01):
+        r = _result(kp=kp, ki=ki, loop="afl",
+                   primary=dict(rise_time=rise, overshoot=overshoot, n_extrema=n_extrema, noise_rms=primary_noise))
+        r.secondary = _metrics(noise_rms=secondary_noise)
+        r.primary_2pct = _metrics(settling_time=rise * 1.5)
+        r.drive_peak_abs = 0.3
+        return r
+
+    def test_tiers_a_typical_sweep_and_stops_at_the_first_too_aggressive_point(self):
+        gs = [0.1, 0.3, 1, 2, 3]
+        results = [
+            self._point(1.7e7, 1.7e3, rise=0.5),
+            self._point(5.0e7, 5.0e3, rise=0.2),
+            self._point(1.7e8, 1.7e4, rise=0.05, overshoot=0.02, primary_noise=0.02),
+            self._point(3.3e8, 3.3e4, rise=0.03, overshoot=0.05, primary_noise=0.01),
+            self._point(5.0e8, 5.0e4, rise=0.02, overshoot=0.15),               # too aggressive: overshoot
+        ]
+        points, rec_g, explanation = W.assess_scale_sweep(gs, results, self.TARGET)
+        self.assertEqual([p.tier for p in points],
+                         ["too_slow", "too_slow", "acceptable", "near_optimum", "too_aggressive"])
+        self.assertAlmostEqual(rec_g, 0.6 * 3)
+        self.assertIn(f"{rec_g:.3g}", explanation)
+
+    def test_saturation_triggers_too_aggressive(self):
+        r = self._point(1.7e8, 1.7e4, rise=0.05, overshoot=0.02)
+        r.drive_peak_abs = 0.95
+        points, rec_g, _ = W.assess_scale_sweep([1.0], [r], self.TARGET, output_gain_v=1.0)
+        self.assertEqual(points[0].tier, "too_aggressive")
+        self.assertIn("output gain range", points[0].reasons[0])
+        self.assertAlmostEqual(rec_g, 0.6 * 1.0)                                # even the first point recommends 60 %
+
+    def test_a_drive_noise_jump_triggers_too_aggressive_even_without_overshoot(self):
+        gs = [1, 2]
+        results = [self._point(1.7e8, 1.7e4, rise=0.05, overshoot=0.02, secondary_noise=0.01),
+                  self._point(3.3e8, 3.3e4, rise=0.03, overshoot=0.02, secondary_noise=0.03)]  # 3x: > 50 % jump
+        points, rec_g, _ = W.assess_scale_sweep(gs, results, self.TARGET)
+        self.assertEqual(points[0].tier, "near_optimum")                        # the only feasible point: automatically best
+        self.assertEqual(points[1].tier, "too_aggressive")
+        self.assertIn("noise rose", points[1].reasons[0])
+        self.assertAlmostEqual(rec_g, 0.6 * 2)
+
+    def test_nothing_feasible_gives_no_recommendation(self):
+        gs = [0.1, 0.3]
+        results = [self._point(1.7e7, 1.7e3, rise=0.5), self._point(5.0e7, 5.0e3, rise=0.3)]
+        points, rec_g, explanation = W.assess_scale_sweep(gs, results, self.TARGET)
+        self.assertTrue(all(p.tier == "too_slow" for p in points))
+        self.assertIsNone(rec_g)
+        self.assertIn("widen the scale list", explanation)
+
+    def test_a_failed_point_is_treated_as_too_aggressive_and_stops_the_sweep(self):
+        ok = self._point(1.7e8, 1.7e4, rise=0.05, overshoot=0.02)
+        failed = W.StepTestResult(kp=3e8, ki=3e4, loop="afl", failure="unmeasurable: loop lost")
+        points, rec_g, _ = W.assess_scale_sweep([1, 2, 3], [ok, failed, ok], self.TARGET)
+        self.assertEqual(len(points), 2)                                        # the third point is never reached
+        self.assertEqual(points[1].tier, "too_aggressive")
 
 
 if __name__ == "__main__":

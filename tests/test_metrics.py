@@ -219,5 +219,24 @@ class NoiseMetrics(unittest.TestCase):
         self.assertAlmostEqual(float(ym[0]), 4.5, places=6)
 
 
+class TransientExcursion(unittest.TestCase):
+    def test_peak_and_rms_of_a_known_overshoot(self):
+        # already at the final level, a bump to 1.3, then back to a flat noise-free tail at 1.0
+        y = np.concatenate([np.full(20, 1.0), np.linspace(1.0, 1.3, 30), np.full(200, 1.0)])
+        peak, rms = M.transient_excursion(y, y_final=1.0)
+        self.assertAlmostEqual(peak, 0.3, places=6)
+        self.assertLess(rms, peak)                        # most samples are at the flat, zero-deviation tail
+        self.assertGreater(rms, 0.0)
+
+    def test_zero_when_already_at_the_final_value(self):
+        y = np.full(100, 2.5)
+        peak, rms = M.transient_excursion(y, y_final=2.5)
+        self.assertEqual((peak, rms), (0.0, 0.0))
+
+    def test_empty_is_nan_not_a_crash(self):
+        peak, rms = M.transient_excursion(np.array([]), y_final=1.0)
+        self.assertTrue(math.isnan(peak) and math.isnan(rms))
+
+
 if __name__ == "__main__":
     unittest.main()

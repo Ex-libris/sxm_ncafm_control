@@ -49,6 +49,12 @@ CATEGORY_COLOR = {
     "too_slow": (175, 175, 175), "lost": (205, 65, 65), "skipped": (95, 95, 95), "untested": (238, 238, 238),
 }
 
+# the amplitude-loop scale sweep's own 4-tier scheme (tuning/workflow.py's assess_scale_sweep) - a
+# different vocabulary from CATEGORY_COLOR above, so its own palette rather than overloading that one.
+SCALE_TIER_COLOR = {
+    "too_slow": (175, 175, 175), "acceptable": (150, 195, 220), "near_optimum": (70, 175, 95), "too_aggressive": (205, 65, 65),
+}
+
 
 # ---------------------------------------------------------------------------
 # persisted UI state: left panel width, which sections are expanded (same JSON-in-home-dir pattern
@@ -479,7 +485,8 @@ def format_result_html(res: W.StepTestResult, verdict: W.Verdict, suggestions: L
         d = "not decayed within the hold" if math.isinf(r.error.decay_time) else f"{r.error.decay_time * 1e3:.0f} ms"
         rows.append(f"Phase: peak {r.error.peak:.2f} deg, decays in {d}")
     if r.secondary is not None:
-        rows.append(f"Drive: overshoot {r.secondary.overshoot * 100:.0f} % of its final change")
+        rows.append(f"Drive: overshoot {r.secondary.overshoot * 100:.0f} % of its final change; "
+                    f"post-settling noise {r.secondary.noise_rms:.3g}")
     if r.n_steps:
         rows.append(f"{r.n_steps} events averaged, window {r.window_s * 1e3:.0f} ms, response onset lag {r.latency_s * 1e3:.1f} ms")
     if r.model is not None:
@@ -629,6 +636,9 @@ class TuningTab(QtWidgets.QWidget):
         self._single_result: Optional[W.StepTestResult] = None
         self._map_texts: list = []
         self._confirmed_baseline: Dict[str, Tuple[float, float]] = {}     # per loop, this session only
+        self._sweep_gs: List[float] = []
+        self._sweep_results: List[Optional[W.StepTestResult]] = []
+        self._sweep_active = False
         self._build()
         self._on_loop_changed()
         self._paint_map()          # the clean empty state, not pyqtgraph's raw default axis
@@ -816,6 +826,14 @@ class TuningTab(QtWidgets.QWidget):
         self.preview_label.setStyleSheet("color: #444;")
         self.preview_label.setToolTip("The actual Kp / Ki values a map with these settings would write to SXM.")
         f.addRow(self.preview_label)
+        # amplitude loop only: the guided scale-sweep protocol (non-uniform, hand-picked multipliers -
+        # the uniform step-factor scan above cannot express this, so it gets its own list).
+        self.scale_list_edit = QtWidgets.QLineEdit("0.1, 0.3, 1, 2, 3")
+        self.scale_list_edit.setToolTip("Comma-separated multipliers of the baseline Kp/Ki (Ki:Kp stays fixed), "
+                                        "tested in order; the sweep stops at the first one that saturates Drive, "
+                                        "overshoots/rings beyond the target, or raises Drive noise substantially.")
+        self.scale_list_label = QtWidgets.QLabel("Scale sweep list (g):")
+        f.addRow(self.scale_list_label, self.scale_list_edit)
         self.search_section.set_content_layout(f)
         lv.addWidget(self.search_section)
         for w in (self.factor_spin, self.scan_lo, self.scan_hi, self.speed_lo, self.speed_hi, self.shape_lo, self.shape_hi,
@@ -836,14 +854,20 @@ class TuningTab(QtWidgets.QWidget):
         self.btn_scan.setToolTip("Tests the baseline, then both gains scaled together in steps of the step factor: Ki:Kp is "
                                  "kept and only the speed changes. Use it first when the right decade of gain is unknown.")
         self.btn_map = QtWidgets.QPushButton("Run / continue map")
+        self.btn_sweep = QtWidgets.QPushButton("Run scale sweep (protocol)")
+        self.btn_sweep.setToolTip("Steps through the scale list above (Ki:Kp fixed), measuring the full battery "
+                                  "for each: rise/fall, 2 % settling, over/undershoot, steady-state error, Drive "
+                                  "peak/RMS excursion and noise. Stops at the first sign of trouble and "
+                                  "recommends a final scale. Results appear in the 'Scale sweep' tab.")
         self.btn_clear = QtWidgets.QPushButton("Clear map")
         self.btn_scope = QtWidgets.QPushButton("Analyze Scope capture")
         self.btn_scope.setToolTip("Analyze the step train recorded in the Scope tab (needs the Step Test events on it).")
-        for b in (self.btn_single, self.btn_scan, self.btn_map, self.btn_clear, self.btn_scope):
+        for b in (self.btn_single, self.btn_scan, self.btn_map, self.btn_sweep, self.btn_clear, self.btn_scope):
             v.addWidget(b)
         self.btn_single.clicked.connect(self._run_single)
         self.btn_scan.clicked.connect(self._run_scan)
         self.btn_map.clicked.connect(self._run_map)
+        self.btn_sweep.clicked.connect(self._run_scale_sweep)
         self.btn_clear.clicked.connect(self._clear_map)
         self.btn_scope.clicked.connect(self._analyze_scope)
         lv.addWidget(g)
@@ -923,6 +947,25 @@ class TuningTab(QtWidgets.QWidget):
         self.table.setHorizontalHeaderLabels(["Kp", "Ki", "Verdict", "Rise ms", "Overshoot %", "Phase decay ms", "Scatter"])
         self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
         self.detail_tabs.addTab(self.table, "All tests")
+
+        self.sweep_tab = QtWidgets.QWidget()
+        sv2 = QtWidgets.QVBoxLayout(self.sweep_tab)
+        sv2.setContentsMargins(0, 0, 0, 0)
+        self.sweep_table = QtWidgets.QTableWidget(0, 12)
+        self.sweep_table.setHorizontalHeaderLabels(
+            ["g", "Kp", "Ki", "Tier", "Rise up ms", "Rise down ms", "2% settle ms", "Overshoot %",
+             "SS error %", "Drive peak", "Drive RMS exc.", "Drive noise"])
+        self.sweep_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        sv2.addWidget(self.sweep_table, 1)
+        self.sweep_summary = QtWidgets.QLabel(
+            "Run a scale sweep (amplitude loop, left section 4/5) to see results here.")
+        self.sweep_summary.setWordWrap(True)
+        self.sweep_summary.setTextFormat(QtCore.Qt.RichText)
+        self.sweep_summary.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.sweep_summary.setMargin(6)
+        sv2.addWidget(self.sweep_summary)
+        self.detail_tabs.addTab(self.sweep_tab, "Scale sweep")
+
         self.log = QtWidgets.QTextEdit()
         self.log.setReadOnly(True)
         self.detail_tabs.addTab(self.log, "Log")
@@ -1003,7 +1046,8 @@ class TuningTab(QtWidgets.QWidget):
         self.scan_lo.setValue(2 if pll else 3)
         self.scan_hi.setValue(2 if pll else 3)
         self.range_spin.setValue(16.0 if pll else 1000.0)
-        for w in (self.tau_spin, self.tau_label) + self._afl_rows:
+        for w in (self.tau_spin, self.tau_label, self.scale_list_label, self.scale_list_edit,
+                 self.btn_sweep) + self._afl_rows:
             w.setVisible(not pll)
         for c, text in zip(self.checks, CHECKLISTS[ld.key]):
             c.setText(text)
@@ -1228,6 +1272,7 @@ class TuningTab(QtWidgets.QWidget):
         for b in (self.btn_single, self.btn_scan, self.btn_map, self.btn_test_sug):
             b.setEnabled(ready)
         self.btn_narrow.setEnabled(ready and not self._narrow_converged)
+        self.btn_sweep.setEnabled(ready)
         self.btn_stop.setEnabled(running)
         mgr = self._accessibility_manager()
         self.btn_stop.setStyleSheet(mgr.stop_button_style(running) if mgr else "")
@@ -1253,6 +1298,13 @@ class TuningTab(QtWidgets.QWidget):
         else:
             self.btn_scan.setToolTip("Tests the baseline, then both gains scaled together in steps of the step factor: Ki:Kp is "
                                      "kept and only the speed changes. Use it first when the right decade of gain is unknown.")
+        if tip:
+            self.btn_sweep.setToolTip(tip)
+        else:
+            self.btn_sweep.setToolTip("Steps through the scale list above (Ki:Kp fixed), measuring the full battery "
+                                      "for each: rise/fall, 2 % settling, over/undershoot, steady-state error, Drive "
+                                      "peak/RMS excursion and noise. Stops at the first sign of trouble and "
+                                      "recommends a final scale. Results appear in the 'Scale sweep' tab.")
         if tip:
             self.btn_narrow.setToolTip(tip)
         elif self._narrow_converged:
@@ -1434,6 +1486,54 @@ class TuningTab(QtWidgets.QWidget):
         self._refresh_table()
         self._run_map()
 
+    def _parse_scale_list(self) -> List[float]:
+        parts = [x.strip() for x in self.scale_list_edit.text().split(",") if x.strip()]
+        if not parts:
+            raise ValueError("Scale list is empty. Example: 0.1, 0.3, 1, 2, 3")
+        try:
+            vals = [float(x) for x in parts]
+        except ValueError:
+            raise ValueError("Scale list must be comma-separated numbers, e.g. 0.1, 0.3, 1, 2, 3")
+        if any(v <= 0 for v in vals):
+            raise ValueError("Scale values must be positive: they multiply the baseline Kp/Ki.")
+        return vals
+
+    def _run_scale_sweep(self):
+        """
+        The amplitude-loop protocol sweep: step through the scale list (Ki:Kp fixed), stopping at the
+        first point the sweep's own assessment calls too_aggressive (saturation, overshoot/ringing
+        beyond the target, or a substantial Drive noise rise) rather than blindly working through the
+        whole list - the manual's stopping rule applies to what gets *written*, not just reported.
+        """
+        try:
+            gs = self._parse_scale_list()
+        except ValueError as e:
+            QtWidgets.QMessageBox.warning(self, "Scale list", str(e))
+            return
+        kp0, ki0 = self.kp_spin.value(), self.ki_spin.value()
+        self._sweep_gs = gs
+        self._sweep_results = [None] * len(gs)
+        self._sweep_active = True
+        self._refresh_sweep_view()
+        self.detail_tabs.setCurrentWidget(self.sweep_tab)
+        state = {"i": 0}
+
+        def nxt():
+            i = state["i"]
+            if i > 0:
+                tested = [(g, r) for g, r in zip(self._sweep_gs[:i], self._sweep_results[:i]) if r is not None]
+                if tested:
+                    gs_done, res_done = zip(*tested)
+                    points, _, _ = W.assess_scale_sweep(list(gs_done), list(res_done), self.target(),
+                                                         output_gain_v=self.gain_combo.currentData())
+                    if points and points[-1].tier == "too_aggressive":
+                        return None             # the sweep's own stopping rule: go no further
+            if i >= len(gs):
+                return None
+            state["i"] = i + 1
+            return ("sweep", i), kp0 * gs[i], ki0 * gs[i]
+        self._start_runner(nxt)
+
     def _test_suggestion(self):
         row = self._suggestion_row()
         if row is None:
@@ -1464,12 +1564,76 @@ class TuningTab(QtWidgets.QWidget):
                 self._narrow_stage = None
         if not self._narrow_active:                  # not mid-sequence: 'Narrow search' chains two runs
             self._reset_checklist()                   # internally and should only reset once, at the end
+        if self._sweep_active:
+            self._sweep_active = False
+            self._log_sweep_recommendation()
+
+    def _log_sweep_recommendation(self):
+        tested = [(g, r) for g, r in zip(self._sweep_gs, self._sweep_results) if r is not None]
+        if not tested:
+            return
+        gs_done, res_done = zip(*tested)
+        _, rec_g, explanation = W.assess_scale_sweep(list(gs_done), list(res_done), self.target(),
+                                                      output_gain_v=self.gain_combo.currentData())
+        self._log(f"Scale sweep finished: {explanation}")
+
+    def _refresh_sweep_view(self):
+        """Repaint the 'Scale sweep' tab from whatever's in self._sweep_results so far (partial or full)."""
+        tested = [(g, r) for g, r in zip(self._sweep_gs, self._sweep_results) if r is not None]
+        if not tested:
+            self.sweep_table.setRowCount(0)
+            self.sweep_summary.setText("Run a scale sweep (amplitude loop, left section 4/5) to see results here.")
+            return
+        gs_done, res_done = zip(*tested)
+        points, rec_g, explanation = W.assess_scale_sweep(list(gs_done), list(res_done), self.target(),
+                                                           output_gain_v=self.gain_combo.currentData())
+        self.sweep_table.setRowCount(len(points))
+        for row, p in enumerate(points):
+            r = p.result
+
+            def ms(sm, field="rise_time"):
+                if sm is None:
+                    return ""
+                v = getattr(sm, field)
+                return "inf" if math.isinf(v) else ("" if math.isnan(v) else f"{v * 1e3:.1f}")
+            vals = [
+                f"{p.g:g}", format_number(p.kp, 4, 1e4), format_number(p.ki, 4, 1e4),
+                W.SCALE_TIER_LABEL.get(p.tier, p.tier),
+                ms(r.primary_rising), ms(r.primary_falling), ms(r.primary_2pct, "settling_time"),
+                "" if r.primary is None else f"{r.primary.overshoot * 100:.1f}",
+                "" if r.primary is None or math.isnan(r.primary.steady_state_error) else f"{r.primary.steady_state_error * 100:.1f}",
+                "" if math.isnan(r.drive_peak_abs) else f"{r.drive_peak_abs:.3g}",
+                "" if math.isnan(r.drive_rms_excursion) else f"{r.drive_rms_excursion:.3g}",
+                "" if r.secondary is None else f"{r.secondary.noise_rms:.3g}",
+            ]
+            col = QtGui.QColor(*SCALE_TIER_COLOR.get(p.tier, (255, 255, 255)))
+            for c, text in enumerate(vals):
+                item = QtWidgets.QTableWidgetItem(text)
+                if c == 3:
+                    item.setBackground(col)
+                self.sweep_table.setItem(row, c, item)
+        if rec_g is not None:
+            kp0, ki0 = self.kp_spin.value(), self.ki_spin.value()
+            self.sweep_summary.setText(f"<b>Recommended g &asymp; {rec_g:.3g}</b> "
+                                       f"(Kp &asymp; {format_number(kp0 * rec_g, 4, 1e4)}, "
+                                       f"Ki &asymp; {format_number(ki0 * rec_g, 4, 1e4)})<br>{explanation}")
+        else:
+            self.sweep_summary.setText(explanation)
 
     def _on_test_finished(self, cell, res: W.StepTestResult):
         m = self.current_map()
         if isinstance(cell, tuple) and len(cell) == 2 and all(isinstance(c, (int, np.integer)) for c in cell) and m is not None:
             v = m.record(cell, res)
             self.selected = cell
+        elif isinstance(cell, tuple) and len(cell) == 2 and cell[0] == "sweep":
+            v = W.classify(res, self.target())
+            res.verdict = v
+            idx = cell[1]
+            if 0 <= idx < len(self._sweep_results):
+                self._sweep_results[idx] = res
+            self._log(f"  g={self._sweep_gs[idx]:g}: {W.CATEGORY_LABEL.get(v.category, v.category)}: " + "; ".join(v.reasons))
+            self._refresh_sweep_view()         # stays on the Scale sweep tab - no per-point plot jump
+            return
         else:
             v = W.classify(res, self.target())
             res.verdict = v

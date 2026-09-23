@@ -261,6 +261,15 @@ class StepTestResult:
     error: Optional[M.ErrorMetrics] = None       # PLL Phase transient
     secondary: Optional[M.StepMetrics] = None    # amplitude loop Drive
     noise_rms: float = math.nan           # step-to-step scatter of the primary channel
+    # direction-split and tighter-band views, for the amplitude-loop scale-sweep protocol; None where
+    # there were fewer than 2 steps of a direction, or (2pct) always alongside `primary`.
+    primary_rising: Optional[M.StepMetrics] = None
+    primary_falling: Optional[M.StepMetrics] = None
+    primary_2pct: Optional[M.StepMetrics] = None      # same as `primary`, with a 2 % settling band
+    secondary_rising: Optional[M.StepMetrics] = None
+    secondary_falling: Optional[M.StepMetrics] = None
+    drive_peak_abs: float = math.nan          # peak |Drive| during the transient, physical units
+    drive_rms_excursion: float = math.nan     # RMS(Drive - final) over the whole transient, not just the tail
     grid: Optional[np.ndarray] = None     # averaged responses (relative to the step), for plotting
     mean_primary: Optional[np.ndarray] = None
     std_primary: Optional[np.ndarray] = None
@@ -364,10 +373,14 @@ def analyze_test(ct: CapturedTest, *, li_tau: Optional[float] = None, li_stages:
         return res
     res.n_steps, res.grid, res.mean_primary, res.std_primary = n, grid, mean, std
     try:
-        res.primary = M.step_response_metrics(grid, mean, 0.0, step_override=expected)
+        res.primary = M.step_response_metrics(grid, mean, 0.0, step_override=expected, target_step=expected)
     except M.StepNotDetectable:
         res.failure = "unmeasurable: the primary channel did not follow the step"
         return res
+    try:
+        res.primary_2pct = M.step_response_metrics(grid, mean, 0.0, step_override=expected, target_step=expected, band=0.02)
+    except M.StepNotDetectable:
+        res.primary_2pct = None
     measured = abs(res.primary.y_final - res.primary.y_initial)
     if measured < 0.15 * expected:
         res.failure = "unmeasurable: the primary channel moved far less than the commanded step"
@@ -380,6 +393,26 @@ def analyze_test(ct: CapturedTest, *, li_tau: Optional[float] = None, li_stages:
         late = grid > 0.5 * post_s
         res.noise_rms = float(math.sqrt(np.mean(std[late] ** 2)))
 
+    # direction split (rising vs falling), for protocols that ask whether the two differ - the combined
+    # fold above answers "what does a step look like", this answers "does the direction matter".
+    signs_arr = np.asarray(signs, dtype=float)
+    rising_idx = [i for i, s in enumerate(signs_arr) if s > 0]
+    falling_idx = [i for i, s in enumerate(signs_arr) if s < 0]
+    have_both_directions = len(rising_idx) >= 2 and len(falling_idx) >= 2
+    if have_both_directions:
+        try:
+            _, mean_up, _, _ = M.average_steps(t, y, [aligned[i] for i in rising_idx], pre_s, post_s, dt,
+                                               signs=[signs_arr[i] for i in rising_idx])
+            res.primary_rising = M.step_response_metrics(grid, mean_up, 0.0, step_override=expected, target_step=expected)
+        except M.StepNotDetectable:
+            pass
+        try:
+            _, mean_dn, _, _ = M.average_steps(t, y, [aligned[i] for i in falling_idx], pre_s, post_s, dt,
+                                               signs=[signs_arr[i] for i in falling_idx])
+            res.primary_falling = M.step_response_metrics(grid, mean_dn, 0.0, step_override=expected, target_step=expected)
+        except M.StepNotDetectable:
+            pass
+
     # secondary channel
     if plan.loop == "pll" and "Phase" in det.names:
         _, ph, _, _ = M.average_steps(t, np.asarray(ct.channels[det.names["Phase"]], float), aligned, pre_s, post_s, dt, signs=signs)
@@ -391,12 +424,29 @@ def analyze_test(ct: CapturedTest, *, li_tau: Optional[float] = None, li_stages:
         except M.StepNotDetectable:
             res.error = None
     elif plan.loop == "afl" and "Drive" in det.names:
-        _, dr, _, _ = M.average_steps(t, np.asarray(ct.channels[det.names["Drive"]], float), aligned, pre_s, post_s, dt, signs=signs)
+        drive_y = np.asarray(ct.channels[det.names["Drive"]], float)
+        _, dr, _, _ = M.average_steps(t, drive_y, aligned, pre_s, post_s, dt, signs=signs)
         res.mean_secondary = dr
         try:
             res.secondary = M.step_response_metrics(grid, dr, 0.0)
         except M.StepNotDetectable:
             res.secondary = None
+        if res.secondary is not None:
+            res.drive_peak_abs = float(np.max(np.abs(dr)))
+            _, res.drive_rms_excursion = M.transient_excursion(dr, res.secondary.y_final)
+        if have_both_directions:
+            try:
+                _, dr_up, _, _ = M.average_steps(t, drive_y, [aligned[i] for i in rising_idx], pre_s, post_s, dt,
+                                                 signs=[signs_arr[i] for i in rising_idx])
+                res.secondary_rising = M.step_response_metrics(grid, dr_up, 0.0)
+            except M.StepNotDetectable:
+                pass
+            try:
+                _, dr_dn, _, _ = M.average_steps(t, drive_y, [aligned[i] for i in falling_idx], pre_s, post_s, dt,
+                                                 signs=[signs_arr[i] for i in falling_idx])
+                res.secondary_falling = M.step_response_metrics(grid, dr_dn, 0.0)
+            except M.StepNotDetectable:
+                pass
 
     # physical loop identification from the same recording
     if li_tau and det.complete:
@@ -821,3 +871,130 @@ class ScreeningMap:
             lines.append(f"Island {n}: {i.size} cells, Kp {kps[0]:.4g}..{kps[-1]:.4g}, Ki {kis[0]:.4g}..{kis[-1]:.4g}; "
                          f"best (lowest noise) Kp={kp:.4g}, Ki={ki:.4g}")
         return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# amplitude loop: guided scale sweep (hold Kp:Ki, sweep one common scale g)
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class SweepLimits:
+    """Thresholds for tiering a scale sweep and deciding where to stop it. Proposed defaults - meant
+    to be adjusted once there is real hardware data to check them against, not taken as exact."""
+
+    noise_jump_frac: float = 0.5          # Drive post-settling noise rise vs. the previous point: "substantial"
+    settle_improve_min_frac: float = 0.10  # below this relative gain in 2 % settling, more scale stops helping
+    saturation_frac: float = 0.9          # peak |Drive| at/above this fraction of the output-gain range: saturated
+
+
+SCALE_TIER_LABEL = {"too_slow": "too slow", "acceptable": "acceptable",
+                    "near_optimum": "near optimum", "too_aggressive": "too aggressive"}
+
+
+@dataclass
+class ScalePoint:
+    """One tested point of a scale sweep: the gains used, its full measurement, and its tier."""
+
+    g: float
+    kp: float
+    ki: float
+    result: StepTestResult
+    tier: str
+    reasons: List[str] = field(default_factory=list)
+
+
+def _p_vs_i_note(points: List[ScalePoint]) -> str:
+    """
+    A short, data-driven note on whether the sweep favours relatively more P or more I, from the
+    measured trend - not an assumption that the nominal ~1e4 ratio is optimal.
+    """
+    aggressive = next((p for p in points if p.tier == "too_aggressive"), None)
+    if aggressive is not None and any("overshoot" in r or "ringing" in r for r in aggressive.reasons):
+        return ("Overshoot/ringing appeared before settling was exceeded: the data favours relatively less "
+               "proportional weight (lower Kp:Ki) rather than pushing the common scale further.")
+    feasible = [p for p in points if p.tier in ("acceptable", "near_optimum")]
+    if feasible:
+        r = feasible[-1].result
+        if r.primary_2pct is not None and not math.isinf(r.primary_2pct.settling_time) and r.primary_2pct.settling_time > 0 \
+           and not math.isnan(r.primary.rise_time):
+            tail = r.primary_2pct.settling_time - r.primary.rise_time
+            if tail > 0.5 * r.primary_2pct.settling_time:
+                return ("The rise is fast relative to the 2 % settling time (a lingering tail after the initial "
+                       "move): the data favours relatively more integral action to clear that residual faster.")
+    return "No clear P-vs-I bias in the tested range; the nominal ~1e4 ratio looks reasonable here."
+
+
+def assess_scale_sweep(gs: Sequence[float], results: Sequence[StepTestResult], target: Target,
+                       output_gain_v: Optional[float] = None,
+                       limits: SweepLimits = SweepLimits()) -> Tuple[List[ScalePoint], Optional[float], str]:
+    """
+    Tier each point of a Kp:Ki-held-fixed scale sweep as too_slow / acceptable / near_optimum /
+    too_aggressive and recommend a final scale, per the manual's rule: raise the common gain until
+    Drive saturates, overshoot/ringing appears, or Drive noise rises substantially, then back off.
+
+    Stops assessing once a point is ``too_aggressive`` - later (more aggressive) points in ``gs`` are
+    not evaluated, matching that same stopping rule. ``output_gain_v`` is the selected DNC Output Gain
+    range; saturation is only checked when it is given.
+
+    Returns ``(points, recommended_g, explanation)``. ``recommended_g`` is ``None`` if nothing tested
+    both met the target and stayed stable.
+    """
+    points: List[ScalePoint] = []
+    prev_feasible: Optional[ScalePoint] = None
+    best_noise, best_idx = math.inf, None
+    for g, res in zip(gs, results):
+        if res.failure or res.primary is None:
+            points.append(ScalePoint(g, res.kp, res.ki, res, "too_aggressive", [res.failure or "unmeasurable"]))
+            break
+        reasons: List[str] = []
+        saturated = (output_gain_v is not None and not math.isnan(res.drive_peak_abs)
+                    and res.drive_peak_abs >= limits.saturation_frac * output_gain_v)
+        if saturated:
+            reasons.append(f"Drive reached {res.drive_peak_abs:.3g} V, >= {limits.saturation_frac * 100:.0f} % of "
+                           f"the +-{output_gain_v:g} V output gain range")
+        overshoot_bad = res.primary.overshoot > target.overshoot_max or res.primary.n_extrema > target.max_extrema
+        if overshoot_bad:
+            reasons.append(f"overshoot {res.primary.overshoot * 100:.0f} % / {res.primary.n_extrema} ringing "
+                           f"extrema beyond the target")
+        noise_jump = False
+        if (prev_feasible is not None and res.secondary is not None and prev_feasible.result.secondary is not None
+                and not math.isnan(res.secondary.noise_rms) and prev_feasible.result.secondary.noise_rms > 0):
+            jump = (res.secondary.noise_rms - prev_feasible.result.secondary.noise_rms) / prev_feasible.result.secondary.noise_rms
+            if jump > limits.noise_jump_frac:
+                noise_jump = True
+                reasons.append(f"Drive noise rose {jump * 100:.0f} % vs. the previous point "
+                               f"(limit {limits.noise_jump_frac * 100:.0f} %)")
+        if saturated or overshoot_bad or noise_jump:
+            points.append(ScalePoint(g, res.kp, res.ki, res, "too_aggressive", reasons))
+            break
+        settle = res.primary_2pct.settling_time if res.primary_2pct is not None else res.primary.settling_time
+        meets_target = (not math.isnan(res.primary.rise_time) and res.primary.rise_time <= target.rise_max
+                        and (target.settle_max is None or (not math.isinf(settle) and settle <= target.settle_max)))
+        if not meets_target:
+            rt = "not reached" if math.isnan(res.primary.rise_time) else f"{res.primary.rise_time * 1e3:.1f} ms"
+            points.append(ScalePoint(g, res.kp, res.ki, res, "too_slow",
+                                     [f"rise {rt} (target <= {target.rise_max * 1e3:.1f} ms)"]))
+            continue
+        point = ScalePoint(g, res.kp, res.ki, res, "acceptable", ["meets the target"])
+        points.append(point)
+        noise = res.primary.noise_rms if not math.isnan(res.primary.noise_rms) else math.inf
+        if noise < best_noise:
+            best_noise, best_idx = noise, len(points) - 1
+        prev_feasible = point
+
+    if best_idx is not None:
+        points[best_idx].tier = "near_optimum"
+        points[best_idx].reasons = ["lowest primary-channel noise among the feasible points"]
+
+    aggressive = next((p for p in points if p.tier == "too_aggressive"), None)
+    if aggressive is not None:
+        recommended_g = 0.6 * aggressive.g            # the midpoint of the manual's 50-70 %
+        basis = f"60 % of the first too-aggressive scale (g={aggressive.g:g})"
+    elif best_idx is not None:
+        recommended_g = points[best_idx].g
+        basis = "the lowest-noise point that met the target among those tested"
+    else:
+        recommended_g = None
+        basis = "no tested point both met the target and stayed stable - widen the scale list"
+
+    lead = f"Recommend g ≈ {recommended_g:.3g} ({basis})." if recommended_g is not None else basis + "."
+    return points, recommended_g, f"{lead} {_p_vs_i_note(points)}"

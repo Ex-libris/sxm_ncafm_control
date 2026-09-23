@@ -18,6 +18,7 @@ Conventions
 
 import math
 from dataclasses import dataclass
+from typing import Tuple
 
 import numpy as np
 from scipy import ndimage, signal
@@ -311,6 +312,19 @@ def error_transient_metrics(t, e, t_step, *, hold_end=None, final_frac=0.25, ban
 def noise_rms(y) -> float:
     """RMS of y after removing a straight line (drift-tolerant)."""
     return detrended_std(y)
+
+
+def transient_excursion(y, y_final: float) -> Tuple[float, float]:
+    """
+    Peak and RMS deviation from the final value over the *whole* array, not just the settled tail
+    (contrast with ``StepMetrics.noise_rms``, which is tail-only). How far a signal actually swings
+    on the way there - e.g. Drive's excursion while the amplitude loop steps, saturation-adjacent.
+    """
+    y = np.asarray(y, dtype=float)
+    if len(y) == 0:
+        return math.nan, math.nan
+    d = y - y_final
+    return float(np.max(np.abs(d))), float(math.sqrt(np.mean(d ** 2)))
 
 
 def band_rms(y, fs, f_lo, f_hi) -> float:
