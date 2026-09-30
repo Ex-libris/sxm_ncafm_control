@@ -25,8 +25,9 @@ unparseable status raises SXMBridgeError instead of returning a guess.
 Run ``python AnfatecSXMBridge.py`` to print and save a snapshot, or
 ``python AnfatecSXMBridgeMonitor.py`` for a live view.
 
-Master copy: dev/anfatec_code/AnfatecSXMBridge.py (private). A copy in
-dev/sxm_ncafm_control is overwritten from it by sync_dev.ps1; edit only here.
+Master copy: anfatec_code/AnfatecSXMBridge.py in the author's development
+folder. sxm_ncafm_control ships a copy, updated from the master; make changes
+in the master, not in the copy.
 """
 from __future__ import annotations
 
