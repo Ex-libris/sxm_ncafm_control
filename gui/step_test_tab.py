@@ -25,13 +25,15 @@ from .sci_spinbox import SciDoubleSpinBox
 class StepTestTab(QtWidgets.QWidget):
     """Square wave parameter stepping with optional scope trigger."""
 
-    def __init__(self, dde_client):
+    def __init__(self, dde_client, reader=None):
         """
         Args:
             dde_client (object): DDE client to communicate with SXM software.
+            reader (sxm_state.SXMReader, optional): SXM GUI read-back, for the base value.
         """
         super().__init__()
         self.dde = dde_client
+        self.reader = reader
         self.step_index = 0
         self._customs: List[Tuple[str, object, str]] = []
         self.scope_tab = None  # linked externally
@@ -54,9 +56,8 @@ class StepTestTab(QtWidgets.QWidget):
         self.steps.setRange(1, 1_000_000); self.steps.setValue(20)
 
         # Base value the parameter returns to when the test ends or is stopped.
-        # SXM parameters are write-only from here, so the original value cannot be
-        # read back; the base is explicit. It follows the midpoint of low/high (the
-        # centre of a symmetric +-delta test, e.g. f0 +- 1 Hz) until edited by hand.
+        # The base is explicit. It follows the midpoint of low/high (the centre of a
+        # symmetric +-delta test, e.g. f0 +- 1 Hz) until edited by hand or read from SXM.
         self.chk_restore = QtWidgets.QCheckBox("Return to base value at end / on Stop")
         self.chk_restore.setToolTip(
             "After the last step (which is held for one full period), or as soon as you press\n"
@@ -68,11 +69,13 @@ class StepTestTab(QtWidgets.QWidget):
         self.base.setEnabled(False)
         self.base.setToolTip(
             "Value written back after the test. Defaults to the midpoint of Low and High.\n"
-            "SXM parameters cannot be read back from here, so enter the true original value\n"
-            "if it is not the midpoint."
+            "Use '= SXM value' to take the value SXM shows now (not possible for custom EditXX)."
         )
         self.btn_base_mid = QtWidgets.QPushButton("= midpoint")
         self.btn_base_mid.setEnabled(False)
+        self.btn_base_sxm = QtWidgets.QPushButton("= SXM value")
+        self.btn_base_sxm.setToolTip("Read the selected parameter's current value from the SXM window.")
+        self.btn_base_sxm.setEnabled(False)
         self._base_manual = False  # True once the user typed a base value
 
         c = 0
@@ -106,8 +109,11 @@ class StepTestTab(QtWidgets.QWidget):
         grid.addWidget(QtWidgets.QLabel("Base:"), 3, 4)
         grid.addWidget(self.base, 3, 5)
         grid.addWidget(self.btn_base_mid, 3, 6, 1, 2)
+        grid.addWidget(self.btn_base_sxm, 3, 8, 1, 2)
         self.chk_restore.toggled.connect(self.base.setEnabled)
         self.chk_restore.toggled.connect(self.btn_base_mid.setEnabled)
+        self.chk_restore.toggled.connect(self.btn_base_sxm.setEnabled)
+        self.btn_base_sxm.clicked.connect(self.base_from_sxm)
         self.low.valueChanged.connect(self._sync_base_default)
         self.high.valueChanged.connect(self._sync_base_default)
         self.base.valueChanged.connect(self._on_base_edited)
@@ -171,6 +177,28 @@ class StepTestTab(QtWidgets.QWidget):
         self.base.blockSignals(True)
         self.base.setValue(0.5 * (self.low.value() + self.high.value()))
         self.base.blockSignals(False)
+
+    def _log_line(self, text: str) -> None:
+        append_log_line(self.log, f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {text}")
+
+    def base_from_sxm(self) -> bool:
+        """Set Base to the value SXM shows for the selected parameter. Returns True on success."""
+        ptype, pcode, label = self.param.currentData()
+        if self.reader is None:
+            self._log_line("SXM read-back is not available.")
+            return False
+        try:
+            value = self.reader.read().by_code(ptype, pcode)
+        except Exception as e:
+            value = None
+            self._log_line(f"Read from SXM failed: {e}")
+        if value is None:
+            self._log_line(f"{label}: no SXM value (not running, or not a readable parameter).")
+            return False
+        self.base.setValue(value)                 # counts as a manual base: it no longer follows the midpoint
+        self._base_manual = True
+        self._log_line(f"Base <- SXM {label} = {value}")
+        return True
 
     def _on_base_edited(self, _value):
         self._base_manual = True

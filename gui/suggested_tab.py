@@ -55,7 +55,7 @@ class SuggestedTab(QtWidgets.QWidget):
     Displays fit results and plots for loaded spectra.
     """
 
-    def __init__(self, dde_client, params_tab):
+    def __init__(self, dde_client, params_tab, reader=None):
         """
         Recalculate recommended parameters based on current input values.
 
@@ -75,6 +75,7 @@ class SuggestedTab(QtWidgets.QWidget):
         super().__init__()
         self.dde = dde_client
         self.params_tab = params_tab
+        self.reader = reader              # sxm_state.SXMReader (SXM GUI read-back) or None
         self._last_fit = None
         self._spectrum = None   # (freq, phase, amp) of the loaded file, sorted by freq
 
@@ -180,9 +181,11 @@ class SuggestedTab(QtWidgets.QWidget):
         # Buttons
         h = QtWidgets.QHBoxLayout()
         self.btn_recalc = QtWidgets.QPushButton("Recalculate")
+        self.btn_read_sxm = QtWidgets.QPushButton("Read Q / f₀ from SXM")
+        self.btn_read_sxm.setToolTip("Q and fPeak from the DNC window's status bar (the last sweep), and the output gain.")
         self.btn_stage = QtWidgets.QPushButton("Load to Parameters Tab")
         self.btn_send = QtWidgets.QPushButton("Send Now")
-        h.addWidget(self.btn_recalc); h.addStretch(1)
+        h.addWidget(self.btn_recalc); h.addWidget(self.btn_read_sxm); h.addStretch(1)
         h.addWidget(self.btn_stage); h.addWidget(self.btn_send)
         left.addLayout(h)
 
@@ -218,6 +221,7 @@ class SuggestedTab(QtWidgets.QWidget):
 
         # Wiring
         self.btn_recalc.clicked.connect(self._recalc)
+        self.btn_read_sxm.clicked.connect(lambda: self.read_from_sxm())
         for w in (self.q_val, self.f0_val, self.bw_pll):
             w.valueChanged.connect(self._recalc)
         self.out_gain.currentIndexChanged.connect(self._recalc)
@@ -315,6 +319,30 @@ class SuggestedTab(QtWidgets.QWidget):
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "DDE error", f"Failed to send: {e}"); return
         QtWidgets.QMessageBox.information(self, "Sent", "Amplitude Ki (Edit24) and Kp (Edit32) sent.")
+
+    def read_from_sxm(self, quiet: bool = False) -> bool:
+        """Q and f0 from the DNC status bar (last sweep) and the AFL output gain, as SXM shows them."""
+        readout = None
+        if self.reader is not None:
+            try:
+                readout = self.reader.read()
+            except Exception:
+                readout = None
+        q = readout.get("q") if readout else None
+        f0 = readout.get("f_peak") if readout else None
+        if q is None or f0 is None:
+            if not quiet:
+                why = "" if readout is None else "\n\n" + (readout.errors.get("q") or readout.errors.get("f_peak") or "")
+                QtWidgets.QMessageBox.warning(self, "Read from SXM",
+                                              "Q / fPeak could not be read from the DNC window. Is SXM running, "
+                                              "with a resonance sweep done?" + why)
+            return False
+        idx = self.out_gain.findData(readout.get("afl_output_gain"))
+        if idx >= 0:
+            self.out_gain.setCurrentIndex(idx)
+        self.q_val.setValue(q)
+        self.f0_val.setValue(f0)
+        return True
 
     # ------------------------------------------------------------------
     def _load_spectrum(self):

@@ -1,11 +1,16 @@
 # sxm_ncafm_control/connection.py
 from .dde_client import RealDDEClient, MockDDEClient
 from .device_driver import SXMIOCTL
+from .sxm_state import make_reader
 from . import common
 class SXMConnection:
     """
-    Holds both DDE and IOCTL handles.
+    Holds both DDE and IOCTL handles, plus the SXM GUI read-back (`reader`).
     If offline, provides mock fallbacks.
+
+    `reader` (sxm_state.SXMReader) holds no handle: it queries the SXM windows on
+    each read, so it works whenever SXM is running, independent of DDE and IOCTL.
+    It is None only if the bridge cannot be loaded at all.
 
     Both underlying resources are Windows handles that can go stale over a
     long-running session (SXM host restarted, driver reset, USB hiccup)
@@ -15,6 +20,7 @@ class SXMConnection:
     def __init__(self):
         self.dde = None
         self.driver = None
+        self.reader = make_reader()
         self._connect()
 
     def _connect(self):

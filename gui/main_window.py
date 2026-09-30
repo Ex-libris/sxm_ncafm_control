@@ -132,14 +132,15 @@ class MainWindow(QtWidgets.QWidget):
         self.tabs = QtWidgets.QTabWidget()
 
         # Create all tabs, sharing the same connection handles
-        self.params_tab = ParamsTab(conn.dde)
-        self.step_tab = StepTestTab(conn.dde)
+        self.params_tab = ParamsTab(conn.dde, reader=conn.reader)
+        self.step_tab = StepTestTab(conn.dde, reader=conn.reader)
         self.scope_tab = ScopeTab(conn.driver)
         self.live_scope_tab = LiveScopeTab(conn.driver)
-        self.suggest_tab = SuggestedTab(conn.dde, self.params_tab)
+        self.suggest_tab = SuggestedTab(conn.dde, self.params_tab, reader=conn.reader)
         self.qplus_tab = QplusCalibrationTab(conn.dde)
         self.topo_hold_tab = ZConstAcquisition(conn.dde, conn.driver)
-        self.tuning_tab = TuningTab(conn.dde, conn.driver, scope_tab=self.scope_tab, params_tab=self.params_tab)
+        self.tuning_tab = TuningTab(conn.dde, conn.driver, scope_tab=self.scope_tab, params_tab=self.params_tab,
+                                    reader=conn.reader)
 
         # Link StepTest to Scope and Tabs
         self.step_tab.scope_tab = self.scope_tab
@@ -177,6 +178,9 @@ class MainWindow(QtWidgets.QWidget):
         self.apply_accessibility_to_all_tabs()
 
         self.update_connection_status()
+
+        # Start from what SXM shows, not from placeholders (quiet: SXM may not be running)
+        QtCore.QTimer.singleShot(0, lambda: self.params_tab.read_from_sxm(quiet=True))
 
     def update_connection_status(self):
         """Refresh the connection status label to reflect self.conn's current state."""

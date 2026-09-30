@@ -4,25 +4,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A PyQt5 desktop GUI for tuning NC-AFM (qPlus) loops on an **Anfatec SXM** SPM controller. It talks to the instrument over **two independent channels**:
+A PyQt5 desktop GUI for tuning NC-AFM (qPlus) loops on an **Anfatec SXM** SPM controller. It talks to the instrument over **two independent channels**, and reads SXM's parameters back through a third, passive one:
 
 | Channel | Module | Transport | Used for |
 |---|---|---|---|
 | **DDE** | `SXMRemote.py` → `dde_client.py` | Win32 DDEML (`user32`) to the running SXM software (service `SXM`, topic `Remote`) | Writing parameters (`EditNN`, DNC), setting Z, toggling feedback |
 | **IOCTL** | `device_driver.py` | `DeviceIoControl` on `\\.\SXM` (the Anfatec kernel driver), bypassing SXM software | Fast reads of any hardware channel (scope, live Z) |
+| **GUI read-back** | `sxm_state.py` → `AnfatecSXMBridge.py` | Read-only Win32 queries (`WM_GETTEXT`, `BM_GETCHECK`, ...) of the running `Femto_28_4.exe` windows | Reading the parameter values SXM shows (gains, DNC frequencies/Drive, Q, f0, time constants, ...) |
 
 Windows-only (pywin32 + ctypes on `user32`). `device_driver.py` imports `win32file` at module top, so even offline mode needs Windows + pywin32.
 
 ## Commands
 
-There is no build step or linter. The only tests are unit tests of the pure-logic `tuning/` package (stdlib `unittest`, no Qt or hardware; 58 tests, ~20 s). Run from the **parent** folder:
+There is no build step or linter. Tests are stdlib `unittest`, no hardware (Qt ones run offscreen; `test_sxm_state` fakes the SXM windows with a bridge backend). `test_hidpi` currently crashes the interpreter (PenScaling), and `test_tuning_tab.RunnerEndToEnd` has flaky timing asserts - both pre-existing. Run from the **parent** folder:
 
 ```bash
 PYTHONPATH=. python -m unittest discover -s sxm_ncafm_control/tests -v      # all
 PYTHONPATH=. python -m unittest sxm_ncafm_control.tests.test_metrics         # one module
 ```
 
-The GUI has no automated tests; it was smoke-tested offscreen (`QT_QPA_PLATFORM=offscreen`) with fake drivers.
+Beyond the tab tests, the full `MainWindow` is smoke-tested offscreen (`QT_QPA_PLATFORM=offscreen`) with SXM closed.
 
 ```bash
 # Setup (Python 3.11; conda recommended)
@@ -46,6 +47,7 @@ To exercise the GUI without hardware, just launch with SXM closed: the app falls
 - `conn.dde` — `RealDDEClient`, or `MockDDEClient` if anything raises
 - `conn.driver` — `SXMIOCTL`, or `None` if the driver can't be opened
 - `conn.is_offline` — true if either fell back
+- `conn.reader` — `sxm_state.SXMReader` (holds no handle; each `read()` queries the SXM windows), or `None` if the bridge cannot be imported. Independent of `is_offline`: it works whenever SXM is running.
 
 Fallback messages are printed by `common.offline_message()` (root `common.py`). Offline, the mock DDE client prints `[MOCK] ...` lines instead of sending, and tabs synthesize data when `driver is None` (Live Scope has no mock and just refuses to start).
 
@@ -58,7 +60,15 @@ Fallback messages are printed by `common.offline_message()` (root `common.py`). 
 
 How DDE commands work: `execute()` wraps the command in a Pascal program (`begin ... end.`) and sends `XTYP_EXECUTE`. SXM speaks Pascal, e.g. `ScanPara('Edit23', 0.08);`, `DNCPara(4, v);`, `SetChannel(0, v);`, `FeedPara('enable', 1);`, `a:=GetChannel(0); writeln(a);`. Replies arrive asynchronously through the **advise callback** (`Scan`, `Command`, `SaveFileName`, `ScanLine`, `MicState`, `SpectSave` items are subscribed); `SendWait`/`GetChannel` set `NotGotAnswer=True` and spin on `loop()` (a blocking `GetMessageW`) until the callback clears it. This runs **on the calling thread with no overall timeout** — a missing SXM reply hangs the GUI. Numeric replies use decimal commas and the value is on the second line (`BackStr[1]`). `StartMsgLoop`/`MyMsgClass` exist but are unused.
 
-SXM parameters are effectively **write-only**; `BaseDDE._last` caches the last value written per `(ptype, pcode)` so the UI can show something.
+SXM parameters are **write-only over DDE**; `BaseDDE._last` caches the last value written per `(ptype, pcode)`. Reading goes through `sxm_state.py` instead (below).
+
+### GUI read-back (`sxm_state.py`)
+- `AnfatecSXMBridge.py` is a **copy**: the master is `dev/anfatec_code/AnfatecSXMBridge.py` and the copy is overwritten from it by the sync script. Don't edit it here; app-level mapping belongs in `sxm_state.py`.
+- `SXMReader.read()` reads every bridge section once (bridge `strict=False`) and returns an `SXMReadout`: `values[key]` (None when not readable, reason in `errors[key]`), `by_code(ptype, pcode)` for `PARAMS_BASE` codes, `raw` (the whole bridge snapshot: scan, lock-in, spectroscopy, ...), `ok` (anything read at all). Keys are the `PARAMS_BASE` keys plus extras (`afl_output_gain`, `dnc_time_constant_s`, `amp_tau_s`, `q`, `f_peak`, `ring_down_s`, `feedback_off`, ...; see `LABELS`).
+- The DNC window's four numeric edits have no captions and are mapped **by screen position** as DNC 1..4 = sweep start, sweep stop, `use`, Drive (any other count -> error, never a guess). This order matches the layout and values but is **not yet confirmed on the hardware** (write `DNCPara(3, ...)` and see that only `used_freq` moves).
+- Custom `EditXX` rows cannot be read: the Delphi component names are not visible through Win32.
+- Values are in SXM's GUI units, same as DDE writes. Reads run on the GUI thread (each query has a 250 ms timeout).
+- Used by: `ParamsTab` ("Read from SXM" fills *Current*; each apply is read back ~400 ms later and a value SXM did not take is marked red and logged; "All SXM Values..." dialog; one quiet read at startup), `TuningTab` ("Read from SXM" fills Kp/Ki, the stepped value, output gain - without triggering the Kp/Ki auto-rescale -, TimeConstant, Tau, f0/Q; every run compares the baseline with SXM before writing, and checks the restore afterwards), `StepTestTab` ("= SXM value" for Base), `SuggestedTab` (Q/f0/output gain from the DNC status bar).
 
 ### IOCTL layer (`device_driver.py`)
 - `SXMIOCTL` opens `\\.\SXM` (share mode 0, so **one handle for the whole app** — pass `conn.driver` around, never open a second). One instance is used concurrently by capture threads and GUI timers, and reuses a single input buffer, so `read_raw`/`write_raw` are serialized by `_io_lock`; keep any new driver call inside it. `read_raw(index)` → signed 32-bit via `IOCTL_GET_KANAL` (0xF0D); `read_scaled(name)` multiplies by the scale from `CHANNELS`. `write_raw` uses `IOCTL_SET_CHANNEL` (0xF18); `write_unit` currently hard-codes DAC 0 (Topo) regardless of the name passed.
@@ -73,8 +83,8 @@ Amp Ref `Edit23`, Amp Ki `Edit24`, Amp Kp `Edit32`, PLL Kp `Edit27`, PLL Ki `Edi
 
 ### GUI (`gui/`)
 `MainWindow` (a `QWidget`, not `QMainWindow`) creates the tabs and does all cross-tab wiring:
-- `ParamsTab(dde)` — table Previous/Current/New; stage → apply; save/load "tune" JSON (`kind: "ncafm_tune"`); user-added `EditXX` rows. Emits `custom_params_changed` → `StepTestTab.set_custom_params`.
-- `StepTestTab(dde)` — QTimer-driven low/high square wave on one parameter. Holds direct refs to the scope and tab widget; triggers `ScopeTab.start_capture(npoints_override=...)` sized from the test duration, and hands it `(QDateTime, label)` events via `set_event_markers()` for overlay. `ScopeTab.set_test_tab_reference()` links back for "Repeat Test". Optional "Return to base value": since SXM values can't be read back, `Base` is an explicit field that follows the Low/High midpoint until edited. With it on, the last step is held one full period (an extra final tick writes the base), and `stop()` writes the base if at least one step was sent. All sends go through `_send_value()` (voltage guard, log, scope event).
+- `ParamsTab(dde, reader)` — table Previous/Current/New; stage → apply; save/load "tune" JSON (`kind: "ncafm_tune"`); user-added `EditXX` rows. Emits `custom_params_changed` → `StepTestTab.set_custom_params`.
+- `StepTestTab(dde)` — QTimer-driven low/high square wave on one parameter. Holds direct refs to the scope and tab widget; triggers `ScopeTab.start_capture(npoints_override=...)` sized from the test duration, and hands it `(QDateTime, label)` events via `set_event_markers()` for overlay. `ScopeTab.set_test_tab_reference()` links back for "Repeat Test". Optional "Return to base value": `Base` is an explicit field that follows the Low/High midpoint until edited or read from SXM ("= SXM value"). With it on, the last step is held one full period (an extra final tick writes the base), and `stop()` writes the base if at least one step was sent. All sends go through `_send_value()` (voltage guard, log, scope event).
 - `ScopeTab(driver)` — one-shot capture: `CaptureThread` (QThread) reads two channels back-to-back for N samples as fast as the driver allows; there is no fixed sample rate, it is measured afterwards (samples / wall time) and shown in the status line. Plot is downsampled above 100k points, export keeps the full data. `estimate_capture_npoints(duration_s)` sizes a capture from the last measured rate. Events past the end of the capture are skipped, not clamped. Step-test overlays are dashed lines only by default (value in the hover tooltip); "Marker labels" / "Step markers" checkboxes toggle text and lines. Synthetic signals if `driver is None`.
 - `LiveScopeTab(driver)` — separate tab (not a mode of `ScopeTab`): `LiveCaptureThread` never stores raw samples: it reduces the read stream, per ~1 ms of wall time, to one `(t, min, max)` record per channel in a fixed ring (24 MB = 10 min, `MAX_WINDOW_S`). The plot draws min/max envelopes (`_envelope`, ≤1500 columns), so spikes survive any window, and record timestamps give an exact time axis. The window (1 s–10 min) is only a *view* — changeable while running; changing a channel restarts the thread. The GUI reads the ring without a lock, by design (display only); the writer publishes `rec_count` last.
 - `SuggestedTab(dde, params_tab)` — calculator from Q, f₀, PLL bandwidth, plus Lorentzian fit (`scipy.curve_fit`) of a loaded spectrum; can stage into `ParamsTab.stage_value()` or send directly. Only amplitude Ki (Edit24) / Kp (Edit32) are staged/sent. **Derived** (physics): resonator bandwidth f₀/Q and ring-down Q/(π·f₀). **Rules of thumb from the Scienta Omicron QPlus NC-AFM manual** (local PDF in `manuals/`, not tracked; gains are in arbitrary SXM units): amplitude Ki = 5e8/Q at ±1 V AFL output gain (×10 per decade lower gain), Kp = 1e4·Ki; AFL `Tau` = Q/(100·f₀) s = 10·Q/f₀ **ms** (SXM's Tau is a discrete dropdown); PLL `DNC TimeConstant` = 1/(10·BW_PLL). The manual also gives PLL starting values (Kp ≈ −50…−200, Ki ≈ 100·Kp, both negative) that this tab does not suggest yet. Spectrum files (`_read_spectrum_file`) may be tab/space/`;`/`,`-separated, with decimal commas and title/`#` lines.
@@ -89,7 +99,7 @@ Groundwork for a guided PLL / amplitude-loop autotuner (goal and manual protocol
 - `simulator.py` — virtual qPlus + 2-stage lock-in + PI (`simulate_pll`, `run_step_trial`, `SimulatedPLLBackend`). **`SXMScale` (raw → physical gain) is an assumption** tuned so Kp=-100 with Ki=-1e3/-1e4/-5e4 reproduces the manual's slow/good/overshoot figure; its absolute time scale is a guess. Assumes Q≈f₀≈25k. In this model Kp does the fast df tracking against the sensor's slow pole (ring-down Q/(π·f₀) ≈ 0.3 s) while Ki only removes the residual — visible as the *Phase* tail — so both channels must be scored; df noise ∝ gain^~1.0 and ∝ 1/√(lock-in τ), i.e. the DNC `TimeConstant` is a third noise knob (not yet searched).
 - `identify.py` — `identify_scale` fits `SXMScale` from real trials at known gains (sign-convention independent); the identified model then predicts untested gains. Verified only on simulator data so far.
 - `planner.py` — `ScanSpec` (pixel dwell = t_line/n_px; rise ≤ ½ dwell, 5 % settle ≤ 1 dwell, overshoot ≤ 10 %, Phase decay ≤ 10 % of a line — all adjustable rules of thumb), `analyze_trial`, and `GuidedTuner`: a generator (`proposals()`; call `record()`/`skip()` after each) running baseline → Ki:Kp ratio scan → scale along the ratio → geometric bisection → verify, bounded by `Limits`. It picks the lowest-noise feasible gains; when none are feasible it reports the cleanest response and which constraint fails. Offline demo: `run_guided(GuidedTuner(-100, -1e4, ScanSpec(...)), SimulatedPLLBackend())`.
-- **Not written yet:** the hardware backend (`run_trial(kp, ki) -> TrialResult` via DDE writes + IOCTL capture) and the GUI tab. DDE calls must stay on the GUI thread (they block in `GetMessage`), so the tuner has to be driven by a `QTimer` state machine; only capture may use a worker thread. SXM parameters cannot be read back (`GetScanPara` does not work that way), so the baseline must be typed in / remembered by the app.
+- **Not written yet:** the hardware backend (`run_trial(kp, ki) -> TrialResult` via DDE writes + IOCTL capture) and the GUI tab. DDE calls must stay on the GUI thread (they block in `GetMessage`), so the tuner has to be driven by a `QTimer` state machine; only capture may use a worker thread. SXM parameters cannot be read back over DDE (`GetScanPara` does not work that way); the baseline comes from `sxm_state` or is typed in.
 
 ### Gotchas
 - `MainWindow` sets `step_tab.scope_tab_index = 2` (hard-coded); reordering tabs breaks the "jump to Scope" behaviour.

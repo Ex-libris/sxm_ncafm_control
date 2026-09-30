@@ -6,7 +6,7 @@ Workflow (the manual's, made systematic)
 1. Define the test: which loop, the step (PLL: +-1 Hz on ``DNC use``; amplitude: +-10 % on ``Ref``),
    hold time, number of events. The channels recorded are implied by the loop
    (PLL: ``df`` + ``Phase``; amplitude loop: ``QPlusAmpl`` + ``Drive``).
-2. Enter the known-good baseline gains (SXM cannot be read back, so the tab needs them).
+2. Enter the known-good baseline gains, or "Read from SXM" (read-only query of the SXM windows).
 3. Set the target: an imaging scan (line time, pixels) or a response time.
 4. Run one test, or screen a log-spaced grid around the baseline indexed by **Speed** (Kp and Ki raised or
    lowered together, same ratio) and **Shape** (the Ki:Kp ratio, shifted relative to the baseline's): every
@@ -558,8 +558,8 @@ or is aborted.</p>
 <ol>
 <li><b>Test</b> (left, 1): pick the loop. The defaults follow the manual. Every number field accepts scientific notation
 (type <code>2.5e8</code>) and shows large or small values that way.</li>
-<li><b>Baseline</b> (left, 2): type the Kp / Ki that are set in SXM right now. SXM cannot be read back, so this is
-what every change is measured against and what is restored afterwards.</li>
+<li><b>Baseline</b> (left, 2): press <b>Read from SXM</b>, or type the Kp / Ki that are set in SXM right now. This is
+what every change is measured against and what is restored afterwards; each run checks it against SXM again.</li>
 <li><b>Target</b> (left, 3): your scan (line time, pixels) or a response time. It sets the limits used for the verdict.</li>
 <li><b>Before running</b> (left, 5): tick every item. Only then are the run buttons enabled.</li>
 <li><b>Run single test (baseline)</b>: measures the loop as it is now. The verdict, the measured times and the suggested
@@ -634,9 +634,10 @@ class TuningTab(QtWidgets.QWidget):
     LEAD_S = 1.0            # settled recording before the first event
     TAIL_S = 0.5            # recording after the last event's hold
 
-    def __init__(self, dde, driver, scope_tab=None, params_tab=None, parent=None):
+    def __init__(self, dde, driver, scope_tab=None, params_tab=None, reader=None, parent=None):
         super().__init__(parent)
         self.dde, self.driver = dde, driver
+        self.reader = reader                     # sxm_state.SXMReader (SXM GUI read-back) or None
         self.scope_tab, self.params_tab = scope_tab, params_tab
         self.runner: Optional[TuningRunner] = None
         self.maps: List[W.ScreeningMap] = []
@@ -751,8 +752,14 @@ class TuningTab(QtWidgets.QWidget):
         lv.addWidget(g)
 
         # 2. baseline
-        g = QtWidgets.QGroupBox("2. Baseline (currently set in SXM - it cannot be read back)")
+        g = QtWidgets.QGroupBox("2. Baseline (currently set in SXM)")
         f = QtWidgets.QFormLayout(g)
+        self.btn_read_sxm = QtWidgets.QPushButton("Read from SXM")
+        self.btn_read_sxm.setToolTip("Fills the fields from what the SXM windows show now (read-only): Kp/Ki of this "
+                                     "loop, the stepped value (DNC use / Amplitude Ref), output gain, DNC TimeConstant, "
+                                     "Amplitude Tau, and f0 / Q from the DNC status bar (last sweep).")
+        self.btn_read_sxm.clicked.connect(lambda: self.read_from_sxm())
+        f.addRow(self.btn_read_sxm)
         self.kp_spin = self._spin(-1e12, 1e12, -100.0, 4, sci_above=1e4)      # raw gains span decades: 1e4 and up in e-notation
         self.ki_spin = self._spin(-1e12, 1e12, -1e4, 4, sci_above=1e4)
         f.addRow("Kp:", self.kp_spin)
@@ -1412,7 +1419,75 @@ class TuningTab(QtWidgets.QWidget):
         self._refresh_table()
         self._update_enabled()
 
-    # -- baseline confirmation (SXM cannot be read back, so this is what gets restored) --------------
+    # -- SXM read-back ----------------------------------------------------------------------------
+    def _read_sxm(self):
+        """An SXMReadout, or None (no reader, or the read raised). Never raises."""
+        if self.reader is None:
+            return None
+        try:
+            readout = self.reader.read()
+        except Exception as e:
+            self._log(f"Read from SXM failed: {e}")
+            return None
+        return readout if readout.ok else None
+
+    def read_from_sxm(self, quiet: bool = False) -> bool:
+        """Fill the test / baseline fields from the SXM GUI. Returns True if the loop's Kp and Ki were read."""
+        readout = self._read_sxm()
+        if readout is None:
+            self._log("Read from SXM: nothing readable (is SXM running?)")
+            if not quiet:
+                QtWidgets.QMessageBox.warning(self, "Read from SXM", "Could not read SXM. Is it running with its "
+                                              "DNC and scan-parameter windows open?")
+            return False
+        ld = self.loop_def
+        got, missed = [], []
+
+        def fill(label, value, setter):
+            if value is None:
+                missed.append(label)
+            else:
+                setter(value)
+                got.append(f"{label}={value:.6g}")
+
+        # the output gain first, without its automatic Kp/Ki rescale: the gains read below are already
+        # the ones SXM uses at this gain.
+        gain = readout.get("afl_output_gain")
+        idx = self.gain_combo.findData(gain) if gain is not None else -1
+        if idx >= 0:
+            self._last_gain_v = gain
+            self.gain_combo.setCurrentIndex(idx)
+            got.append(f"output gain=+-{gain:g} V")
+        else:
+            missed.append("output gain")
+        kp_key, ki_key = ("pll_kp", "pll_ki") if ld.key == "pll" else ("amp_kp", "amp_ki")
+        kp, ki = readout.get(kp_key), readout.get(ki_key)
+        fill("Kp", kp, self.kp_spin.setValue)
+        fill("Ki", ki, self.ki_spin.setValue)
+        fill("use" if ld.key == "pll" else "Ref", readout.by_code(*ld.step_param), self.base_spin.setValue)
+        tc = readout.get("dnc_time_constant_s")
+        fill("TimeConstant (ms)", None if tc is None else tc * 1e3, self.li_spin.setValue)
+        tau = readout.get("amp_tau_s")
+        fill("Tau (ms)", None if tau is None else tau * 1e3, self.tau_spin.setValue)
+        fill("f0", readout.get("f_peak"), self.f0_spin.setValue)
+        fill("Q", readout.get("q"), self.q_spin.setValue)
+        self._log("Read from SXM: " + ", ".join(got) + (f". Not read: {', '.join(missed)}" if missed else ""))
+        self._update_hint()
+        return kp is not None and ki is not None
+
+    def _sxm_gain_mismatch(self, kp: float, ki: float) -> str:
+        """'' when SXM shows this Kp/Ki (or cannot be read), otherwise a line saying what SXM shows."""
+        readout = self._read_sxm()
+        if readout is None:
+            return ""
+        kp_s, ki_s = readout.by_code(*self.loop_def.kp_param), readout.by_code(*self.loop_def.ki_param)
+        if kp_s is None or ki_s is None:
+            return ""
+        if math.isclose(kp_s, kp, rel_tol=1e-6) and math.isclose(ki_s, ki, rel_tol=1e-6):
+            return ""
+        return f"SXM currently shows Kp = {kp_s:.6g}, Ki = {ki_s:.6g}."
+
+    # -- baseline confirmation (this is what gets restored) ----------------------------------------
     @staticmethod
     def _baseline_settings() -> QtCore.QSettings:
         return QtCore.QSettings("SXM-NCAFM", "TuningTab")
@@ -1437,17 +1512,24 @@ class TuningTab(QtWidgets.QWidget):
         current loop, proceed silently - this is what keeps 'Narrow search' (two internal runs per
         round) and repeated manual runs at an unchanged baseline from re-prompting every time. A
         genuinely new or edited baseline always asks, since this is what gets written back to SXM
-        when the run stops or aborts, and SXM cannot be read back to check it independently.
+        when the run stops or aborts. When SXM can be read and shows other gains, the dialog says so.
         """
         loop_key = self.loop_def.key
+        mismatch = self._sxm_gain_mismatch(kp, ki)       # checked every run: SXM may have been edited by hand
         confirmed = self._confirmed_baseline.get(loop_key)
-        if confirmed is not None and math.isclose(confirmed[0], kp, rel_tol=1e-9) and math.isclose(confirmed[1], ki, rel_tol=1e-9):
+        if (not mismatch and confirmed is not None and math.isclose(confirmed[0], kp, rel_tol=1e-9)
+                and math.isclose(confirmed[1], ki, rel_tol=1e-9)):
             return True
         box = QtWidgets.QMessageBox(self)
-        box.setIcon(QtWidgets.QMessageBox.Question)
+        box.setIcon(QtWidgets.QMessageBox.Warning if mismatch else QtWidgets.QMessageBox.Question)
         box.setWindowTitle("Confirm baseline")
-        box.setText(f"Will restore Kp = {kp:.4g}, Ki = {ki:.4g} when this run ends or is stopped.\n\n"
-                   "This must match what is actually set in SXM right now - it cannot be read back.")
+        if mismatch:
+            box.setText(f"Will restore Kp = {kp:.4g}, Ki = {ki:.4g} when this run ends or is stopped.\n\n"
+                        f"{mismatch} Use 'Read from SXM' if those are the good values, or proceed to restore "
+                        "the values typed here.")
+        else:
+            box.setText(f"Will restore Kp = {kp:.4g}, Ki = {ki:.4g} when this run ends or is stopped.\n\n"
+                        "This must match what is actually set in SXM right now.")
         box.setStandardButtons(QtWidgets.QMessageBox.Cancel | QtWidgets.QMessageBox.Ok)
         box.setDefaultButton(QtWidgets.QMessageBox.Ok)
         mgr = self._accessibility_manager()
@@ -1587,6 +1669,14 @@ class TuningTab(QtWidgets.QWidget):
 
     def _on_run_finished(self, reason):
         self._log(f"run {reason}")
+        if self.runner is not None and self.reader is not None:     # confirm the restore landed in SXM
+            kp, ki = self.runner.baseline
+
+            def check():
+                mismatch = self._sxm_gain_mismatch(kp, ki)
+                if mismatch:
+                    self._log(f"WARNING: baseline Kp = {kp:.6g}, Ki = {ki:.6g} was restored, but {mismatch}")
+            QtCore.QTimer.singleShot(400, check)
         self._update_enabled()
         self._paint_map()
         if self._narrow_active:

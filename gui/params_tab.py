@@ -9,12 +9,15 @@ Features:
     - Supports adding custom EditXX parameters dynamically.
     - Allows staging, saving, loading, and applying "tunes".
     - Provides Apply Selected, Auto-Send, logging, and safety checks.
+    - "Read from SXM" fills Current with what the SXM GUI shows (sxm_state.SXMReader);
+      after every apply the row is read back to confirm SXM took the value.
 
 All parameter changes are sent via the shared DDE client provided
 by SXMConnection at startup.
 """
 
 import json
+import math
 import datetime
 from typing import List, Tuple, Dict, Any
 from PyQt5 import QtWidgets, QtCore, QtGui
@@ -29,6 +32,21 @@ from ..common import (
     append_log_line,
     format_number,
 )
+from ..sxm_state import LABELS
+
+READABLE_KEYS = {k for (k, *_r) in PARAMS_BASE}     # custom EditXX rows have no GUI mapping
+
+
+def _leaf_items(value, prefix=""):
+    """('Lia1.Phase', 150.0) pairs for a nested bridge section."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            yield from _leaf_items(v, f"{prefix}.{k}" if prefix else str(k))
+    elif isinstance(value, list) and any(isinstance(v, dict) for v in value):
+        for i, v in enumerate(value):
+            yield from _leaf_items(v, f"{prefix}.{i}")
+    else:
+        yield prefix, value
 
 
 class ParamsTab(QtWidgets.QWidget):
@@ -44,7 +62,7 @@ class ParamsTab(QtWidgets.QWidget):
 
     custom_params_changed = QtCore.pyqtSignal(list)
 
-    def __init__(self, dde, parent=None):
+    def __init__(self, dde, reader=None, parent=None):
         """
         Initialize the Parameters tab.
 
@@ -52,11 +70,18 @@ class ParamsTab(QtWidgets.QWidget):
         ----------
         dde : object
             DDE client handle (real or mock), provided by SXMConnection.
+        reader : sxm_state.SXMReader, optional
+            SXM GUI read-back; None disables reading.
         parent : QWidget, optional
             Parent widget.
         """
         super().__init__(parent)
         self.dde = dde
+        self.reader = reader
+        self._readback_timer = QtCore.QTimer(self)
+        self._readback_timer.setSingleShot(True)
+        self._readback_timer.timeout.connect(lambda: self.read_from_sxm(quiet=True))
+        self._pending_verify: Dict[int, float] = {}      # row -> value just sent, checked on the next read
         self._custom_params: List[Tuple[str, str, object, str, bool]] = []
 
         # --- Layout ---
@@ -74,6 +99,17 @@ class ParamsTab(QtWidgets.QWidget):
         self.btn_add_custom = QtWidgets.QPushButton("Add Custom EditXX…")
         self.btn_add_custom.clicked.connect(self._add_custom_editxx)
         toolbar.addWidget(self.btn_add_custom)
+
+        self.btn_read = QtWidgets.QPushButton("Read from SXM")
+        self.btn_read.setToolTip("Fill 'Current' with the values the SXM window shows now (read-only GUI query).\n"
+                                 "Custom EditXX rows cannot be read: SXM does not expose the Edit numbers.")
+        self.btn_read.clicked.connect(lambda: self.read_from_sxm())
+        toolbar.addWidget(self.btn_read)
+
+        self.btn_show_all = QtWidgets.QPushButton("All SXM Values…")
+        self.btn_show_all.setToolTip("Everything the SXM read-back can see, section by section.")
+        self.btn_show_all.clicked.connect(self.show_all_sxm_values)
+        toolbar.addWidget(self.btn_show_all)
 
         toolbar.addWidget(QtWidgets.QLabel())  # spacer
 
@@ -293,6 +329,101 @@ class ParamsTab(QtWidgets.QWidget):
         if self.log_widget.isVisible():
             code_text = pcode if ptype == "EDIT" else f"DNC{pcode}"
             self._append_log(f"{label} ({code_text}) ← {value}")
+
+        # Confirm from the SXM window shortly after (one read for several rows applied together)
+        if self.reader is not None and key in READABLE_KEYS:
+            self._pending_verify[row] = value
+            self._readback_timer.start(400)
+
+    # ---------- read-back ----------
+    def read_from_sxm(self, quiet: bool = False):
+        """
+        Fill 'Current' from the SXM GUI and return the SXMReadout (None if unavailable).
+        Rows applied since the last read are compared with what SXM now shows; a mismatch is
+        marked red and logged. ``quiet``: no message boxes (used by the automatic read-back).
+        """
+        pending, self._pending_verify = self._pending_verify, {}
+        if self.reader is None:
+            if not quiet:
+                QtWidgets.QMessageBox.information(self, "Read from SXM", "SXM read-back is not available.")
+            return None
+        try:
+            readout = self.reader.read()
+        except Exception as e:
+            self._append_log(f"Read from SXM failed: {e}")
+            if not quiet:
+                QtWidgets.QMessageBox.warning(self, "Read from SXM", f"Could not read SXM:\n{e}")
+            return None
+        if not readout.ok:
+            self._append_log("Read from SXM: nothing readable (is SXM running?)")
+            if not quiet:
+                QtWidgets.QMessageBox.warning(self, "Read from SXM",
+                                              "No values could be read. Is SXM running with its windows open?")
+            return readout
+
+        missing = []
+        for row, (key, _t, _c, label, _v) in enumerate(self._all_params()):
+            if key not in READABLE_KEYS:
+                continue
+            val = readout.get(key)
+            cell = self.table.item(row, 3)
+            if val is None:
+                missing.append(label)
+                cell.setToolTip(f"Not read: {readout.errors.get(key, 'unknown')}")
+                continue
+            cell.setText(format_number(val))
+            cell.setToolTip(f"Read from SXM at {readout.timestamp:%H:%M:%S}")
+            if row in pending:
+                if math.isclose(val, pending[row], rel_tol=1e-6, abs_tol=1e-9):
+                    cell.setBackground(QtGui.QColor("#e0e0e0"))
+                else:
+                    cell.setBackground(QtGui.QColor("#ffc9c9"))
+                    self._append_log(f"{label}: sent {pending[row]}, but SXM shows {val}")
+                    if not self.log_widget.isVisible():
+                        self.btn_show_log.setChecked(True)
+        self._append_log(readout.summary() + (f"; not read: {', '.join(missing)}" if missing else ""))
+        return readout
+
+    def show_all_sxm_values(self) -> None:
+        """Read-only dialog: every value the read-back sees, app keys first, then the raw bridge sections."""
+        if self.reader is None:
+            QtWidgets.QMessageBox.information(self, "SXM values", "SXM read-back is not available.")
+            return
+        try:
+            readout = self.reader.read()
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "SXM values", f"Could not read SXM:\n{e}")
+            return
+        rows = [("App", LABELS.get(k, k), v, readout.errors.get(k, "")) for k, v in readout.values.items()]
+        for section, data in readout.raw.items():
+            if "_error" in data:
+                rows.append((section, "", None, data["_error"]))
+                continue
+            rows.extend((section, path, v, "") for path, v in _leaf_items(data))
+
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle(f"SXM values ({readout.timestamp:%H:%M:%S})")
+        v = QtWidgets.QVBoxLayout(dlg)
+        table = QtWidgets.QTableWidget(len(rows), 3, dlg)
+        table.setHorizontalHeaderLabels(["Section", "Field", "Value"])
+        table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        for r, (section, path, val, err) in enumerate(rows):
+            if val is None:
+                text = err or "—"
+            else:
+                text = format_number(val) if isinstance(val, float) else str(val)
+            for c, t in enumerate((section, path, text)):
+                table.setItem(r, c, QtWidgets.QTableWidgetItem(t))
+            if val is None and err:
+                table.item(r, 2).setForeground(QtGui.QColor("#b00020"))
+        v.addWidget(table)
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close, parent=dlg)
+        btns.rejected.connect(dlg.reject)
+        v.addWidget(btns)
+        dlg.resize(700, 600)
+        dlg.exec_()
 
     # ---------- tune management ----------
     def _row_lookup_by_code(self) -> Dict[Tuple[str, str], int]:
