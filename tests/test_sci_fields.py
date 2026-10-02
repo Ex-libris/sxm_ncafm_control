@@ -128,13 +128,13 @@ class PlainFrequencyFields(unittest.TestCase):
 
     def test_tuning_tab_f0_keeps_mhz_resolution(self):
         tab = T.TuningTab(FakeInstrument(), FakeInstrument())
+        tab.override_check.setChecked(True)
         self.assertEqual(tab.f0_spin.text(), "25000.000 Hz")
         tab.f0_spin.lineEdit().setText("25132.457 Hz")
         tab.f0_spin.interpretText()
         self.assertEqual(tab.f0_spin.value(), 25132.457)                    # was rounded to 25132.5 with one decimal
         self.assertEqual(tab.f0_spin.text(), "25132.457 Hz")
-        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("afl"))
-        self.assertIn("f0=25132.457 Hz", tab.start_label.text())            # the label does not round it either
+        self.assertIn("25132.457 Hz", tab.instrument_label.text())          # the panel does not round it either
 
     def test_suggested_setup_f0(self):
         from sxm_ncafm_control.gui.suggested_tab import SuggestedTab
@@ -148,18 +148,18 @@ class PlainFrequencyFields(unittest.TestCase):
 class FieldsInTheTabs(unittest.TestCase):
     def test_tuning_tab_gain_fields(self):
         tab = T.TuningTab(FakeInstrument(), FakeInstrument())
+        tab.override_check.setChecked(True)
+        self.assertEqual((tab.kp_spin.text(), tab.ki_spin.text()), ("2e8", "2e4"))    # amplitude loop first
+        self.assertEqual((tab.kp_center.text(), tab.ki_center.text()), ("2e8", "2e4"))
+        tab.gain_combo.setCurrentIndex(tab.gain_combo.findData(0.1))
+        tab.btn_center_manual.click()
+        self.assertEqual((tab.kp_center.text(), tab.ki_center.text()), ("2e9", "2e5"))
+        tab.kp_center.lineEdit().setText("3.5e9")
+        tab.kp_center.interpretText()
+        self.assertEqual(tab.kp_center.value(), 3.5e9)
+        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("pll"))
         self.assertEqual((tab.kp_spin.text(), tab.ki_spin.text()), ("-100", "-1e4"))
         self.assertEqual(tab.base_spin.text(), "25000.0000")                # a frequency: fixed decimals
-        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("afl"))
-        self.assertEqual((tab.kp_spin.text(), tab.ki_spin.text()), ("2e8", "2e4"))
-        tab.gain_combo.setCurrentIndex(tab.gain_combo.findData(0.1))
-        tab.btn_fill.click()
-        self.assertEqual((tab.kp_spin.text(), tab.ki_spin.text()), ("2e9", "2e5"))
-        self.assertIn("Kp = 2e9", tab.start_label.text())
-        tab.kp_spin.lineEdit().setText("3.5e9")
-        tab.kp_spin.interpretText()
-        self.assertEqual(tab.kp_spin.value(), 3.5e9)
-        self.assertEqual(tab.range_spin.text(), "1000 x")
 
     def test_every_number_field_of_the_tuning_tab_takes_scientific_input(self):
         tab = T.TuningTab(FakeInstrument(), FakeInstrument())

@@ -160,33 +160,21 @@ class Tabs(unittest.TestCase):
         from sxm_ncafm_control.tests.fake_instrument import FakeInstrument
         rd, fake = reader()
         tab = T.TuningTab(FakeInstrument(), None, reader=rd)
-        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("afl"))
-        self.assertEqual(tab.gain_combo.currentData(), 1.0)
-        self.assertTrue(tab.read_from_sxm(quiet=True))
         self.assertEqual(tab.gain_combo.currentData(), 0.1)
-        self.assertEqual((tab.kp_spin.value(), tab.ki_spin.value()), (5e8, 5e4))   # as read, not x10
-        self.assertEqual(tab.base_spin.value(), 0.5)                                # AFL steps Ref
-        self.assertAlmostEqual(tab.tau_spin.value(), 2.0)
-        self.assertAlmostEqual(tab.li_spin.value(), 1.0)
-        self.assertEqual((tab.q_spin.value(), tab.f0_spin.value()), (148699.0, 25562.0))
-        self.assertEqual(tab._sxm_gain_mismatch(5e8, 5e4), "")
+        self.assertEqual(tab.baseline(), (5e8, 5e4))                                # as read, not x10
         fake.gui["amplitude"]["Ki"] = 7e4                                           # someone edits SXM by hand
-        self.assertIn("Ki = 70000", tab._sxm_gain_mismatch(5e8, 5e4))
-
-        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("pll"))
-        self.assertTrue(tab.read_from_sxm(quiet=True))
-        self.assertEqual((tab.kp_spin.value(), tab.ki_spin.value()), (-100.0, -1e4))
-        self.assertAlmostEqual(tab.base_spin.value(), 25562.49)                     # PLL steps DNC use
+        self.assertTrue(tab.refresh_from_sxm(quiet=True))
+        self.assertEqual(tab.baseline(), (5e8, 7e4))                                # the baseline follows SXM
+        self.assertIsNone(tab.reference)                                            # and its reference is re-measured
 
     def test_tuning_tab_without_sxm(self):
         from sxm_ncafm_control.gui import tuning_tab as T
         from sxm_ncafm_control.tests.fake_instrument import FakeInstrument
         tab = T.TuningTab(FakeInstrument(), None, reader=reader(broken=set(GUI))[0])
         kp = tab.kp_spin.value()
-        self.assertFalse(tab.read_from_sxm(quiet=True))
+        self.assertFalse(tab.refresh_from_sxm(quiet=True))
         self.assertEqual(tab.kp_spin.value(), kp)
-        self.assertEqual(tab._sxm_gain_mismatch(1.0, 2.0), "")              # unknown is not a mismatch
-        self.assertEqual(T.TuningTab(FakeInstrument(), None)._sxm_gain_mismatch(1.0, 2.0), "")
+        self.assertTrue(any("SXM not readable" in t for _, t in tab.checks()))
 
     def test_step_test_base_and_suggested_q_f0(self):
         from sxm_ncafm_control.gui.step_test_tab import StepTestTab

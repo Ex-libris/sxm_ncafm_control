@@ -81,3 +81,77 @@ class FakeInstrument:
             lp2 += a * (lp1 - lp2)
             integ += ki * lp2 * dt
         self._phi, self._lp1, self._lp2, self._integ = phi, lp1, lp2, integ
+
+
+class FakeAFLInstrument:
+    """
+    The amplitude loop in real time, behind the same DDE / driver calls: writes to Edit32 / Edit24 (Kp / Ki) and
+    Edit23 (Ref); ``read_raw`` returns ``QPlusAmpl`` / ``Drive`` in raw counts. Drive is an amplitude, so it is
+    clipped at zero (no anti-windup: the integral keeps running, as a plain PI would) - the behaviour that pins
+    Drive on fast down-steps. Physics as tests/sim.simulate_afl.
+    """
+
+    def __init__(self, ref=1.0, kp=2e8, ki=2e4, setup=None, scale=None, seed=0):
+        from sxm_ncafm_control.tests.sim import AFLScale, AFLSetup
+        self.setup = setup or AFLSetup(dt=2.5e-4)
+        self.scale = scale or AFLScale()
+        self.kp_raw, self.ki_raw, self.ref = float(kp), float(ki), float(ref)
+        self.writes = []
+        self._lock = threading.Lock()
+        self._rng = np.random.default_rng(seed)
+        s = self.setup
+        self._A = s.kappa * self.ref
+        self._integ = self._A / s.plant_gain
+        self._u = self._integ
+        self._af = self._lp1 = self._lp2 = self._A
+        self._t = time.perf_counter()
+        self._amp_idx, _, _, self._amp_scale = CHANNELS["QPlusAmpl"]
+        self._drv_idx, _, _, self._drv_scale = CHANNELS["Drive"]
+
+    def send_scanpara(self, code, value):
+        self.writes.append((code, float(value)))
+        if code == "Edit32":
+            self.kp_raw = float(value)
+        elif code == "Edit24":
+            self.ki_raw = float(value)
+        elif code == "Edit23":
+            self.ref = float(value)
+
+    def send_dncpara(self, index, value):
+        self.writes.append((f"DNC{index}", float(value)))
+
+    def read_raw(self, idx):
+        with self._lock:
+            self._advance()
+            if idx == self._amp_idx:
+                return int(round(self._lp2 / self._amp_scale))
+            if idx == self._drv_idx:
+                return int(round(self._u / self._drv_scale))
+            return 0
+
+    def _advance(self):
+        s = self.setup
+        dt = s.dt
+        now = time.perf_counter()
+        n = min(int((now - self._t) / dt), 4000)
+        if n <= 0:
+            return
+        self._t = now if n == 4000 else self._t + n * dt
+        kp, ki = self.kp_raw * self.scale.kp_per_raw, self.ki_raw * self.scale.ki_per_raw
+        gamma, g = s.gamma, s.plant_gain
+        a_tau = 1.0 - math.exp(-dt / s.tau)
+        a_li = 1.0 - math.exp(-dt / s.lockin_tau)
+        noise = self._rng.normal(0.0, s.amp_noise_rthz / math.sqrt(2.0 * dt), n)
+        A, integ, af, lp1, lp2, u = self._A, self._integ, self._af, self._lp1, self._lp2, self._u
+        target = s.kappa * self.ref
+        for k in range(n):
+            e = target - af
+            u = max(0.0, kp * e + integ)
+            A += dt * (-gamma * A + gamma * g * u)
+            A = max(-1e6, min(1e6, A))
+            meas = A + noise[k]
+            af += a_tau * (meas - af)
+            lp1 += a_li * (meas - lp1)
+            lp2 += a_li * (lp1 - lp2)
+            integ += ki * e * dt
+        self._A, self._integ, self._af, self._lp1, self._lp2, self._u = A, integ, af, lp1, lp2, u
