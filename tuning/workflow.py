@@ -12,9 +12,11 @@ The two tests are the manual's:
 
 * **PLL** - toggle ``DNC use`` by +-1 Hz around f_res and watch ``df`` and ``Phase``;
   ``df`` should be a rectangular, non-overshooting wave.
-* **Amplitude loop** - toggle the amplitude ``Ref`` by +-10 % and watch ``QPlusAmpl``
-  and ``Drive``; ``QPlusAmpl`` should be rectangular, ``Drive`` may overshoot but must
-  not saturate.
+* **Amplitude loop** - toggle the amplitude ``Ref`` and watch ``QPlusAmpl`` and ``Drive``;
+  ``QPlusAmpl`` should be rectangular, ``Drive`` may overshoot but must not saturate. The
+  manual steps by +-10 %; the default here is +-5 %, because Drive cannot go below zero: at
+  small amplitudes (steady Drive of a few tens of uV) a 10 % down-step with real gains pins
+  Drive at zero and the amplitude can only fall at the sensor's ring-down rate.
 
 The manual's tuning rule is built in: *find a good Ki:Kp ratio, then raise or lower
 both together to make the loop faster or slower*. In the map that is a move along a
@@ -58,7 +60,7 @@ PLL = LoopDef("pll", "PLL (df / Phase)", y_channel="Phase", u_channel="df", prim
               gain_sign=-1, relative_step=False, default_step=1.0, align_lead_s=0.006, typical_ratio=100.0)
 AFL = LoopDef("afl", "Amplitude feedback (QPlusAmpl / Drive)", y_channel="QPlusAmpl", u_channel="Drive",
               primary_channel="QPlusAmpl", kp_param=("EDIT", "Edit32"), ki_param=("EDIT", "Edit24"),
-              step_param=("EDIT", "Edit23"), gain_sign=+1, relative_step=True, default_step=0.10,
+              step_param=("EDIT", "Edit23"), gain_sign=+1, relative_step=True, default_step=0.05,
               align_lead_s=0.03, typical_ratio=1e-4)
 LOOPS = {"pll": PLL, "afl": AFL}
 
@@ -67,6 +69,14 @@ LOOPS = {"pll": PLL, "afl": AFL}
 # amplitude-loop starting values (manual, pp. 6-7)
 # ---------------------------------------------------------------------------
 AFL_OUTPUT_GAINS = (0.1, 1.0, 10.0)     # DNC 'Output Gain' ranges, +-V peak
+INPUT_GAINS = (1.0, 10.0)               # DNC 'Input Gain InA': 1 = +-7 V, 10 = +-0.7 V (manual)
+
+# Drive floor: Drive is an amplitude and cannot go below zero, so a loop that wants to pull the amplitude down
+# faster than the sensor rings down just switches Drive off. A sample counts as "at the floor" when Drive is below
+# DRIVE_FLOOR_LEVEL x its settled value before the first step; more than DRIVE_FLOOR_TIME_MAX of the test spent
+# there means the loop was on/off, not proportional (seen at 500-550 uV amplitude, steady Drive 10-20 uV).
+DRIVE_FLOOR_LEVEL = 0.1
+DRIVE_FLOOR_TIME_MAX = 0.02
 
 
 @dataclass(frozen=True)
@@ -269,6 +279,8 @@ class StepTestResult:
     secondary_rising: Optional[M.StepMetrics] = None
     secondary_falling: Optional[M.StepMetrics] = None
     drive_peak_abs: float = math.nan          # peak |Drive| during the transient, physical units
+    drive_floor_frac: float = math.nan        # fraction of the test (from the first event) with Drive at its zero floor
+    drive_settled: float = math.nan           # Drive before the first event (the level the floor is judged against)
     drive_rms_excursion: float = math.nan     # RMS(Drive - final) over the whole transient, not just the tail
     grid: Optional[np.ndarray] = None     # averaged responses (relative to the step), for plotting
     mean_primary: Optional[np.ndarray] = None
@@ -286,6 +298,25 @@ class StepTestResult:
     model: Optional[LoopModel] = None
     warnings: List[str] = field(default_factory=list)
     verdict: Optional["Verdict"] = None
+    meta: dict = field(default_factory=dict)  # instrument state when the test ran (SXM read-back), for export
+
+
+def drive_floor_fraction(t, drive, first_event: float, lead_s: float, level: float = DRIVE_FLOOR_LEVEL):
+    """
+    ``(fraction, settled)``: the share of samples from ``first_event`` on with Drive below ``level`` x the
+    settled Drive (median over the lead before the first event), and that settled value. ``(nan, nan)``
+    when there is no settled lead or the settled Drive is not positive.
+    """
+    t = np.asarray(t, float)
+    d = np.asarray(drive, float)
+    lead = (t > first_event - 0.6 * lead_s) & (t < first_event - 0.05)
+    after = t >= first_event
+    if lead.sum() < 10 or after.sum() < 10:
+        return math.nan, math.nan
+    settled = float(np.median(d[lead]))
+    if not settled > 0:
+        return math.nan, settled
+    return float(np.mean(d[after] <= level * settled)), settled
 
 
 def align_events(t, y, nominal, signs, expected_step, lead_s, search_pre=0.04, search_post=0.12):
@@ -436,6 +467,12 @@ def analyze_test(ct: CapturedTest, *, li_tau: Optional[float] = None, li_stages:
             res.error = None
     elif plan.loop == "afl" and "Drive" in det.names:
         drive_y = np.asarray(ct.channels[det.names["Drive"]], float)
+        res.drive_floor_frac, res.drive_settled = drive_floor_fraction(t, drive_y, nominal[0], plan.lead_s)
+        if not math.isnan(res.drive_floor_frac) and res.drive_floor_frac > DRIVE_FLOOR_TIME_MAX:
+            res.warnings.append(
+                f"Drive sat at its zero floor for {res.drive_floor_frac * 100:.0f} % of the test (settled Drive "
+                f"{res.drive_settled:.3g}): the loop switched Drive off instead of regulating, and the amplitude fell at "
+                "the ring-down rate. Lower both gains, or use a smaller step / larger amplitude.")
         _, dr, _, _ = M.average_steps(t, drive_y, aligned, pre_s, post_s, dt, signs=signs)
         res.mean_secondary = dr
         try:
@@ -563,6 +600,10 @@ def advise(res: StepTestResult, verdict: Verdict, target: Target) -> List[Sugges
     """
     kp, ki, c = res.kp, res.ki, verdict.category
     out: List[Suggestion] = []
+    if not math.isnan(res.drive_floor_frac) and res.drive_floor_frac > DRIVE_FLOOR_TIME_MAX:
+        out.append(Suggestion("scale_both", kp * 0.5, ki * 0.5,
+                              f"Drive was at zero for {res.drive_floor_frac * 100:.0f} % of the test: halve both gains "
+                              "(same ratio) so the loop regulates instead of switching Drive on and off."))
     if c == "lost":
         out.append(Suggestion("back_off", kp * 0.5, ki * 0.5, "Loop lost or unmeasurable: go back to the last good pair, or halve both gains."))
         out.append(Suggestion("new_pairing", kp * 0.5, ki * 0.25, "Or lower Ki more than Kp: a smaller integral term is the safer direction."))
@@ -580,7 +621,8 @@ def advise(res: StepTestResult, verdict: Verdict, target: Target) -> List[Sugges
         if res.primary is not None and not math.isnan(res.primary.rise_time) and target.rise_max > 0:
             need = res.primary.rise_time / target.rise_max
             f = float(np.clip(need, 1.25, hi))
-        more = f" About x{need:.0f} is needed: a Scale scan gets there faster." if need > hi else ""
+        sweep = "a scale sweep" if res.loop == "afl" else "a Scale scan"
+        more = f" About x{need:.0f} is needed: {sweep} gets there faster." if need > hi else ""
         out.append(Suggestion("scale_both", kp * f, ki * f,
                               f"Clean but too slow: raise both by x{f:.2f}, keeping the ratio (the manual's way to a faster loop)." + more))
     else:  # good
@@ -897,6 +939,7 @@ class SweepLimits:
     noise_jump_frac: float = 0.5          # Drive post-settling noise rise vs. the previous point: "substantial"
     settle_improve_min_frac: float = 0.10  # below this relative gain in 2 % settling, more scale stops helping
     saturation_frac: float = 0.9          # peak |Drive| at/above this fraction of the output-gain range: saturated
+    floor_time_frac: float = DRIVE_FLOOR_TIME_MAX   # Drive at its zero floor for more than this share of the test
 
 
 SCALE_TIER_LABEL = {"too_slow": "too slow", "acceptable": "acceptable",
@@ -943,6 +986,8 @@ def assess_scale_sweep(gs: Sequence[float], results: Sequence[StepTestResult], t
     Tier each point of a Kp:Ki-held-fixed scale sweep as too_slow / acceptable / near_optimum /
     too_aggressive and recommend a final scale, per the manual's rule: raise the common gain until
     Drive saturates, overshoot/ringing appears, or Drive noise rises substantially, then back off.
+    Drive hitting its *zero* floor counts as saturation too (the manual only names the top): the loop
+    is then switching, not regulating.
 
     Stops assessing once a point is ``too_aggressive`` - later (more aggressive) points in ``gs`` are
     not evaluated, matching that same stopping rule. ``output_gain_v`` is the selected DNC Output Gain
@@ -964,6 +1009,10 @@ def assess_scale_sweep(gs: Sequence[float], results: Sequence[StepTestResult], t
         if saturated:
             reasons.append(f"Drive reached {res.drive_peak_abs:.3g} V, >= {limits.saturation_frac * 100:.0f} % of "
                            f"the +-{output_gain_v:g} V output gain range")
+        at_floor = not math.isnan(res.drive_floor_frac) and res.drive_floor_frac > limits.floor_time_frac
+        if at_floor:
+            reasons.append(f"Drive at its zero floor for {res.drive_floor_frac * 100:.0f} % of the test "
+                           f"(limit {limits.floor_time_frac * 100:.0f} %)")
         overshoot_bad = res.primary.overshoot > target.overshoot_max or res.primary.n_extrema > target.max_extrema
         if overshoot_bad:
             reasons.append(f"overshoot {res.primary.overshoot * 100:.0f} % / {res.primary.n_extrema} ringing "
@@ -976,7 +1025,7 @@ def assess_scale_sweep(gs: Sequence[float], results: Sequence[StepTestResult], t
                 noise_jump = True
                 reasons.append(f"Drive noise rose {jump * 100:.0f} % vs. the previous point "
                                f"(limit {limits.noise_jump_frac * 100:.0f} %)")
-        if saturated or overshoot_bad or noise_jump:
+        if saturated or at_floor or overshoot_bad or noise_jump:
             points.append(ScalePoint(g, res.kp, res.ki, res, "too_aggressive", reasons))
             break
         settle = res.primary_2pct.settling_time if res.primary_2pct is not None else res.primary.settling_time

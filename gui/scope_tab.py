@@ -5,13 +5,20 @@ Scope tab (dual-channel oscilloscope view).
 Provides live capture of two SXM channels, plotting them against a shared
 time axis. Supports export of data to CSV/NumPy, and overlay of event
 markers from external test tabs.
+
+Every export carries the SXM settings read when the capture finished (sxm_state read-back, see
+metadata.py): a '#' block at the top of the CSV, a .json sidecar next to the data, a caption under
+the PNG, and the key values in the default file name.
 """
+
+import os
 
 import numpy as np
 from PyQt5 import QtWidgets, QtCore
 import pyqtgraph as pg
-import pyqtgraph.exporters
+from sxm_ncafm_control import metadata as MD
 from sxm_ncafm_control.device_driver import CHANNELS
+from .export_image import save_scene_png
 
 
 class CaptureThread(QtCore.QThread):
@@ -91,16 +98,20 @@ class CaptureThread(QtCore.QThread):
 class ScopeTab(QtWidgets.QWidget):
     """Dual-channel scope for SXM channels with shared time axis."""
 
-    def __init__(self, driver=None):
+    def __init__(self, driver=None, reader=None):
         """
         Parameters
         ----------
         driver : SXMIOCTL or None
             The shared IOCTL driver handle, provided by SXMConnection.
             Pass None to run in offline mode (mock data).
+        reader : sxm_state.SXMReader or None
+            SXM read-back, for the settings recorded with each capture. None: exports say so.
         """
         super().__init__()
         self.driver = driver
+        self.reader = reader
+        self.last_meta = None      # metadata.Metadata of the last capture (SXM settings at its end)
 
         self.capture_thread = None
         self.last_data1 = None
@@ -248,6 +259,7 @@ class ScopeTab(QtWidgets.QWidget):
         self.last_rate = None
         self.last_chan1 = None
         self.last_chan2 = None
+        self.last_meta = None
 
     def _force_clear_plots(self):
         """Clear all traces/markers from both plots.
@@ -302,8 +314,6 @@ class ScopeTab(QtWidgets.QWidget):
         idx1, _, unit1, scale1 = CHANNELS[chan1_name]
         idx2, _, unit2, scale2 = CHANNELS[chan2_name]
         npts = npoints_override if npoints_override is not None else self.npoints_spin.value()
-        self.last_chan1 = chan1_name
-        self.last_chan2 = chan2_name
 
         self._force_clear_plots()
 
@@ -321,6 +331,10 @@ class ScopeTab(QtWidgets.QWidget):
         self.status_label.setText("Capturing...")
 
         self._cleanup_data()
+        # after the cleanup, which resets them: set before it, every capture recorded chan1/chan2 = None
+        # (export header, file name, and the Tuning tab's channel detection all read these)
+        self.last_chan1 = chan1_name
+        self.last_chan2 = chan2_name
 
         if self.driver is not None:
             # Launch capture thread for both channels
@@ -378,6 +392,10 @@ class ScopeTab(QtWidgets.QWidget):
             self.plot1.plot(t_plot, data1_plot, pen=pen1, antialias=False)
             self.plot2.plot(t_plot, data2_plot, pen=pen2, antialias=False)
 
+            # the SXM settings this capture ran at (read now, at its end: reading at the start would
+            # delay the capture behind a Step Test that has already begun sending events)
+            self.last_meta = self._capture_metadata()
+
             # Update button states
             self.export_btn.setEnabled(True)
             self.start_btn.setEnabled(True)
@@ -405,52 +423,99 @@ class ScopeTab(QtWidgets.QWidget):
         if self.last_data1 is None or self.last_data2 is None:
             return
         
-        # Use last path or default filename
-        default_name = f"{self.last_chan1}_{self.last_chan2}_capture.csv"
+        default_name = self.default_export_name() + ".csv"
         if self.last_export_path:
-            import os
             default_name = os.path.join(os.path.dirname(self.last_export_path), default_name)
-            
+
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Export Data", default_name, 
+            self, "Export Data", default_name,
             "CSV Files (*.csv);;NumPy Files (*.npy)"
         )
         if not path:
             return
-            
+
         # Remember this path for next time
         self.last_export_path = path
-        
+
         try:
-            if path.endswith(".npy"):
-                # Save as structured array with both channels
-                data = np.column_stack((self.last_data1, self.last_data2))
-                np.save(path, data)
-            else:
-                t = np.arange(len(self.last_data1)) / max(self.last_rate, 1)
-                header = f"chan1={self.last_chan1}, chan2={self.last_chan2}, rate={self.last_rate:.2f} Hz"
-                np.savetxt(
-                    path,
-                    np.column_stack((t, self.last_data1, self.last_data2)),
-                    delimiter=",",
-                    header="time,channel1,channel2\n" + header,
-                    comments="",
-                )
-                
-            # Also save PNG screenshot of the plots
-            png_path = path.rsplit('.', 1)[0] + '.png'
-            try:
-                exporter = pg.exporters.ImageExporter(self.plot_widget.scene())
-                exporter.parameters()['width'] = 1200  # High resolution
-                exporter.export(png_path)
-                QtWidgets.QMessageBox.information(self, "Export", 
-                    f"Data saved to:\n{path}\n\nPlot image saved to:\n{png_path}")
-            except Exception as img_e:
-                QtWidgets.QMessageBox.information(self, "Export", 
-                    f"Data saved to:\n{path}\n\nNote: Could not save plot image: {img_e}")
-                    
+            written = self.export_to(path)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Export error", str(e))
+            return
+        QtWidgets.QMessageBox.information(self, "Export", "Saved:\n" + "\n".join(written))
+
+    # -- export helpers ----------------------------------------------------------------------------
+    def _channel_unit(self, name):
+        unit = CHANNELS[name][2] if name in CHANNELS else ""
+        return {"°": "deg", "*": "deg"}.get(unit, unit)
+
+    def _capture_metadata(self):
+        """SXM read-back now, plus what this capture was."""
+        n = len(self.last_data1) if self.last_data1 is not None else 0
+        rate = self.last_rate or 0.0
+        rows = [
+            ("Channels", f"{self.last_chan1} [{self._channel_unit(self.last_chan1)}] / "
+                         f"{self.last_chan2} [{self._channel_unit(self.last_chan2)}]", ""),
+            ("Samples", n, ""),
+            ("Rate (measured)", rate, "Hz"),
+            ("Duration", n / rate if rate > 0 else None, "s"),
+        ]
+        if self.capture_start_dt is not None:
+            rows.append(("Started", self.capture_start_dt.toString("yyyy-MM-dd HH:mm:ss.zzz"), ""))
+        if self.driver is None:
+            rows.append(("Data", "OFFLINE MOCK SIGNALS (no driver)", ""))
+        return MD.collect(self.reader, [("Capture", rows)])
+
+    def _export_metadata(self):
+        """The capture's metadata plus the Step Test events now attached to it (they arrive after the capture)."""
+        base = self.last_meta or self._capture_metadata()
+        meta = MD.Metadata(base.values, base.errors, base.timestamp, base.source)
+        meta.sections = list(base.sections)
+        if self._event_markers and self.capture_start_dt is not None:
+            rows = []
+            for dt, label in sorted(self._event_markers, key=lambda e: e[0].toMSecsSinceEpoch()):
+                rows.append((f"t = {self.capture_start_dt.msecsTo(dt) / 1000.0:.3f} s", label, ""))
+            meta.add_section("Step Test events", rows)
+        return meta
+
+    def default_export_name(self):
+        """``<date-time>_scope_<chan1>-<chan2>_<key settings>`` (no extension)."""
+        meta = self.last_meta or MD.Metadata.unavailable("none")
+        pll_first = {self.last_chan1, self.last_chan2} & {"df", "Phase"}
+        loops = ("pll", "afl") if pll_first else ("afl", "pll")
+        return meta.filename("scope", f"{self.last_chan1}-{self.last_chan2}", loops=loops)
+
+    def export_to(self, path):
+        """
+        Write the last capture to ``path`` (.csv or .npy), plus ``<stem>.json`` (settings, events, columns)
+        and ``<stem>.png`` (the plots with a settings caption). Returns the paths written.
+        """
+        meta = self._export_metadata()
+        stem = os.path.splitext(path)[0]
+        u1, u2 = self._channel_unit(self.last_chan1), self._channel_unit(self.last_chan2)
+        columns = ["time_s", f"{self.last_chan1}_{u1}", f"{self.last_chan2}_{u2}"]
+        written = [path]
+        if path.lower().endswith(".npy"):
+            # unchanged layout: the two channels as columns, no time column (rate is in the .json)
+            np.save(path, np.column_stack((self.last_data1, self.last_data2)))
+            columns = columns[1:]
+        else:
+            t = np.arange(len(self.last_data1)) / max(self.last_rate, 1)
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                f.write(MD.csv_preamble(meta.header_lines("SXM nc-AFM scope capture")))
+                f.write(",".join(columns) + "\n")
+                np.savetxt(f, np.column_stack((t, self.last_data1, self.last_data2)), delimiter=",")
+        written.append(MD.write_sidecar(stem + ".json", meta, {
+            "kind": "ncafm_scope_capture", "data_file": os.path.basename(path), "columns": columns,
+            "rate_hz": self.last_rate, "samples": int(len(self.last_data1)),
+        }))
+        png_path = stem + ".png"
+        try:
+            save_scene_png(self.plot_widget.scene(), png_path, meta.caption_lines())
+            written.append(png_path)
+        except Exception as img_e:
+            written.append(f"(plot image not saved: {img_e})")
+        return written
 
     def set_event_markers(self, events):
         """

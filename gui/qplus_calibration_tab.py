@@ -9,6 +9,7 @@ and exporting data.
 """
 
 import datetime
+import os
 import numpy as np
 from typing import List, Tuple, Optional
 from PyQt5 import QtWidgets, QtCore, QtGui
@@ -16,6 +17,7 @@ import pyqtgraph as pg
 from scipy import stats
 
 from ..common import confirm_high_voltage, append_log_line
+from .. import metadata as MD
 
 
 class QplusCalibrationTab(QtWidgets.QWidget):
@@ -49,10 +51,11 @@ class QplusCalibrationTab(QtWidgets.QWidget):
         Slope from linear regression in pm/mV.
     """
 
-    def __init__(self, dde, driver=None, parent=None):
+    def __init__(self, dde, driver=None, parent=None, reader=None):
         super().__init__(parent)
         self.dde = dde
         self.driver = driver
+        self.reader = reader          # sxm_state.SXMReader: SXM settings recorded with the export
 
         self.setWindowTitle("Q+ Amplitude Calibration")
         self.layout = QtWidgets.QVBoxLayout(self)
@@ -289,33 +292,33 @@ class QplusCalibrationTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.information(self, "No data", "Run a calibration first.")
             return
 
+        rows = [("Edit23 (Ref) range", f"{self.amp_start.value():.1f} to {self.amp_end.value():.1f}", "mV"),
+                ("Stabilization time", self.stab_time.value(), "s"),
+                ("Points", len(self.measurement_data), "")]
+        if self.calibration_factor is not None:
+            amps = [point[0] for point in self.measurement_data]
+            topo_changes = [point[1] for point in self.measurement_data]
+            _, _, r_value, _, _ = stats.linregress(amps, topo_changes)
+            rows += [("Calibration slope", self.calibration_factor, "pm/mV"), ("R^2", r_value ** 2, "")]
+        meta = MD.collect(self.reader, [("Calibration", rows)])
+        default = meta.filename("qplus-calibration", loops=("afl",)) + ".csv"
+
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save results", "qplus_calibration.csv", "CSV (*.csv)"
+            self, "Save results", default, "CSV (*.csv)"
         )
         if not path:
             return
 
         try:
-            with open(path, 'w') as f:
-                f.write(f"# Q+ Amplitude Calibration Results\n")
-                f.write(f"# Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write(f"# Edit23 Range: {self.amp_start.value():.1f} to {self.amp_end.value():.1f} mV\n")
-                f.write(f"# Stabilization Time: {self.stab_time.value():.1f} s\n")
-
-                if self.calibration_factor is not None:
-                    amps = [point[0] for point in self.measurement_data]
-                    topo_changes = [point[1] for point in self.measurement_data]
-                    _, _, r_value, _, _ = stats.linregress(amps, topo_changes)
-                    r_squared = r_value ** 2
-
-                    f.write(f"# Calibration slope (pm/mV): {self.calibration_factor:.3f}\n")
-                    f.write(f"# R²: {r_squared:.4f}\n")
-
-                f.write(f"#\n")
+            with open(path, 'w', encoding='utf-8', newline='') as f:
+                f.write(MD.csv_preamble(meta.header_lines("Q+ amplitude calibration")))
                 f.write("Edit23_mV,Topography_Change_pm\n")
 
                 for amp_mv, topo_pm in self.measurement_data:
                     f.write(f"{amp_mv:.1f},{topo_pm:.2f}\n")
+            MD.write_sidecar(path.rsplit('.', 1)[0] + ".json", meta, {
+                "kind": "ncafm_qplus_calibration", "data_file": os.path.basename(path),
+                "points": [{"edit23_mV": a, "topography_change_pm": z} for a, z in self.measurement_data]})
 
             QtWidgets.QMessageBox.information(self, "Export Complete",
                                               f"Calibration results exported to:\n{path}")

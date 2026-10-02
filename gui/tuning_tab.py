@@ -3,7 +3,8 @@ Tuning tab: guided screening of the PLL / amplitude-loop gains on the instrument
 
 Workflow (the manual's, made systematic)
 ----------------------------------------
-1. Define the test: which loop, the step (PLL: +-1 Hz on ``DNC use``; amplitude: +-10 % on ``Ref``),
+1. Define the test: which loop, the step (PLL: +-1 Hz on ``DNC use``; amplitude: +-5 % on ``Ref`` - the manual
+   says 10 %, but Drive cannot go below zero and a 10 % down-step at small amplitudes pins it there),
    hold time, number of events. The channels recorded are implied by the loop
    (PLL: ``df`` + ``Phase``; amplitude loop: ``QPlusAmpl`` + ``Drive``).
 2. Enter the known-good baseline gains, or "Read from SXM" (read-only query of the SXM windows).
@@ -14,7 +15,10 @@ Workflow (the manual's, made systematic)
    response; moving up (faster speed, same shape) makes the loop faster, down slower; moving sideways changes
    the shape. Click a cell for its averaged response and advice (higher / lower / different pairing), then
    refine around it (by hand, or with "Narrow search": one confirmed round of hardware writes at a time).
+   The amplitude loop does not use the map: it is tuned with a 1-D scale sweep (Ki:Kp fixed at the manual's
+   ratio, one common gain stepped up until Drive saturates, hits its zero floor, overshoots or gets noisy).
 5. "Analyze Scope capture" applies the same analysis to a step train already recorded in the Scope tab.
+6. "Export results" writes every test of the session (CSV + JSON) with the SXM settings it ran at.
 
 Safety: the loop is only driven inside limits around the baseline; a running test is aborted if the
 loop runs away (Phase beyond the limit, amplitude collapse); the baseline gains and the stepped
@@ -37,6 +41,7 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+from sxm_ncafm_control import metadata as MD
 from sxm_ncafm_control.device_driver import CHANNELS
 from sxm_ncafm_control.tuning import metrics as M
 from sxm_ncafm_control.tuning import workflow as W
@@ -520,7 +525,7 @@ CHECKLISTS = {
             "PLL: DNC Lockin Options > Acquire > Auto 0 deg is DISABLED", "Baseline Kp/Ki above match what is set in SXM"),
     "afl": ("Tip retracted / far from the surface", "PLL off (Kp = Ki = 0) and DNC 'use' = the free resonance f_res",
             "Amplitude feedback is ON: QPlusAmpl sits at Ref and Drive has settled",
-            "Baseline Kp/Ki, Ref and the output gain above match what is set in SXM"),
+            "Baseline Kp/Ki, Ref, output gain and input gain above match what is set in SXM"),
 }
 
 GUIDE_VERDICTS = (
@@ -597,24 +602,29 @@ or slower) and <b>shape</b> (the Ki:Kp <b>ratio</b>, shifted from the baseline's
 <li>Kp and Ki are SXM's raw units. Nothing here assumes what a value means: gains are judged only from measured responses.</li>
 </ul>
 
-<h3>Amplitude loop: gains that span decades</h3>
+<h3>Amplitude loop: one scale sweep</h3>
 <p>The manual's start is Ki &asymp; 5&middot;10<sup>8</sup>/Q and Kp &asymp; 10<sup>4</sup>&middot;Ki at DNC <i>Output Gain</i> &plusmn;1 V, and both
 are &times;10 for each range lower (&plusmn;1 V &rarr; &plusmn;0.1 V). So the same sensor needs 10&times; larger values at &plusmn;0.1 V, and
-different sensors differ by decades through Q. Steps of &times;2 cannot cover that.</p>
+different sensors differ by decades through Q. The amplitude loop is tuned along that one line: keep the manual's Ki:Kp ratio
+and find the common scale. (The map is for the PLL only.)</p>
 <ol>
-<li>Choose the <b>output gain you really use</b> (left, 2) and press <i>Use the manual's start values</i>. It fills Kp, Ki and Tau from
-Q, f0 and the gain, and the hold / settle times from the ring-down time Q/(&pi;f0) (this app's rule, not the manual's). Set the same values in SXM.</li>
-<li><b>Run scale scan</b>: tests the baseline, then both gains together in steps of the step factor (default &times;10, three down and three up).
-Ki:Kp stays; only the speed changes. It stops going further once a test loses the loop.</li>
-<li>Read the scan on the map: grey = still too slow, green = the right decade, orange / red = too high.</li>
-<li>Click the best cell and <i>Suggest / refine zoom</i> (or press <i>Narrow search</i> to fill-and-zoom in one click): a finer
-3&times;3 map in steps of &radic;(factor), which now also varies the shape. Repeat once more, then use single tests.</li>
-<li>Check the <b>Drive</b> line of each result: the manual asks you to avoid a strong (saturating) overshoot there, and Kp amplifies its noise.</li>
+<li>Press <b>Read from SXM</b>: it fills the output gain, the <b>input gain InA</b>, Ref, Tau, f0 and Q. Use the highest input gain
+that does not overload. Every run checks SXM's input gain against the one selected here and refuses to start if they differ,
+because QPlusAmpl and Drive are read with fixed scale factors.</li>
+<li>Press <i>Use the manual's start values</i> (fills Kp, Ki and Tau from Q, f0 and the gain; hold / settle from the
+ring-down time Q/(&pi;f0), this app's rule). Set the same values in SXM.</li>
+<li>Keep the step at <b>&plusmn;5 %</b> of Ref (the manual says 10 %). Drive cannot go below zero: with a larger down-step the
+loop switches Drive off and the amplitude can only fall at the ring-down rate, which no gain can speed up.</li>
+<li><b>Run scale sweep</b>: tests the scale list (default 0.25, 0.5, 1, 2, 4 &times; the baseline). It stops at the first point that
+saturates Drive, keeps Drive at <b>zero</b> for more than 2 % of the test, overshoots / rings beyond the target, or makes Drive much
+noisier, and recommends 60 % of that scale. The <i>Drive at 0 %</i> column shows the floor directly.</li>
+<li>Optionally check the ratio with single tests at the recommended scale and Ki &times;0.5 / &times;2, then <i>Stage in Params tab</i>.</li>
 </ol>
 <p><i>Max gain change vs baseline</i> (left, 4) limits how far from your baseline any test may go (default &times;1000 for this loop, &times;16 for the PLL).
-If the baseline warning above the results appears, check first that the output gain here matches the DNC window.</p>
+If the baseline warning above the results appears, check first that the output gain here matches the DNC window.
+<i>Export results</i> saves every test of the session with the SXM settings it ran at.</p>
 
-<h3>The Speed &times; Shape map (optional)</h3>
+<h3>The Speed &times; Shape map (PLL)</h3>
 <p>Runs one test per cell of a log-spaced grid around the baseline. The <b>vertical</b> axis is speed: Kp and Ki raised or
 lowered together (same ratio) - up is faster, down slower. The <b>horizontal</b> axis is shape: the Ki:Kp ratio shifted
 from the baseline's - right is more integral-heavy (higher Ki:Kp), left more proportional-heavy. The crosshair marks the
@@ -650,6 +660,9 @@ class TuningTab(QtWidgets.QWidget):
         self._sweep_gs: List[float] = []
         self._sweep_results: List[Optional[W.StepTestResult]] = []
         self._sweep_active = False
+        self.results_log: List[W.StepTestResult] = []     # every test of the session, in order, for export
+        self._run_meta: Optional[MD.Metadata] = None       # SXM settings read when the current run started
+        self._last_export_dir = ""
         self._build()
         self._on_loop_changed()
         self._paint_map()          # the clean empty state, not pyqtgraph's raw default axis
@@ -775,6 +788,16 @@ class TuningTab(QtWidgets.QWidget):
                                    "+-1 V -> +-0.1 V; +-10 V is the same rule extrapolated), preserving whatever "
                                    "multiplier you already have and the Ki:Kp ratio.")
         f.addRow(self.gain_label, self.gain_combo)
+        # both loops: QPlusAmpl / Drive are converted with fixed scale factors, so the input gain changes what they read
+        self.ina_label = QtWidgets.QLabel("Input gain InA (DNC):")
+        self.ina_combo = QtWidgets.QComboBox()
+        for v in W.INPUT_GAINS:
+            self.ina_combo.addItem(f"x{v:g}", v)
+        self.ina_combo.setToolTip("DNC window > Input Gain InA you intend to test at (manual: the highest gain that does "
+                                  "not overload, x10 = +-0.7 V). Every run reads SXM's value first and refuses to start "
+                                  "if it differs; it is recorded with each result. QPlusAmpl and Drive are converted "
+                                  "with fixed scale factors, so results at different input gains are not comparable.")
+        f.addRow(self.ina_label, self.ina_combo)
         self.start_label = QtWidgets.QLabel()
         self.start_label.setWordWrap(True)
         f.addRow(self.start_label)
@@ -834,10 +857,14 @@ class TuningTab(QtWidgets.QWidget):
         self.range_spin = self._spin(2.0, 1e6, 16.0, 0, 10.0, " x")
         self.range_spin.setToolTip("No test is written with a Kp or Ki more than this factor above or below the baseline "
                                    "(map, scale scan and suggested pairs).")
+        self._search_form = f
+        self._scan_pair = self._pair(self.scan_lo, self.scan_hi)
+        self._speed_pair = self._pair(self.speed_lo, self.speed_hi)
+        self._shape_pair = self._pair(self.shape_lo, self.shape_hi)
         f.addRow("Step factor:", self.factor_spin)
-        f.addRow("Scale scan steps down / up (speed):", self._pair(self.scan_lo, self.scan_hi))
-        f.addRow("Map: Speed steps down / up (slower / faster):", self._pair(self.speed_lo, self.speed_hi))
-        f.addRow("Map: Shape steps down / up (more P / more I):", self._pair(self.shape_lo, self.shape_hi))
+        f.addRow("Scale scan steps down / up (speed):", self._scan_pair)
+        f.addRow("Map: Speed steps down / up (slower / faster):", self._speed_pair)
+        f.addRow("Map: Shape steps down / up (more P / more I):", self._shape_pair)
         f.addRow("Max gain change vs baseline:", self.range_spin)
         self.est_label = QtWidgets.QLabel()
         self.est_label.setWordWrap(True)
@@ -849,10 +876,11 @@ class TuningTab(QtWidgets.QWidget):
         f.addRow(self.preview_label)
         # amplitude loop only: the guided scale-sweep protocol (non-uniform, hand-picked multipliers -
         # the uniform step-factor scan above cannot express this, so it gets its own list).
-        self.scale_list_edit = QtWidgets.QLineEdit("0.1, 0.3, 1, 2, 3")
+        self.scale_list_edit = QtWidgets.QLineEdit("0.25, 0.5, 1, 2, 4")
         self.scale_list_edit.setToolTip("Comma-separated multipliers of the baseline Kp/Ki (Ki:Kp stays fixed), "
                                         "tested in order; the sweep stops at the first one that saturates Drive, "
-                                        "overshoots/rings beyond the target, or raises Drive noise substantially.")
+                                        "pins Drive at zero, overshoots/rings beyond the target, or raises Drive "
+                                        "noise substantially.")
         self.scale_list_label = QtWidgets.QLabel("Scale sweep list (g):")
         f.addRow(self.scale_list_label, self.scale_list_edit)
         self.search_section.set_content_layout(f)
@@ -860,6 +888,7 @@ class TuningTab(QtWidgets.QWidget):
         for w in (self.factor_spin, self.scan_lo, self.scan_hi, self.speed_lo, self.speed_hi, self.shape_lo, self.shape_hi,
                   self.range_spin, self.hold_spin, self.settle_spin, self.events_spin, self.step_spin):
             w.valueChanged.connect(self._update_estimate)
+        self.scale_list_edit.textChanged.connect(lambda *_: self._update_estimate())
 
         # 5. checklist + buttons
         g = QtWidgets.QGroupBox("5. Before running")
@@ -883,7 +912,11 @@ class TuningTab(QtWidgets.QWidget):
         self.btn_clear = QtWidgets.QPushButton("Clear map")
         self.btn_scope = QtWidgets.QPushButton("Analyze Scope capture")
         self.btn_scope.setToolTip("Analyze the step train recorded in the Scope tab (needs the Step Test events on it).")
-        for b in (self.btn_single, self.btn_scan, self.btn_map, self.btn_sweep, self.btn_clear, self.btn_scope):
+        self.btn_export = QtWidgets.QPushButton("Export results...")
+        self.btn_export.setToolTip("Every test of this session as CSV (one row per test, SXM settings in the header) "
+                                   "plus a JSON file with the full details and the settings each test ran at.")
+        for b in (self.btn_single, self.btn_sweep, self.btn_scan, self.btn_map, self.btn_clear, self.btn_scope,
+                  self.btn_export):
             v.addWidget(b)
         self.btn_single.clicked.connect(self._run_single)
         self.btn_scan.clicked.connect(self._run_scan)
@@ -891,6 +924,7 @@ class TuningTab(QtWidgets.QWidget):
         self.btn_sweep.clicked.connect(self._run_scale_sweep)
         self.btn_clear.clicked.connect(self._clear_map)
         self.btn_scope.clicked.connect(self._analyze_scope)
+        self.btn_export.clicked.connect(self._export_results)
         lv.addWidget(g)
         lv.addStretch(1)
 
@@ -972,10 +1006,10 @@ class TuningTab(QtWidgets.QWidget):
         self.sweep_tab = QtWidgets.QWidget()
         sv2 = QtWidgets.QVBoxLayout(self.sweep_tab)
         sv2.setContentsMargins(0, 0, 0, 0)
-        self.sweep_table = QtWidgets.QTableWidget(0, 12)
+        self.sweep_table = QtWidgets.QTableWidget(0, 13)
         self.sweep_table.setHorizontalHeaderLabels(
             ["g", "Kp", "Ki", "Tier", "Rise up ms", "Rise down ms", "2% settle ms", "Overshoot %",
-             "SS error %", "Drive peak", "Drive RMS exc.", "Drive noise"])
+             "SS error %", "Drive peak", "Drive RMS exc.", "Drive noise", "Drive at 0 %"])
         self.sweep_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
         sv2.addWidget(self.sweep_table, 1)
         self.sweep_summary = QtWidgets.QLabel(
@@ -1035,6 +1069,13 @@ class TuningTab(QtWidgets.QWidget):
         })
 
     @staticmethod
+    def _set_row_visible(form: QtWidgets.QFormLayout, field: QtWidgets.QWidget, visible: bool) -> None:
+        field.setVisible(visible)
+        label = form.labelForField(field)
+        if label is not None:
+            label.setVisible(visible)
+
+    @staticmethod
     def _pair(a, b):
         w = QtWidgets.QWidget()
         h = QtWidgets.QHBoxLayout(w)
@@ -1055,7 +1096,7 @@ class TuningTab(QtWidgets.QWidget):
         self.base_label.setText("Current `use` frequency:" if pll else "Current amplitude Ref:")
         self.step_label.setText("Step +- (Hz):" if pll else "Step +- (% of Ref):")
         self.base_spin.setValue(25000.0 if pll else 6.0)
-        self.step_spin.setValue(1.0 if pll else 10.0)
+        self.step_spin.setValue(1.0 if pll else 100.0 * W.AFL.default_step)
         self.hold_spin.setValue(0.5 if pll else 1.0)
         if pll:
             self.kp_spin.setValue(-100.0)
@@ -1070,6 +1111,13 @@ class TuningTab(QtWidgets.QWidget):
         for w in (self.tau_spin, self.tau_label, self.scale_list_label, self.scale_list_edit,
                  self.btn_sweep) + self._afl_rows:
             w.setVisible(not pll)
+        # the amplitude loop is tuned with the 1-D scale sweep only: the Speed x Shape map, its zoom/narrow
+        # controls and the uniform scale scan stay for the PLL (no zero floor there, the linear model holds)
+        for w in (self.btn_scan, self.btn_map, self.btn_clear, self.btn_zoom, self.btn_back, self.btn_prior,
+                  self.btn_narrow, self.map_plot, self.preview_label):
+            w.setVisible(pll)
+        for fld in (self.factor_spin, self._scan_pair, self._speed_pair, self._shape_pair):
+            self._set_row_visible(self._search_form, fld, pll)
         for c, text in zip(self.checks, CHECKLISTS[ld.key]):
             c.setText(text)
             c.setChecked(False)                      # a different loop needs a different set of checks
@@ -1255,10 +1303,21 @@ class TuningTab(QtWidgets.QWidget):
         n_scan = int(self.scan_lo.value()) + int(self.scan_hi.value()) + 1
         each = p.settle_s + p.duration + 0.3
         minutes = n * each / 60
-        self.est_label.setText(f"Each test takes about {each:.0f} s. Scale scan: {n_scan} tests, about {n_scan * each / 60:.1f} min. "
-                               f"Map: {n} tests, about {minutes:.1f} min (worst case; unstable regions are skipped).")
         self.preview_label.setText(self._preview_text(g))
-        self.search_section.set_summary(self._search_summary_text(g, n, minutes))
+        if self.loop_def.key == "afl":
+            try:
+                gs = self._parse_scale_list()
+            except ValueError:
+                gs = []
+            n_sw = len(gs)
+            self.est_label.setText(f"Each test takes about {each:.0f} s. Scale sweep: {n_sw} tests, about "
+                                   f"{n_sw * each / 60:.1f} min (it stops early at the first too-aggressive point).")
+            span = f"g {min(gs):g} to {max(gs):g}, " if gs else ""
+            self.search_section.set_summary(f"Scale sweep {span}Ki:Kp fixed — {n_sw} tests, ~{n_sw * each / 60:.1f} min")
+        else:
+            self.est_label.setText(f"Each test takes about {each:.0f} s. Scale scan: {n_scan} tests, about {n_scan * each / 60:.1f} min. "
+                                   f"Map: {n} tests, about {minutes:.1f} min (worst case; unstable regions are skipped).")
+            self.search_section.set_summary(self._search_summary_text(g, n, minutes))
         self._target_note()
         self._update_hint()
 
@@ -1319,6 +1378,7 @@ class TuningTab(QtWidgets.QWidget):
         self.btn_stop.setToolTip("Aborts the running test and immediately writes the baseline Kp/Ki back. "
                                  "Shortcuts: Esc, Ctrl+." if running else "Nothing is running.")
         self.btn_clear.setEnabled(not running)
+        self.btn_export.setEnabled(bool(self.results_log) and not running)
         self.btn_clear.setToolTip("Disabled while a test is running." if running else "")
         self.btn_scope.setEnabled(self.scope_tab is not None and not running)
         self.btn_scope.setToolTip(
@@ -1379,8 +1439,8 @@ class TuningTab(QtWidgets.QWidget):
                     f"{'Hz' if self.loop_def.key == 'pll' else '%'} up and down, measures the loop at the current gains "
                     f"and suggests what to change{secs}.")
             if self.loop_def.key == "afl":
-                text += (" If the right decade of gain is unknown, press <i>Run scale scan</i> first: it tries the baseline and "
-                         "both gains scaled together by decades.")
+                text += (" Then press <i>Run scale sweep</i>: it steps both gains together through the scale list "
+                         "(Ki:Kp fixed) and recommends a final scale.")
         else:
             text = ("<b>Next:</b> read the verdict and the suggestion below. <i>Test suggested pair</i> re-measures with the "
                     "suggested gains; <i>Stage in Params tab</i> hands a pair to the Parameters tab. Repeat until the "
@@ -1460,6 +1520,13 @@ class TuningTab(QtWidgets.QWidget):
             got.append(f"output gain=+-{gain:g} V")
         else:
             missed.append("output gain")
+        ina = readout.get("input_gain_ina")
+        idx = self.ina_combo.findData(ina) if ina is not None else -1
+        if idx >= 0:
+            self.ina_combo.setCurrentIndex(idx)
+            got.append(f"input gain=x{ina:g}")
+        else:
+            missed.append("input gain" if ina is None else f"input gain (x{ina:g} not offered here)")
         kp_key, ki_key = ("pll_kp", "pll_ki") if ld.key == "pll" else ("amp_kp", "amp_ki")
         kp, ki = readout.get(kp_key), readout.get(ki_key)
         fill("Kp", kp, self.kp_spin.setValue)
@@ -1555,6 +1622,10 @@ class TuningTab(QtWidgets.QWidget):
         if not self._confirm_baseline(self.kp_spin.value(), self.ki_spin.value()):
             self._log("Run not started: baseline not confirmed.")
             return
+        meta = self._run_metadata()
+        if meta is None:
+            return
+        self._run_meta = meta
         self.runner = TuningRunner(self.dde, self.driver, plan, (self.kp_spin.value(), self.ki_spin.value()),
                                    self.analysis_kwargs(), parent=self)
         self.runner.message.connect(self._log)
@@ -1564,6 +1635,48 @@ class TuningTab(QtWidgets.QWidget):
         self._update_enabled()
         self.runner.start(next_item)
         self._update_enabled()
+
+    def _run_metadata(self) -> Optional[MD.Metadata]:
+        """
+        The SXM settings for the record of this run, read now. None (and a warning) when SXM's DNC input gain
+        differs from the one selected here: QPlusAmpl / Drive would read on another scale than intended.
+        """
+        readout = self._read_sxm()
+        meta = MD.Metadata.from_readout(readout) if readout is not None else MD.Metadata.unavailable("SXM not readable")
+        want, have = self.ina_combo.currentData(), meta.get("input_gain_ina")
+        if have is not None and not math.isclose(have, want):
+            msg = (f"SXM's DNC Input Gain InA is x{have:g}, but x{want:g} is selected here.\n\n"
+                   "QPlusAmpl and Drive are converted with fixed scale factors, so a test at another input gain "
+                   f"reads on a different scale. Set SXM to x{want:g}, or select x{have:g} here, then run again.")
+            self._log("Run not started: " + msg.replace("\n\n", " "))
+            QtWidgets.QMessageBox.warning(self, "Input gain", msg)
+            return None
+        if have is None:
+            self._log(f"Input gain InA not read from SXM: not verified, recorded as selected (x{want:g}).")
+        return meta
+
+    def _plan_record(self, plan: W.StepTestPlan) -> dict:
+        """What the test did, in the app's terms, for the export."""
+        ld = plan.loop_def
+        t = self.target()
+        return {"loop": plan.loop, "stepped": "DNC use [Hz]" if ld.key == "pll" else "Amplitude Ref [SXM units]",
+                "base": plan.base, "low": plan.low, "high": plan.high,
+                "step": f"{plan.step * 100:g} %" if ld.relative_step else plan.step,
+                "hold_s": plan.hold_s, "events": plan.n_events, "settle_s": plan.settle_s,
+                "selected_input_gain": self.ina_combo.currentData(),
+                "selected_output_gain_v": self.gain_combo.currentData() if ld.key == "afl" else None,
+                "target": t.name, "target_rise_max_ms": t.rise_max * 1e3, "target_overshoot_max_pct": t.overshoot_max * 100}
+
+    def _stamp(self, res: W.StepTestResult, plan: Optional[W.StepTestPlan], source: str,
+               meta: Optional[MD.Metadata]) -> None:
+        """Attach when / how / at which SXM settings a result was taken, and log it for export."""
+        res.meta.setdefault("time", time.strftime("%Y-%m-%d %H:%M:%S"))
+        res.meta.setdefault("source", source)
+        if plan is not None:
+            res.meta.setdefault("plan", self._plan_record(plan))
+        if meta is not None:
+            res.meta.setdefault("metadata", meta)
+        self.results_log.append(res)
 
     def _run_single(self):
         self._start_runner(self._one_shot(self.kp_spin.value(), self.ki_spin.value()))
@@ -1645,8 +1758,13 @@ class TuningTab(QtWidgets.QWidget):
                         return None             # the sweep's own stopping rule: go no further
             if i >= len(gs):
                 return None
+            kp, ki = kp0 * gs[i], ki0 * gs[i]
+            if not W.gain_within_limits(kp, ki, (kp0, ki0), self.safety_limits()):
+                self._log(f"Scale sweep stops before g={gs[i]:g}: outside 'Max gain change vs baseline' "
+                          f"(x{self.range_spin.value():g}).")
+                return None
             state["i"] = i + 1
-            return ("sweep", i), kp0 * gs[i], ki0 * gs[i]
+            return ("sweep", i), kp, ki
         self._start_runner(nxt)
 
     def _test_suggestion(self):
@@ -1728,6 +1846,7 @@ class TuningTab(QtWidgets.QWidget):
                 "" if math.isnan(r.drive_peak_abs) else f"{r.drive_peak_abs:.3g}",
                 "" if math.isnan(r.drive_rms_excursion) else f"{r.drive_rms_excursion:.3g}",
                 "" if r.secondary is None else f"{r.secondary.noise_rms:.3g}",
+                "" if math.isnan(r.drive_floor_frac) else f"{r.drive_floor_frac * 100:.0f}",
             ]
             col = QtGui.QColor(*SCALE_TIER_COLOR.get(p.tier, (255, 255, 255)))
             for c, text in enumerate(vals):
@@ -1744,6 +1863,8 @@ class TuningTab(QtWidgets.QWidget):
             self.sweep_summary.setText(explanation)
 
     def _on_test_finished(self, cell, res: W.StepTestResult):
+        self._stamp(res, self.runner.plan if self.runner is not None else None,
+                    "sweep" if isinstance(cell, tuple) and cell and cell[0] == "sweep" else "run", self._run_meta)
         m = self.current_map()
         if isinstance(cell, tuple) and len(cell) == 2 and all(isinstance(c, (int, np.integer)) for c in cell) and m is not None:
             v = m.record(cell, res)
@@ -1797,6 +1918,7 @@ class TuningTab(QtWidgets.QWidget):
         res = W.analyze_test(ct, **self.analysis_kwargs())
         res.verdict = W.classify(res, self.target())
         res.warnings.insert(0, f"gains assumed for this capture: Kp={ct.kp:.4g}, Ki={ct.ki:.4g} (from the Baseline fields)")
+        self._stamp(res, ct.plan, "scope capture", getattr(self.scope_tab, "last_meta", None))
         self.singles.append(res)
         self._single_result = res
         self.selected = None
@@ -1804,6 +1926,115 @@ class TuningTab(QtWidgets.QWidget):
         self._refresh_table()
         self._show_result(res)
         self.detail_tabs.setCurrentIndex(0)
+        self._update_enabled()
+
+    # ------------------------------------------------------------------ export
+    EXPORT_COLUMNS = (
+        ("time", "time"), ("source", "source"), ("loop", "loop"), ("kp", "Kp"), ("ki", "Ki"),
+        ("verdict", "verdict"), ("rise_ms", "rise 10-90 % [ms]"), ("rise_up_ms", "rise, up-steps [ms]"),
+        ("rise_down_ms", "rise, down-steps [ms]"), ("settle5_ms", "5 % settling [ms]"), ("settle2_ms", "2 % settling [ms]"),
+        ("overshoot_pct", "overshoot [%]"), ("extrema", "ringing extrema"), ("scatter", "step-to-step scatter"),
+        ("phase_decay_ms", "Phase decay [ms]"), ("drive_settled", "Drive settled"), ("drive_peak", "Drive peak"),
+        ("drive_noise", "Drive noise"), ("drive_floor_pct", "Drive at zero floor [%]"),
+        ("stepped", "stepped"), ("base", "base"), ("low", "low"), ("high", "high"), ("hold_s", "hold [s]"),
+        ("events", "events"), ("input_gain", "input gain InA (SXM)"), ("output_gain_v", "output gain [+-V] (SXM)"),
+        ("amp_ref", "Amplitude Ref (SXM)"), ("amp_tau_ms", "Amplitude Tau [ms] (SXM)"),
+        ("dnc_tc_ms", "DNC TimeConstant [ms] (SXM)"), ("use_hz", "DNC use [Hz] (SXM)"), ("q", "Q (SXM)"),
+        ("notes", "notes"),
+    )
+
+    @staticmethod
+    def _export_row(res: W.StepTestResult) -> dict:
+        def ms(v):
+            return "" if v is None or math.isnan(v) else ("inf" if math.isinf(v) else f"{v * 1e3:.4g}")
+
+        def num(v, f=1.0):
+            return "" if v is None or (isinstance(v, float) and math.isnan(v)) else f"{v * f:.6g}"
+        p, plan = res.primary, res.meta.get("plan", {})
+        meta = res.meta.get("metadata")
+        sx = meta.values if meta is not None else {}
+        return {
+            "time": res.meta.get("time", ""), "source": res.meta.get("source", ""), "loop": res.loop,
+            "kp": f"{res.kp:.6g}", "ki": f"{res.ki:.6g}",
+            "verdict": "" if res.verdict is None else W.CATEGORY_LABEL.get(res.verdict.category, res.verdict.category),
+            "rise_ms": ms(p.rise_time) if p else "",
+            "rise_up_ms": ms(res.primary_rising.rise_time) if res.primary_rising else "",
+            "rise_down_ms": ms(res.primary_falling.rise_time) if res.primary_falling else "",
+            "settle5_ms": ms(p.settling_time) if p else "",
+            "settle2_ms": ms(res.primary_2pct.settling_time) if res.primary_2pct else "",
+            "overshoot_pct": num(p.overshoot, 100) if p else "", "extrema": p.n_extrema if p else "",
+            "scatter": num(res.noise_rms), "phase_decay_ms": ms(res.error.decay_time) if res.error else "",
+            "drive_settled": num(res.drive_settled), "drive_peak": num(res.drive_peak_abs),
+            "drive_noise": num(res.secondary.noise_rms) if res.secondary else "",
+            "drive_floor_pct": num(res.drive_floor_frac, 100),
+            "stepped": plan.get("stepped", ""), "base": num(plan.get("base")), "low": num(plan.get("low")),
+            "high": num(plan.get("high")), "hold_s": num(plan.get("hold_s")), "events": plan.get("events", ""),
+            "input_gain": num(sx.get("input_gain_ina")), "output_gain_v": num(sx.get("afl_output_gain")),
+            "amp_ref": num(sx.get("amp_ref")), "amp_tau_ms": num(sx.get("amp_tau_s"), 1e3),
+            "dnc_tc_ms": num(sx.get("dnc_time_constant_s"), 1e3), "use_hz": num(sx.get("used_freq")), "q": num(sx.get("q")),
+            "notes": " | ".join(([res.failure] if res.failure else []) + list(res.warnings)),
+        }
+
+    def export_results_to(self, path: str) -> str:
+        """Write the session's tests to ``path`` (CSV) and the matching .json. Returns the JSON path. Raises OSError."""
+        import csv
+        last = self.results_log[-1]
+        meta = last.meta.get("metadata") or MD.collect(self.reader)
+        loops = sorted({r.loop for r in self.results_log if r.loop})
+        stem = os.path.splitext(path)[0]
+        header = MD.Metadata(meta.values, meta.errors, meta.timestamp, meta.source)
+        header.add_section("Tuning session", [
+            ("Tests", len(self.results_log), ""), ("Loops", ", ".join(loops), ""),
+            ("Settings above", "as read when the last test ran", ""),
+            ("Per-test settings", "columns marked (SXM); full detail in the .json", ""),
+        ])
+        tested = [(g, r) for g, r in zip(self._sweep_gs, self._sweep_results) if r is not None]
+        if tested:
+            _, rec_g, explanation = W.assess_scale_sweep([g for g, _ in tested], [r for _, r in tested], self.target(),
+                                                         output_gain_v=self.gain_combo.currentData())
+            header.add_section("Last scale sweep", [("Scales tested", ", ".join(f"{g:g}" for g, _ in tested), ""),
+                                                    ("Recommended g", rec_g, ""), ("Why", explanation, "")])
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write(MD.csv_preamble(header.header_lines("SXM nc-AFM tuning results"), numeric=False))
+            w = csv.writer(f)
+            w.writerow([title for _k, title in self.EXPORT_COLUMNS])
+            for r in self.results_log:
+                row = self._export_row(r)
+                w.writerow([row[k] for k, _t in self.EXPORT_COLUMNS])
+        tests = []
+        for r in self.results_log:
+            m = r.meta.get("metadata")
+            tests.append({**self._export_row(r), "plan": r.meta.get("plan"), "warnings": list(r.warnings),
+                          "sxm": m.to_dict()["groups"] if m is not None else None,
+                          "sxm_source": m.source if m is not None else None})
+        return MD.write_sidecar(stem + ".json", header, {"kind": "ncafm_tuning_results", "tests": tests})
+
+    def default_export_name(self) -> str:
+        last = self.results_log[-1]
+        meta = last.meta.get("metadata") or MD.Metadata.unavailable("none")
+        loops = sorted({r.loop for r in self.results_log if r.loop})
+        order = tuple(loops) + tuple(x for x in ("afl", "pll") if x not in loops)
+        detail = "-".join(lp.upper() for lp in loops) + f"-{len(self.results_log)}tests"
+        return meta.filename("tuning", detail, loops=order) + ".csv"
+
+    def _export_results(self):
+        """Every test of the session: CSV (settings block + one row per test) and a JSON with the details."""
+        if not self.results_log:
+            QtWidgets.QMessageBox.information(self, "Export results", "No tests yet.")
+            return
+        name = self.default_export_name()
+        start = os.path.join(self._last_export_dir, name) if self._last_export_dir else name
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export tuning results", start, "CSV (*.csv)")
+        if not path:
+            return
+        self._last_export_dir = os.path.dirname(path)
+        try:
+            json_path = self.export_results_to(path)
+        except OSError as e:
+            QtWidgets.QMessageBox.warning(self, "Export results", f"Could not write:\n{e}")
+            return
+        self._log(f"Exported {len(self.results_log)} tests to {path} (+ {os.path.basename(json_path)})")
+        QtWidgets.QMessageBox.information(self, "Export results", f"Saved:\n{path}\n{json_path}")
 
     # ------------------------------------------------------------------ map view
     def _paint_map(self):

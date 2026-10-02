@@ -52,7 +52,8 @@ DNC_EDIT_KEYS = ("dnc_sweep_start", "dnc_sweep_stop", "used_freq", "drive")
 
 LABELS = {
     "dnc_sweep_start": "DNC sweep start (Hz)", "dnc_sweep_stop": "DNC sweep stop (Hz)",
-    "afl_output_gain": "AFL output gain (+-V)", "dnc_time_constant_s": "DNC TimeConstant (s)",
+    "afl_output_gain": "AFL output gain (+-V)", "input_gain_ina": "DNC input gain InA (x)",
+    "dnc_time_constant_s": "DNC TimeConstant (s)",
     "dnc_rolloff": "DNC RollOff", "amp_tau_s": "Amplitude Tau (s)", "q": "Q (DNC status)",
     "f_peak": "fPeak (Hz, DNC status)", "ring_down_s": "Ring-down tau (s, DNC status)",
     "feedback_off": "zControl Feedback Off", "feedback_mode": "Feedback mode",
@@ -78,7 +79,7 @@ def parse_time_s(text: Any) -> Optional[float]:
 
 
 def parse_gain_v(text: Any) -> Optional[float]:
-    """Output-gain radio caption '±0.1' -> 0.1."""
+    """Output-gain radio caption '±0.1' -> 0.1 (also the input-gain caption: '10' / 'x10' -> 10)."""
     m = re.search(_NUM, str(text))
     return abs(float(m.group(0))) if m else None
 
@@ -172,6 +173,7 @@ class SXMReader:
                 put(k, lambda v=v: v)
 
         put("afl_output_gain", lambda: parse_gain_v(field(dnc, "Range")))
+        put("input_gain_ina", lambda: parse_gain_v(field(dnc, "Input Gain InA")))
         put("dnc_time_constant_s", lambda: parse_time_s(field(dnc, "TimeConstant")))
         put("dnc_rolloff", lambda: str(field(dnc, "RollOff")))
         put("q", lambda: _as_float(field(dnc, "q")))
