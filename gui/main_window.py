@@ -134,10 +134,10 @@ class MainWindow(QtWidgets.QWidget):
         # Create all tabs, sharing the same connection handles
         self.params_tab = ParamsTab(conn.dde, reader=conn.reader)
         self.step_tab = StepTestTab(conn.dde, reader=conn.reader)
-        self.scope_tab = ScopeTab(conn.driver)
+        self.scope_tab = ScopeTab(conn.driver, reader=conn.reader)
         self.live_scope_tab = LiveScopeTab(conn.driver)
         self.suggest_tab = SuggestedTab(conn.dde, self.params_tab, reader=conn.reader)
-        self.qplus_tab = QplusCalibrationTab(conn.dde)
+        self.qplus_tab = QplusCalibrationTab(conn.dde, reader=conn.reader)
         self.topo_hold_tab = ZConstAcquisition(conn.dde, conn.driver)
         self.tuning_tab = TuningTab(conn.dde, conn.driver, scope_tab=self.scope_tab, params_tab=self.params_tab,
                                     reader=conn.reader)

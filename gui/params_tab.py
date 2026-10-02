@@ -33,6 +33,7 @@ from ..common import (
     format_number,
 )
 from ..sxm_state import LABELS
+from .. import metadata as MD
 
 READABLE_KEYS = {k for (k, *_r) in PARAMS_BASE}     # custom EditXX rows have no GUI mapping
 
@@ -449,7 +450,9 @@ class ParamsTab(QtWidgets.QWidget):
     def save_tune(self) -> None:
         """Save current parameter values (CURRENT column) to JSON."""
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H_%M_%S")
-        default_name = f"{timestamp}_NameSensor_tune.json"
+        meta = MD.collect(self.reader)
+        # 'NameSensor' is a placeholder to overwrite; the rest is the key SXM settings at save time
+        default_name = meta.filename("NameSensor_tune") + ".json"
 
         start_dir = getattr(self, "_last_dir", "")
         start_path = str(QtCore.QDir(start_dir).filePath(default_name)) if start_dir else default_name
@@ -477,6 +480,8 @@ class ParamsTab(QtWidgets.QWidget):
         payload = self._collect_params_snapshot()
         payload["comments"] = comments
         payload["saved_at"] = timestamp
+        # every setting SXM showed at save time (grouped, with units): load_tune_preview reads only "params"
+        payload["sxm_settings"] = meta.to_dict()
 
         try:
             with open(path, "w", encoding="utf-8") as f:

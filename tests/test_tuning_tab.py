@@ -90,9 +90,9 @@ class Offline(unittest.TestCase):
         tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("afl"))
         self.assertAlmostEqual(tab.kp_spin.value(), 2e8)      # the manual start for Q = f0 = 25 k at +-1 V
         self.assertAlmostEqual(tab.ki_spin.value(), 2e4)
-        self.assertEqual(tab.step_spin.value(), 10.0)
+        self.assertEqual(tab.step_spin.value(), 5.0)                          # +-5 %: Drive cannot go below zero
         self.assertIn("QPlusAmpl", tab.channels_label.text())
-        self.assertEqual(tab.plan().step, 0.10)
+        self.assertEqual(tab.plan().step, 0.05)
         tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("pll"))
         self.assertEqual(tab.kp_spin.value(), -100.0)
         self.assertIn("Phase", tab.channels_label.text())
@@ -506,7 +506,7 @@ class AmplitudeLoopUI(unittest.TestCase):
         lim = tab.safety_limits()
         self.assertEqual(lim.max_gain_factor, 1000.0)
         self.assertAlmostEqual(lim.min_gain_factor, 1e-3)
-        self.assertIn("Scale scan: 7 tests", tab.est_label.text())
+        self.assertIn("Scale sweep: 5 tests", tab.est_label.text())          # the amplitude loop's protocol
 
     def test_running_a_scale_scan_pushes_a_speed_only_map_and_stop_restores_the_baseline(self):
         inst = FakeInstrument()
@@ -537,7 +537,7 @@ class AmplitudeLoopUI(unittest.TestCase):
 
     def test_the_guide_explains_the_amplitude_loop(self):
         html = T.guide_html()
-        for word in ("Output Gain", "scale scan", "decades", "Drive"):
+        for word in ("Output Gain", "scale sweep", "decades", "Drive", "input gain", "5 %", "zero"):
             self.assertIn(word.lower(), html.lower())
 
 
@@ -676,6 +676,120 @@ class ScaleSweepUI(unittest.TestCase):
         # the baseline (not the last-tested scale point) is what got restored, via Kp/Ki/Ref in that order
         kp, ki = tab.kp_spin.value(), tab.ki_spin.value()
         self.assertEqual(inst.writes[-3:], [("Edit32", kp), ("Edit24", ki), ("Edit23", tab.base_spin.value())])
+
+
+class AmplitudeLoopSimplified(unittest.TestCase):
+    """The amplitude loop is tuned with the 1-D sweep: the map and its controls are PLL-only."""
+
+    def test_map_controls_are_hidden_for_the_amplitude_loop_and_back_for_the_pll(self):
+        tab = T.TuningTab(FakeInstrument(), FakeInstrument())
+        tab.show()
+        try:
+            map_widgets = (tab.btn_scan, tab.btn_map, tab.btn_narrow, tab.btn_zoom, tab.map_plot, tab.factor_spin)
+            self.assertTrue(all(w.isVisible() for w in map_widgets))
+            tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("afl"))
+            self.assertFalse(any(w.isVisible() for w in map_widgets))
+            self.assertFalse(tab._search_form.labelForField(tab.factor_spin).isVisible())
+            for w in (tab.btn_sweep, tab.btn_single, tab.scale_list_edit, tab.range_spin, tab.ina_combo):
+                self.assertTrue(w.isVisible())
+            self.assertEqual(tab._parse_scale_list(), [0.25, 0.5, 1.0, 2.0, 4.0])
+            tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("pll"))
+            self.assertTrue(all(w.isVisible() for w in map_widgets))
+        finally:
+            tab.hide()
+
+
+class FakeReadout:
+    def __init__(self, values):
+        import datetime
+        self.values, self.errors, self.timestamp = dict(values), {}, datetime.datetime(2026, 10, 2, 14, 30, 12)
+        self.ok = True
+
+    def get(self, k):
+        return self.values.get(k)
+
+    def by_code(self, ptype, pcode):
+        return None
+
+
+class FakeReader:
+    def __init__(self, values):
+        self.values = values
+
+    def read(self):
+        return FakeReadout(self.values)
+
+
+SXM_VALUES = {"amp_ref": 0.55, "amp_kp": 1e7, "amp_ki": 1200.0, "amp_tau_s": 0.05, "pll_kp": -100.0, "pll_ki": -1e4,
+              "input_gain_ina": 10.0, "afl_output_gain": 0.1, "dnc_time_constant_s": 0.002, "used_freq": 25562.49,
+              "q": 148699.0, "f_peak": 25562.0}
+
+
+class InputGainAndExport(unittest.TestCase):
+    def make_afl(self, inst, values=SXM_VALUES):
+        tab = T.TuningTab(inst, inst, reader=FakeReader(values))
+        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("afl"))
+        tab.LEAD_S, tab.TAIL_S = 0.2, 0.1
+        tab.hold_spin.setValue(0.15)
+        tab.events_spin.setValue(FAST["events"])
+        tab.settle_spin.setValue(0.2)
+        for c in tab.checks:
+            c.setChecked(True)
+        tab._confirm_baseline = lambda kp, ki: True                              # no blocking dialog offscreen
+        return tab
+
+    def test_read_from_sxm_selects_the_input_gain(self):
+        tab = self.make_afl(FakeInstrument())
+        tab.read_from_sxm(quiet=True)
+        self.assertEqual(tab.ina_combo.currentData(), 10.0)
+        self.assertIn("input gain=x10", tab.log.toPlainText())
+
+    def test_a_run_is_refused_when_sxm_has_another_input_gain(self):
+        inst = FakeInstrument()
+        tab = self.make_afl(inst)
+        tab.ina_combo.setCurrentIndex(tab.ina_combo.findData(1.0))               # intended x1, SXM shows x10
+        orig = QtWidgets.QMessageBox.warning
+        QtWidgets.QMessageBox.warning = staticmethod(lambda *a, **k: None)
+        try:
+            tab._run_single()
+        finally:
+            QtWidgets.QMessageBox.warning = orig
+        self.assertFalse(tab.runner_active())
+        self.assertEqual(inst.writes, [])                                        # nothing written to SXM
+        self.assertIn("Input Gain InA is x10", tab.log.toPlainText())
+
+    def test_a_run_records_the_settings_and_exports_csv_and_json(self):
+        import json
+        import tempfile
+        inst = FakeInstrument()
+        tab = self.make_afl(inst)
+        tab.ina_combo.setCurrentIndex(tab.ina_combo.findData(10.0))
+        tab._run_single()
+        self.assertTrue(tab.runner_active())
+        self.assertTrue(wait_until(lambda: not tab.runner_active(), 40), "test did not finish")
+        self.assertEqual(len(tab.results_log), 1)
+        res = tab.results_log[0]
+        self.assertEqual(res.meta["source"], "run")
+        self.assertEqual(res.meta["metadata"].get("input_gain_ina"), 10.0)
+        self.assertEqual(res.meta["plan"]["selected_input_gain"], 10.0)
+        self.assertTrue(tab.btn_export.isEnabled())
+        name = tab.default_export_name()
+        self.assertIn("_tuning_AFL-1tests_AFL-Ref0.55-Kp1e7-Ki1200-Tau50ms_PLL-Kp-100-Ki-1e4_InA10_OG0.1V_TC2ms", name)
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, name)
+            json_path = tab.export_results_to(path)
+            text = open(path, encoding="utf-8").read()
+            self.assertIn("# SXM nc-AFM tuning results", text)
+            self.assertIn("# [Amplitude feedback (AFL)]", text)
+            self.assertRegex(text, r"#   Input gain InA +10 x")
+            data_lines = [ln for ln in text.splitlines() if not ln.startswith("#")]
+            self.assertTrue(data_lines[0].startswith("time,source,loop,Kp,Ki,verdict"))
+            self.assertEqual(len(data_lines), 2)                                  # header + one test
+            payload = json.load(open(json_path, encoding="utf-8"))
+            self.assertEqual(payload["kind"], "ncafm_tuning_results")
+            self.assertEqual(payload["groups"]["DNC (lock-in and excitation)"]["Input gain InA"]["value"], 10.0)
+            self.assertEqual(len(payload["tests"]), 1)
+            self.assertEqual(payload["tests"][0]["input_gain"], "10")
 
 
 class SuggestedSetupGain(unittest.TestCase):

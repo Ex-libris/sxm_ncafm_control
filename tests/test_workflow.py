@@ -235,6 +235,36 @@ class AnalyseAmplitude(unittest.TestCase):
         self.assertAlmostEqual(res.primary_rising.rise_time, res.primary_falling.rise_time,
                                delta=0.3 * res.primary.rise_time)
 
+    def test_drive_at_its_zero_floor_is_measured_and_warned_about(self):
+        plan = afl_plan()
+        ct, _ = record_afl(plan, 8.9e7, 8900)
+        clean = W.analyze_test(ct)
+        self.assertLess(clean.drive_floor_frac, W.DRIVE_FLOOR_TIME_MAX)          # a healthy loop never sits at zero
+        self.assertGreater(clean.drive_settled, 0.0)
+        self.assertFalse(any("zero floor" in w for w in clean.warnings))
+        drive = ct.channels["Drive"].copy()
+        after = np.flatnonzero(ct.t >= ct.event_times[0])
+        drive[after[: len(after) // 5]] = 0.0                                     # pinned at zero for 20 % of the test
+        ct.channels["Drive"] = drive
+        res = W.analyze_test(ct)
+        self.assertAlmostEqual(res.drive_floor_frac, 0.2, delta=0.02)
+        self.assertTrue(any("zero floor" in w for w in res.warnings))
+        res.verdict = W.classify(res, W.Target(rise_max=1.0))
+        first = W.advise(res, res.verdict, W.Target(rise_max=1.0))[0]
+        self.assertAlmostEqual(first.kp / res.kp, 0.5)                            # back off first, whatever the shape
+        self.assertIn("zero", first.why)
+
+    def test_drive_floor_fraction_needs_a_settled_positive_drive(self):
+        t = np.linspace(0, 3, 3001)
+        self.assertTrue(math.isnan(W.drive_floor_fraction(t, np.zeros_like(t), 1.0, 1.0)[0]))
+        d = np.where(t < 1.0, 1.0, np.where(t < 1.5, 0.0, 1.0))
+        frac, settled = W.drive_floor_fraction(t, d, 1.0, 1.0)
+        self.assertAlmostEqual(settled, 1.0)
+        self.assertAlmostEqual(frac, 0.25, delta=0.01)
+
+    def test_the_amplitude_step_defaults_to_5_percent(self):
+        self.assertEqual(W.AFL.default_step, 0.05)
+
     def test_drive_excursion_and_peak_are_populated(self):
         plan = afl_plan()
         ct, _ = record_afl(plan, 8.9e7, 8900)
@@ -665,7 +695,7 @@ class AmplitudeLoopSearch(unittest.TestCase):
         r.primary = _metrics(rise_time=2.0)                                     # 40x too slow: more than one step
         s = W.advise(r, W.classify(r, t), t)
         self.assertAlmostEqual(s[0].kp / r.kp, 10.0)
-        self.assertIn("Scale scan", s[0].why)
+        self.assertIn("scale sweep", s[0].why)                                 # the amplitude loop's 1-D protocol
 
 
 class ScaleSweepAssessment(unittest.TestCase):
@@ -721,6 +751,17 @@ class ScaleSweepAssessment(unittest.TestCase):
         self.assertTrue(all(p.tier == "too_slow" for p in points))
         self.assertIsNone(rec_g)
         self.assertIn("widen the scale list", explanation)
+
+    def test_drive_at_the_zero_floor_triggers_too_aggressive(self):
+        gs = [1, 2]
+        ok = self._point(1.7e8, 1.7e4, rise=0.05, overshoot=0.02)
+        ok.drive_floor_frac = 0.0
+        pinned = self._point(3.3e8, 3.3e4, rise=0.03, overshoot=0.02)
+        pinned.drive_floor_frac = 0.3                                           # on/off: no overshoot needed to fail
+        points, rec_g, _ = W.assess_scale_sweep(gs, [ok, pinned], self.TARGET)
+        self.assertEqual(points[1].tier, "too_aggressive")
+        self.assertIn("zero floor", points[1].reasons[0])
+        self.assertAlmostEqual(rec_g, 0.6 * 2)
 
     def test_a_failed_point_is_treated_as_too_aggressive_and_stops_the_sweep(self):
         ok = self._point(1.7e8, 1.7e4, rise=0.05, overshoot=0.02)

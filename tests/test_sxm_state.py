@@ -95,6 +95,7 @@ class Reader(unittest.TestCase):
     def test_extras(self):
         r = reader()[0].read()
         self.assertEqual(r.get("afl_output_gain"), 0.1)
+        self.assertEqual(r.get("input_gain_ina"), 1.0)
         self.assertAlmostEqual(r.get("dnc_time_constant_s"), 1e-3)
         self.assertAlmostEqual(r.get("amp_tau_s"), 2e-3)
         self.assertEqual(r.get("q"), 148699.0)
