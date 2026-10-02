@@ -1,27 +1,29 @@
 """
-Tests for gui/tuning_tab.py, offscreen. The runner is exercised end to end against tests/fake_instrument.py,
-a virtual PLL that runs in real time behind the same DDE/driver calls the real instrument gets.
+gui/tuning_tab.py, offscreen: values from the SXM read-back, automatic checks, the two confirmations, the search
+region, the map (selection), running conditions end to end against the real-time fake amplitude loop, the
+recommendation and export.
 """
+import json
 import math
 import os
+import tempfile
 import time
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-import numpy as np                                     # noqa: E402
-from PyQt5 import QtCore, QtWidgets                    # noqa: E402
+from PyQt5 import QtWidgets                                     # noqa: E402
 
-from sxm_ncafm_control.gui import tuning_tab as T     # noqa: E402
-from sxm_ncafm_control.tests.fake_instrument import FakeInstrument                 # noqa: E402
-from sxm_ncafm_control.tests.fixtures import pll_plan, record_afl, record_pll, afl_plan   # noqa: E402
-from sxm_ncafm_control.tuning import workflow as W     # noqa: E402
+from sxm_ncafm_control.gui import tuning_tab as T              # noqa: E402
+from sxm_ncafm_control.tests.fake_instrument import FakeAFLInstrument, FakeInstrument   # noqa: E402
+from sxm_ncafm_control.tests.test_sxm_state import GUI, reader   # noqa: E402
+from sxm_ncafm_control.tuning import explore as X               # noqa: E402
+from sxm_ncafm_control.tuning import workflow as W              # noqa: E402
 
 app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-FAST = dict(hold=0.15, events=3, settle=0.2)           # shortest legal test (~1.6 s each)
 
 
-def wait_until(cond, timeout=25.0):
+def wait_until(cond, timeout=60.0):
     end = time.perf_counter() + timeout
     while time.perf_counter() < end:
         app.processEvents()
@@ -31,780 +33,189 @@ def wait_until(cond, timeout=25.0):
     return False
 
 
-class MockDDEClient:                                    # name starts with "Mock": the tab must treat it as offline
+class MockDDEClient:          # the name starts with "Mock": treated as offline
     pass
 
 
-def make_tab(inst, **kw):
+def typed_afl_tab(inst, **kw):
+    """An amplitude-loop tab on the fake instrument, values typed (no SXM), fast method settings, confirmed."""
     tab = T.TuningTab(inst, inst, **kw)
-    tab.LEAD_S, tab.TAIL_S = 0.4, 0.2
-    tab.base_spin.setValue(25000.0)
-    tab.step_spin.setValue(1.0)
-    tab.hold_spin.setValue(FAST["hold"])
-    tab.events_spin.setValue(FAST["events"])
-    tab.settle_spin.setValue(FAST["settle"])
-    tab.kp_spin.setValue(-100.0)
-    tab.ki_spin.setValue(-1e4)
-    for c in tab.checks:
+    tab.LEAD_S, tab.TAIL_S = 0.3, 0.1
+    tab.override_check.setChecked(True)
+    tab.base_spin.setValue(1.0)
+    tab.kp_spin.setValue(2e8)
+    tab.ki_spin.setValue(2e4)
+    tab.ina_combo.setCurrentIndex(tab.ina_combo.findData(10.0))
+    tab.f0_spin.setValue(25000.0)
+    tab.q_spin.setValue(25000.0)
+    tab.hold_spin.setValue(0.6)
+    tab.settle_spin.setValue(0.6)
+    tab.events_spin.setValue(5)
+    tab.window_spin.setValue(0.3)
+    tab._center_on_sxm()
+    for c in tab.confirms:
         c.setChecked(True)
-    # pre-confirm the baseline so a real (blocking) QMessageBox never pops up in these offscreen tests
-    tab._confirmed_baseline[tab.loop_def.key] = (tab.kp_spin.value(), tab.ki_spin.value())
     return tab
 
 
-class FakeScope:
-    """The attributes of ScopeTab that the analysis reads."""
+class ReadBack(unittest.TestCase):
+    def test_instrument_values_come_from_sxm_and_are_not_editable(self):
+        rd, _ = reader()
+        tab = T.TuningTab(FakeInstrument(), FakeInstrument(), reader=rd)
+        self.assertEqual(tab.loop, "afl")
+        self.assertEqual(tab.baseline(), (5e8, 5e4))
+        self.assertEqual(tab.base_spin.value(), 0.5)                              # amplitude Ref is stepped
+        self.assertEqual(tab.gain_combo.currentData(), 0.1)
+        self.assertEqual(tab.ina_combo.currentData(), 1.0)
+        self.assertAlmostEqual(tab.tau_spin.value(), 2.0)
+        self.assertEqual((tab.q_spin.value(), tab.f0_spin.value()), (148699.0, 25562.0))
+        self.assertEqual((tab.kp_center.value(), tab.ki_center.value()), (5e8, 5e4))   # the search centres on SXM
+        self.assertFalse(tab.kp_spin.isEnabled())
+        self.assertIn("5e8", tab.instrument_label.text())
+        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("pll"))
+        self.assertEqual(tab.baseline(), (-100.0, -1e4))
+        self.assertAlmostEqual(tab.base_spin.value(), 25562.49)                  # the PLL steps DNC use
 
-    def __init__(self, cap, plan, chan1="df", chan2="Phase", label="Used Frequency (f0)={:.10g}", events=True):
-        self.last_data1, self.last_data2 = cap.u, cap.y
-        self.last_chan1, self.last_chan2 = chan1, chan2
-        self.last_rate = 1.0 / float(np.median(np.diff(cap.t)))
-        self.capture_start_dt = QtCore.QDateTime.currentDateTime()
-        self._event_markers = []
-        if events:
-            for t, v in plan.commands():
-                self._event_markers.append((self.capture_start_dt.addMSecs(int(round(t * 1000))), label.format(v)))
+    def test_method_timing_is_derived_from_the_ring_down(self):
+        rd, _ = reader()
+        tab = T.TuningTab(FakeInstrument(), FakeInstrument(), reader=rd)
+        ring = 148699.0 / (math.pi * 25562.0)                                     # 1.85 s
+        self.assertAlmostEqual(tab.ring_down_s(), ring, places=3)
+        self.assertEqual(tab.hold_spin.value(), W.afl_start_values(148699.0, 25562.0, 0.1).hold_s)
+        self.assertGreaterEqual(tab.recover_spin.value(), 10 * ring - 1)
 
+    def test_checks(self):
+        rd, fake = reader()
+        inst = FakeAFLInstrument()
+        tab = T.TuningTab(inst, inst, reader=rd)
+        texts = {t: lvl for lvl, t in tab.checks()}
+        self.assertTrue(any("PLL is on" in t for t in texts))                     # the fixture has PLL -100 / -1e4
+        self.assertTrue(any("Input gain x1" in t and lvl == "warn" for t, lvl in texts.items()))
+        self.assertIn("PLL is on", tab._blocked())
+        fake.gui["pll"] = {"Kp": 0.0, "Ki": 0.0}
+        tab.refresh_from_sxm()
+        self.assertTrue(any(t == "PLL off." for _, t in tab.checks()))
+        self.assertIn("Confirm", tab._blocked())                                  # now only the two ticks are missing
+        for c in tab.confirms:
+            c.setChecked(True)
+        self.assertIsNone(tab._blocked())
+        self.assertTrue(tab.btn_explore.isEnabled())
 
-class Offline(unittest.TestCase):
-    def test_builds_and_run_buttons_are_disabled_without_the_instrument(self):
+    def test_without_sxm_the_values_must_be_typed(self):
+        inst = FakeAFLInstrument()
+        tab = T.TuningTab(inst, inst, reader=reader(broken=set(GUI))[0])
+        for c in tab.confirms:
+            c.setChecked(True)
+        self.assertIn("SXM not readable", tab._blocked())
+        tab.override_check.setChecked(True)
+        self.assertTrue(tab.kp_spin.isEnabled())
+        self.assertIsNone(tab._blocked())
+
+    def test_offline_blocks(self):
         tab = T.TuningTab(MockDDEClient(), None)
-        for c in tab.checks:
+        tab.override_check.setChecked(True)
+        for c in tab.confirms:
             c.setChecked(True)
-        self.assertFalse(tab.btn_single.isEnabled())
-        self.assertFalse(tab.btn_map.isEnabled())
-        self.assertIn("Offline", tab.btn_single.toolTip())
-
-    def test_run_needs_the_checklist(self):
-        inst = FakeInstrument()
-        tab = T.TuningTab(inst, inst)
-        self.assertFalse(tab.btn_single.isEnabled())
-        for c in tab.checks:
-            c.setChecked(True)
-        self.assertTrue(tab.btn_single.isEnabled())
-        tab.checks[0].setChecked(False)
-        self.assertFalse(tab.btn_single.isEnabled())
-
-    def test_switching_loop_loads_the_manuals_defaults(self):
-        tab = T.TuningTab(FakeInstrument(), None)
-        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("afl"))
-        self.assertAlmostEqual(tab.kp_spin.value(), 2e8)      # the manual start for Q = f0 = 25 k at +-1 V
-        self.assertAlmostEqual(tab.ki_spin.value(), 2e4)
-        self.assertEqual(tab.step_spin.value(), 5.0)                          # +-5 %: Drive cannot go below zero
-        self.assertIn("QPlusAmpl", tab.channels_label.text())
-        self.assertEqual(tab.plan().step, 0.05)
-        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("pll"))
-        self.assertEqual(tab.kp_spin.value(), -100.0)
-        self.assertIn("Phase", tab.channels_label.text())
-
-    def test_plan_grid_and_target_come_from_the_widgets(self):
-        tab = T.TuningTab(FakeInstrument(), None)
-        tab.line_spin.setValue(12.0)
-        tab.px_spin.setValue(128)
-        self.assertAlmostEqual(tab.target().rise_max, 0.5 * 12.0 / 128)
-        g = tab.grid()
-        self.assertEqual(g.dims, (5, 6))
-        self.assertEqual(g.kp0, -100.0)
-        tab.speed_lo.setValue(1)
-        tab.shape_hi.setValue(0)
-        self.assertEqual(tab.grid().dims, (4, 4))
-
-    def test_gain_signs_are_validated(self):
-        tab = T.TuningTab(FakeInstrument(), FakeInstrument())
-        self.assertIsNone(tab._gains_valid())
-        tab.kp_spin.setValue(100.0)
-        self.assertIn("negative", tab._gains_valid())
-        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("afl"))
-        self.assertIsNone(tab._gains_valid())
-        tab.kp_spin.setValue(-5.0)
-        self.assertIn("positive", tab._gains_valid())
+        self.assertIn("Offline", tab._blocked())
+        self.assertFalse(tab.btn_explore.isEnabled())
 
 
-class ScopeAdapter(unittest.TestCase):
-    def test_pll_capture_with_step_test_events(self):
-        plan = pll_plan(hold_s=0.5)
-        ct0, cap = record_pll(plan, -100, -1e4, seed=2)
-        ct, msg = T.capture_from_scope(FakeScope(cap, plan), -100, -1e4)
-        self.assertIsNotNone(ct, msg)
-        self.assertEqual(ct.plan.loop, "pll")
-        self.assertAlmostEqual(ct.plan.base, 25000.0, places=3)
-        self.assertAlmostEqual(ct.plan.step, 1.0, places=3)
-        self.assertAlmostEqual(ct.plan.hold_s, 0.5, places=2)
-        self.assertEqual(ct.plan.n_events, 7)
-        res = W.analyze_test(ct)
-        self.assertIsNone(res.failure)
-        self.assertAlmostEqual(res.primary.rise_time, 0.0122, delta=0.004)
+class RegionAndMap(unittest.TestCase):
+    def test_region_lists_the_real_values_and_a_time_estimate(self):
+        tab = typed_afl_tab(FakeAFLInstrument())
+        txt = tab.region_label.text()
+        self.assertIn("Kp: 0, 2e7, 2e8, 2e9", txt)
+        self.assertIn("Ki: 2000, 2e4, 2e5", txt)
+        self.assertIn("min", txt)
+        tab.span_spin.setValue(2)
+        self.assertIn("2e10", tab.region_label.text())
+        tab.btn_center_manual.click()
+        self.assertEqual((tab.kp_center.value(), tab.ki_center.value()), (2e8, 2e4))   # Q = f0 = 25k at +-1 V
 
-    def test_train_that_starts_on_the_high_level(self):
-        plan = pll_plan(hold_s=0.5, start_high=True)
-        _, cap = record_pll(plan, -100, -1e4, seed=2)
-        ct, msg = T.capture_from_scope(FakeScope(cap, plan), -100, -1e4)
-        self.assertTrue(ct.plan.start_high)
-        self.assertIsNone(W.analyze_test(ct).failure)
+    def test_clicking_selects_the_nearest_point_or_the_spot(self):
+        tab = typed_afl_tab(FakeAFLInstrument())
+        tab.select_at(math.log10(2e8) + 0.1, math.log10(2e4) - 0.1)
+        self.assertEqual(tab.selected, (2e8, 2e4))                                # snapped to the grid point
+        tab.select_at(8.6, 3.6)
+        self.assertAlmostEqual(tab.selected[0], 10 ** 8.5)                        # a free spot: 0.25-decade grid
+        self.assertAlmostEqual(tab.selected[1], 10 ** 3.5)
+        tab.select_at(tab._x0(), 4.0)
+        self.assertEqual(tab.selected[0], 0.0)                                    # the Kp = 0 column
+        self.assertIn("Not tested yet", tab.detail.toPlainText())
 
-    def test_amplitude_capture(self):
-        plan = afl_plan()
-        _, cap = record_afl(plan, 8.9e7, 8900)
-        ct, msg = T.capture_from_scope(FakeScope(cap, plan, "QPlusAmpl", "Drive", label="Amplitude Ref (Edit23)={:.10g}"), 8.9e7, 8900)
-        self.assertIsNotNone(ct, msg)
-        self.assertEqual(ct.plan.loop, "afl")
-        self.assertAlmostEqual(ct.plan.step, 0.10, places=3)                 # +-10 % of Ref
-        self.assertIsNone(W.analyze_test(ct).failure)
+    def test_points_outside_the_allowed_change_are_refused(self):
+        tab = typed_afl_tab(FakeAFLInstrument())
+        tab.range_spin.setValue(10.0)
+        self.assertIsNone(tab._gain_ok(2e9, 2e4))
+        self.assertIn("more than x10", tab._gain_ok(2e10, 2e4))
+        self.assertIsNone(tab._gain_ok(0.0, 2e4))                                 # Kp = 0 is always allowed
+        self.assertIn("wrong sign", tab._gain_ok(-2e8, 2e4))
 
-    def test_refuses_with_a_clear_message(self):
-        plan = pll_plan()
-        _, cap = record_pll(plan, -100, -1e4)
-        self.assertIn("no capture", T.capture_from_scope(type("S", (), dict(last_data1=None, last_data2=None, last_rate=None))(), 1, 1)[1].lower())
-        self.assertIn("Step Test events", T.capture_from_scope(FakeScope(cap, plan, events=False), 1, 1)[1])
-        ct, msg = T.capture_from_scope(FakeScope(cap, plan, "Topo", "Bias"), 1, 1)
-        self.assertIsNone(ct)
-        self.assertIn("Unrecognised", msg)
 
-    def test_event_labels_are_parsed(self):
-        self.assertEqual(T._parse_event_value("Used Frequency (f₀)=25000.5"), 25000.5)
-        self.assertEqual(T._parse_event_value("Amplitude Ref=6.6 (base)"), 6.6)
-        self.assertIsNone(T._parse_event_value("no number here"))
-
-    def test_tab_analyzes_the_scope_capture_and_shows_advice(self):
-        plan = pll_plan(hold_s=1.5)
-        _, cap = record_pll(plan, -100, -1e4, seed=5)
-        tab = T.TuningTab(FakeInstrument(), None, scope_tab=FakeScope(cap, plan))
-        tab.line_spin.setValue(12.0)
-        tab.px_spin.setValue(128)
-        tab._analyze_scope()
-        self.assertEqual(len(tab.singles), 1)
-        html = tab.detail_text.toHtml()
-        self.assertIn("good", html.lower())
-        self.assertIn("Suggestions", html)
-        self.assertIn("gains assumed", html)                                  # tells the user which gains it assumed
+class Running(unittest.TestCase):
+    def test_a_selected_point_is_measured_from_the_baseline_and_shown(self):
+        inst = FakeAFLInstrument()
+        tab = typed_afl_tab(inst)
+        tab.select((4e8, 4e4))
+        tab.test_selected()
+        self.assertTrue(tab.runner_active())
+        self.assertTrue(wait_until(lambda: not tab.runner_active(), 90), "test did not finish")
+        self.assertEqual(len(tab.tests), 1)
+        rec = tab.tests[0]
+        self.assertEqual((rec.assessment.kp, rec.assessment.ki), (4e8, 4e4))
+        self.assertIn("recover_s", rec.result.meta["baseline_check"])
+        self.assertIsNotNone(tab.reference)                                       # kept for the next run
+        self.assertEqual(inst.writes[-3:], [("Edit32", 2e8), ("Edit24", 2e4), ("Edit23", 1.0)])
+        text = tab.detail.toPlainText()
+        self.assertIn("Kp 4e8, Ki 4e4", text)
+        self.assertIn("down", text)
         self.assertEqual(tab.table.rowCount(), 1)
-
-    def test_split_rising_falling_traces_are_plotted_when_both_directions_are_present(self):
-        plan = pll_plan(hold_s=1.5)                                          # default 7 events: both directions
-        _, cap = record_pll(plan, -100, -1e4, seed=5)
-        tab = T.TuningTab(FakeInstrument(), None, scope_tab=FakeScope(cap, plan))
-        tab._analyze_scope()
-        self.assertEqual(len(tab.plot1.listDataItems()), 2)                  # rising + falling, not one folded trace
-        self.assertIn("rising vs falling", tab.detail_text.toPlainText())
-
-
-class RunnerEndToEnd(unittest.TestCase):
-    def test_single_test_writes_the_train_and_restores_everything(self):
-        inst = FakeInstrument()
-        tab = make_tab(inst)
-        reasons = []
-        tab._start_runner(tab._one_shot(-100.0, -1e4))
-        tab.runner.finished.connect(reasons.append)
-        self.assertTrue(tab.runner_active())
-        self.assertTrue(wait_until(lambda: reasons), "the test did not finish")
-        self.assertEqual(reasons, ["done"])
-        self.assertEqual(len(tab.singles), 1)
-        res = tab.singles[0]
-        self.assertEqual(res.n_steps, 3)
-        self.assertIsNone(res.failure, res.failure)
-        self.assertIsNotNone(res.primary)
-        # the exact sequence of writes: gains, first level, the 3 toggles, then the baseline back
-        w = inst.writes
-        self.assertEqual(w[:3], [("Edit27", -100.0), ("Edit22", -1e4), ("DNC3", 24999.0)])
-        self.assertEqual([v for c, v in w if c == "DNC3"][:5], [24999.0, 25001.0, 24999.0, 25001.0, 25000.0])
-        self.assertEqual((inst.kp_raw, inst.ki_raw, inst.use), (-100.0, -1e4, 25000.0))
-        self.assertFalse(tab.runner_active())
-
-    def test_events_are_sent_on_schedule(self):
-        inst = FakeInstrument()
-        tab = make_tab(inst)
-        stamps = []
-        orig = inst.send_dncpara
-        inst.send_dncpara = lambda i, v: (stamps.append((time.perf_counter(), v)), orig(i, v))[1]
-        tab._start_runner(tab._one_shot(-100.0, -1e4))
-        self.assertTrue(wait_until(lambda: not tab.runner_active()))
-        toggles = [t for t, v in stamps if v in (25001.0, 24999.0)][1:]        # skip the pre-recording level write
-        gaps = np.diff(toggles)
-        self.assertEqual(len(gaps), 2)
-        for g in gaps:
-            self.assertAlmostEqual(g, FAST["hold"], delta=0.04)                # hold 0.15 s +- 40 ms of timer jitter
-
-    def test_a_small_map_fills_in_paints_and_restores(self):
-        inst = FakeInstrument()
-        tab = make_tab(inst)
-        tab.speed_lo.setValue(0)
-        tab.speed_hi.setValue(0)
-        tab.shape_lo.setValue(1)
-        tab.shape_hi.setValue(0)                                                # 1 x 2 cells: Ki/2 and Ki
-        done = []
-        tab._run_map()
-        tab.runner.finished.connect(done.append)
-        self.assertTrue(wait_until(lambda: done, 40), "map did not finish")
-        m = tab.current_map()
-        self.assertEqual(len(m.results), 2)
-        self.assertEqual(set(m.results), {(0, 0), (0, 1)})
-        self.assertTrue(all(r.verdict is not None for r in m.results.values()))
-        self.assertEqual(tab.table.rowCount(), 2)
-        self.assertEqual((inst.kp_raw, inst.ki_raw, inst.use), (-100.0, -1e4, 25000.0))
-        self.assertEqual(tab.map_img.image.shape, (2, 1, 4))
-        self.assertIn("Kp", tab.detail_text.toPlainText())
-
-    def test_stop_restores_the_baseline_mid_run(self):
-        inst = FakeInstrument()
-        tab = make_tab(inst)
-        tab.speed_lo.setValue(1)
-        tab.speed_hi.setValue(1)
-        tab._run_map()
-        reasons = []
-        tab.runner.finished.connect(reasons.append)
-        time.sleep(0.05)
-        wait_until(lambda: False, 0.5)                                          # let it start a test (gains changed)
-        tab.stop()
-        self.assertEqual(reasons, ["stopped"])
-        self.assertEqual((inst.kp_raw, inst.ki_raw, inst.use), (-100.0, -1e4, 25000.0))
-        self.assertFalse(tab.runner_active())
-        wait_until(lambda: False, 0.4)                                          # nothing may fire after the stop
-        self.assertEqual((inst.kp_raw, inst.ki_raw, inst.use), (-100.0, -1e4, 25000.0))
-
-    def test_runaway_aborts_the_test_and_restores_the_baseline(self):
-        inst = FakeInstrument()
-        plan = W.StepTestPlan(loop="pll", base=25000.0, step=1.0, hold_s=0.5, n_events=3, lead_s=1.0, tail_s=0.5, settle_s=0.3)
-        runner = T.TuningRunner(inst, inst, plan, baseline=(-100.0, -1e4), analysis={})
-        got, msgs, reasons = [], [], []
-        runner.test_finished.connect(lambda c, r: got.append((c, r)))
-        runner.message.connect(msgs.append)
-        runner.finished.connect(reasons.append)
-        runner.start(self._items([("bad", +100.0, +1e4)]))                       # positive gains = positive feedback
-        self.assertTrue(wait_until(lambda: reasons, 20), "no abort")
-        self.assertTrue(reasons[0].startswith("aborted"), reasons)
-        self.assertEqual(len(got), 1)
-        self.assertIn("aborted", got[0][1].failure)
-        self.assertTrue(any("ABORT" in m for m in msgs))
-        self.assertEqual((inst.kp_raw, inst.ki_raw, inst.use), (-100.0, -1e4, 25000.0))
-        # the aborted cell counts as lost and blocks more aggressive cells in a map
-        self.assertEqual(W.classify(got[0][1], W.Target(rise_max=0.05)).category, "lost")
-
-    def test_dde_failure_aborts_cleanly(self):
-        inst = FakeInstrument()
-
-        def boom(*a, **k):
-            raise RuntimeError("DDE down")
-        plan = W.StepTestPlan(loop="pll", base=25000.0, hold_s=0.5, settle_s=0.2)
-        runner = T.TuningRunner(inst, inst, plan, baseline=(-100.0, -1e4), analysis={})
-        reasons = []
-        runner.finished.connect(reasons.append)
-        inst.send_scanpara = boom
-        runner.start(self._items([("c", -100.0, -1e4)]))
-        self.assertTrue(wait_until(lambda: reasons, 5))
-        self.assertIn("DDE down", reasons[0])
-        self.assertFalse(runner.running)
-
-    @staticmethod
-    def _items(items):
-        q = list(items)
-        return lambda: q.pop(0) if q else None
-
-
-class MapInteraction(unittest.TestCase):
-    """The map view, selection, advice and refinement with pre-recorded (fixture) results."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.tab = T.TuningTab(FakeInstrument(), None)
-        cls.tab.line_spin.setValue(12.0)
-        cls.tab.px_spin.setValue(128)
-        cls.tab.speed_lo.setValue(1)
-        cls.tab.speed_hi.setValue(1)
-        cls.tab.shape_lo.setValue(1)
-        cls.tab.shape_hi.setValue(1)
-        m = cls.tab._ensure_map()
-        n = 0
-        while (c := m.next_cell()) is not None:
-            kp, ki = m.pair(c)
-            ct, _ = record_pll(pll_plan(hold_s=1.5), kp, ki, seed=n + 1)
-            m.record(c, W.analyze_test(ct, li_tau=0.002, f0=25000.0, q=25000.0))
-            n += 1
-        cls.tab._paint_map()
-
-    def test_every_cell_is_painted_with_its_category_colour(self):
-        m = self.tab.current_map()
-        img = self.tab.map_img.image                                            # (ki index, kp index, rgba)
-        self.assertEqual(img.shape, (3, 3, 4))
-        cat = m.category_grid()
-        for i in range(3):
-            for j in range(3):
-                self.assertEqual(tuple(img[j, i][:3]), T.CATEGORY_COLOR[cat[i, j]])
-
-    def test_clicking_a_cell_shows_its_response_and_advice(self):
-        self.tab.select_cell((1, 1))
-        html = self.tab.detail_text.toHtml()
-        self.assertIn("Kp = -100", html)
-        self.assertIn("Suggestions", html)
-        self.assertIn("Identified loop", html)                                  # identification ran (lock-in set)
-        self.assertGreater(len(self.tab.plot1.listDataItems()), 0)
-        self.assertGreater(len(self.tab.plot2.listDataItems()), 0)
-
-    def test_untested_or_skipped_cells_explain_themselves(self):
-        tab = T.TuningTab(FakeInstrument(), None)
-        m = tab._ensure_map()
-        m.skipped[(0, 0)] = "more aggressive than cell (1, 1), which lost the loop"
-        tab.select_cell((0, 0))
-        self.assertIn("lost the loop", tab.detail_text.toPlainText())
-        tab.select_cell((4, 5))
-        self.assertIn("not tested yet", tab.detail_text.toPlainText())
-
-    def test_zoom_refines_around_the_selection_and_back_returns(self):
-        tab = self.tab
-        before = len(tab.maps)
-        tab.select_cell((1, 1))
-        tab._zoom()
-        self.assertEqual(len(tab.maps), before + 1)
-        sub = tab.current_map()
-        self.assertEqual(sub.grid.dims, (3, 3))
-        center = (1, 1)
-        self.assertIn(center, sub.results)                                      # already measured: not repeated
-        self.assertAlmostEqual(sub.grid.kp0, tab.maps[0].grid.kp(1))
-        tab._back()
-        self.assertEqual(len(tab.maps), before)
-
-    def test_prior_from_a_test_with_a_model_paints_predictions(self):
-        tab = self.tab
-        tab.select_cell((1, 1))
-        self.assertTrue(tab.btn_prior.isEnabled())
-        tab._predict_prior()
-        m = tab.current_map()
-        self.assertEqual(len(m.prior), 9)
-
-    def test_stage_selected_pair_in_the_parameters_tab(self):
-        staged = []
-
-        class Params:
-            def stage_value(self, ptype, code, value):
-                staged.append((ptype, code, value))
-                return True
-        tab = T.TuningTab(FakeInstrument(), None, params_tab=Params())
-        m = tab._ensure_map()
-        tab.select_cell((2, 3))
-        tab._stage_selected()
-        kp, ki = m.pair((2, 3))
-        self.assertEqual(staged, [("EDIT", "Edit27", kp), ("EDIT", "Edit22", ki)])
-
-
-class Guidance(unittest.TestCase):
-    """The on-screen explanations: the Guide tab and the 'what now?' line."""
-
-    def test_guide_covers_every_verdict_with_an_action(self):
-        html = T.guide_html()
-        for cat in W.CATEGORIES:
-            self.assertIn(W.CATEGORY_LABEL[cat], html)
-            self.assertIn(cat, {c for c, _, _ in T.GUIDE_VERDICTS})
-        for word in ("Baseline", "Kp", "Ki", "Stage in Params tab"):
-            self.assertIn(word, html)
-
-    def test_guide_is_the_first_thing_shown_and_the_first_result_switches_to_the_plots(self):
-        tab = make_tab(FakeInstrument())
-        self.assertIs(tab.detail_tabs.currentWidget(), tab.guide)
-        self.assertIn("No test yet", tab.detail_text.toPlainText())
-        tab._show_result(W.StepTestResult(kp=-100, ki=-1e4, loop="pll", failure="x"))
-        self.assertEqual(tab.detail_tabs.currentIndex(), 0)
-
-    def test_hint_says_why_the_buttons_are_disabled_and_what_to_press(self):
-        tab = T.TuningTab(FakeInstrument(), FakeInstrument())
-        self.assertIn("tick every item", tab.hint_label.text())
-        self.assertIn("Tick every item", tab.btn_single.toolTip())
-        self.assertFalse(tab.btn_single.isEnabled())
-        for c in tab.checks:
-            c.setChecked(True)
-        self.assertIn("Run single test", tab.hint_label.text())
-        self.assertTrue(tab.btn_single.isEnabled())
-        off = T.TuningTab(MockDDEClient(), None)
-        self.assertIn("Offline", off.hint_label.text())
-
-
-class AmplitudeLoopUI(unittest.TestCase):
-    def make(self):
-        tab = T.TuningTab(FakeInstrument(), FakeInstrument())
-        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("afl"))
-        return tab
-
-    def test_switching_to_the_amplitude_loop_uses_the_manuals_values_at_1v(self):
-        tab = self.make()
-        self.assertEqual(tab.gain_combo.currentData(), 1.0)
-        self.assertAlmostEqual(tab.ki_spin.value(), 5e8 / tab.q_spin.value())
-        self.assertAlmostEqual(tab.kp_spin.value() / tab.ki_spin.value(), 1e4)
-        self.assertAlmostEqual(tab.tau_spin.value(), 10.0 * tab.q_spin.value() / tab.f0_spin.value())
-        self.assertEqual((tab.factor_spin.value(), tab.range_spin.value()), (10.0, 1000.0))
-        self.assertFalse(tab.gain_combo.isHidden())
-        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("pll"))
-        self.assertTrue(tab.gain_combo.isHidden())
-        self.assertEqual((tab.factor_spin.value(), tab.range_spin.value()), (2.0, 16.0))
-
-    def test_a_lower_output_gain_automatically_scales_the_current_gains_by_ten(self):
-        tab = self.make()
-        ki1, kp1 = tab.ki_spin.value(), tab.kp_spin.value()
-        tab.gain_combo.setCurrentIndex(tab.gain_combo.findData(0.1))
-        self.assertAlmostEqual(tab.ki_spin.value() / ki1, 10.0)                 # the selector itself now rescales
-        self.assertAlmostEqual(tab.kp_spin.value() / kp1, 10.0)
-        self.assertIn("+-0.1 V", tab.start_label.text())
-        self.assertIn("x10", tab.log.toPlainText())
-
-    def test_gain_change_preserves_a_multiplier_already_applied_by_the_user(self):
-        tab = self.make()                                                       # +-1 V baseline: Ki=2e4, Kp=2e8
-        tab.ki_spin.setValue(tab.ki_spin.value() * 3)                           # user scaled up by x3
-        tab.kp_spin.setValue(tab.kp_spin.value() * 3)
-        tab.gain_combo.setCurrentIndex(tab.gain_combo.findData(0.1))            # +-1 V -> +-0.1 V: x10
-        self.assertAlmostEqual(tab.ki_spin.value(), 3 * 2e4 * 10, delta=1.0)    # x3 preserved, not reset to baseline
-        self.assertAlmostEqual(tab.kp_spin.value(), 3 * 2e8 * 10, delta=1e4)
-        self.assertAlmostEqual(tab.kp_spin.value() / tab.ki_spin.value(), 1e4)  # ratio still exact
-
-    def test_gain_change_only_rescales_while_on_the_amplitude_loop(self):
-        tab = T.TuningTab(FakeInstrument(), None)                              # default loop: PLL
-        kp0, ki0 = tab.kp_spin.value(), tab.ki_spin.value()
-        tab.gain_combo.setCurrentIndex(tab.gain_combo.findData(0.1))           # hidden, but exists
-        self.assertEqual((tab.kp_spin.value(), tab.ki_spin.value()), (kp0, ki0))
-
-    def test_use_the_manuals_start_values_still_resets_to_the_pure_baseline(self):
-        tab = self.make()
-        tab.ki_spin.setValue(tab.ki_spin.value() * 3)                          # some arbitrary current value
-        tab.btn_fill.click()
-        self.assertAlmostEqual(tab.ki_spin.value(), 2e4)                       # back to the exact manual baseline
-        self.assertAlmostEqual(tab.kp_spin.value(), 2e8)
-
-    def test_a_baseline_far_from_the_manual_start_is_flagged(self):
-        tab = self.make()
-        for c in tab.checks:
-            c.setChecked(True)
-        self.assertNotIn("Check:", tab.hint_label.text())
-        tab.ki_spin.setValue(tab.ki_spin.value() * 100)
-        self.assertIn("Check:", tab.hint_label.text())
-
-    def test_the_mismatch_warning_survives_a_gain_change_since_both_sides_scale_together(self):
-        # a real x100 mismatch is not "explained away" by relabelling the output gain: auto-rescale
-        # moves the (already wrong) Ki by the same factor as the baseline it is compared against.
-        tab = self.make()
-        for c in tab.checks:
-            c.setChecked(True)
-        tab.ki_spin.setValue(tab.ki_spin.value() * 100)
-        self.assertIn("Check:", tab.hint_label.text())
-        tab.gain_combo.setCurrentIndex(tab.gain_combo.findData(0.1))
-        self.assertIn("Check:", tab.hint_label.text())
-
-    def test_the_checklist_follows_the_loop_and_starts_unticked(self):
-        tab = T.TuningTab(FakeInstrument(), FakeInstrument())
-        for c in tab.checks:
-            c.setChecked(True)
-        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("afl"))
-        self.assertFalse(any(c.isChecked() for c in tab.checks))
-        self.assertIn("PLL off", tab.checks[1].text())
-        self.assertNotIn("Auto 0", " ".join(c.text() for c in tab.checks))
-        self.assertFalse(tab.btn_scan.isEnabled())
-        for c in tab.checks:
-            c.setChecked(True)
-        self.assertTrue(tab.btn_scan.isEnabled())
-
-    def test_scale_scan_and_limits_come_from_the_widgets(self):
-        tab = self.make()
-        g = tab.scan_grid()
-        self.assertEqual(g.dims, (7, 1))                                        # pure speed: a single shape column
-        self.assertEqual(g.factor, 10.0)
-        self.assertAlmostEqual(g.ki(6, 0) / g.kp(6), tab.ki_spin.value() / tab.kp_spin.value())
-        lim = tab.safety_limits()
-        self.assertEqual(lim.max_gain_factor, 1000.0)
-        self.assertAlmostEqual(lim.min_gain_factor, 1e-3)
-        self.assertIn("Scale sweep: 5 tests", tab.est_label.text())          # the amplitude loop's protocol
-
-    def test_running_a_scale_scan_pushes_a_speed_only_map_and_stop_restores_the_baseline(self):
-        inst = FakeInstrument()
-        tab = T.TuningTab(inst, inst)
-        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("afl"))
-        for c in tab.checks:
-            c.setChecked(True)
-        kp, ki = tab.kp_spin.value(), tab.ki_spin.value()
-        tab._confirmed_baseline[tab.loop_def.key] = (kp, ki)
-        tab._run_scan()
-        self.assertTrue(tab.runner_active())
-        m = tab.current_map()
-        self.assertEqual(m.grid.dims, (7, 1))
-        self.assertEqual(len(m.cells()), 7)
-        tab.stop()
-        self.assertFalse(tab.runner_active())
-        self.assertEqual(inst.writes[-3:], [("Edit32", kp), ("Edit24", ki), ("Edit23", 6.0)])    # baseline + Ref back
-
-    def test_a_suggestion_beyond_the_allowed_range_is_not_run(self):
-        tab = self.make()
-        for c in tab.checks:
-            c.setChecked(True)
-        tab.range_spin.setValue(4.0)
-        tab._suggestions = [W.Suggestion("scale_both", tab.kp_spin.value() * 10, tab.ki_spin.value() * 10, "x")]
-        tab._test_suggestion()
-        self.assertFalse(tab.runner_active())
-        self.assertIn("Not run", tab.log.toPlainText())
-
-    def test_the_guide_explains_the_amplitude_loop(self):
-        html = T.guide_html()
-        for word in ("Output Gain", "scale sweep", "decades", "Drive", "input gain", "5 %", "zero"):
-            self.assertIn(word.lower(), html.lower())
-
-
-class BaselineProtection(unittest.TestCase):
-    """Priority 1: confirmation gate, checklist hygiene, restored-value logging, voltage warning."""
-
-    def test_declining_the_confirmation_aborts_the_run(self):
-        inst = FakeInstrument()
-        tab = T.TuningTab(inst, inst)
-        for c in tab.checks:
-            c.setChecked(True)
-        tab._confirm_baseline = lambda kp, ki: False           # simulate Cancel, without a real dialog
-        tab._run_single()
-        self.assertIsNone(tab.runner)
-        self.assertIn("not started", tab.log.toPlainText())
-
-    def test_an_already_confirmed_baseline_does_not_reprompt(self):
-        tab = make_tab(FakeInstrument())                        # make_tab pre-confirms the baseline
-
-        def boom(*a, **k):
-            raise AssertionError("QMessageBox.exec_ must not be called for an already-confirmed baseline")
-        orig = QtWidgets.QMessageBox.exec_
-        QtWidgets.QMessageBox.exec_ = boom
-        try:
-            self.assertTrue(tab._confirm_baseline(tab.kp_spin.value(), tab.ki_spin.value()))
-        finally:
-            QtWidgets.QMessageBox.exec_ = orig
-
-    def test_an_edited_baseline_is_no_longer_considered_confirmed(self):
-        tab = make_tab(FakeInstrument())                        # pre-confirmed at Kp=-100, Ki=-1e4
-        tab.kp_spin.setValue(tab.kp_spin.value() * 2)            # edited: no longer matches the confirmed pair
-        orig = QtWidgets.QMessageBox.exec_
-        QtWidgets.QMessageBox.exec_ = lambda self: QtWidgets.QMessageBox.Cancel   # a real dialog is now shown
-        try:
-            self.assertFalse(tab._confirm_baseline(tab.kp_spin.value(), tab.ki_spin.value()))
-        finally:
-            QtWidgets.QMessageBox.exec_ = orig
-
-    def test_checklist_resets_when_the_baseline_or_target_changes(self):
-        tab = T.TuningTab(FakeInstrument(), None)
-        for c in tab.checks:
-            c.setChecked(True)
-        tab.kp_spin.setValue(tab.kp_spin.value() * 2)
-        self.assertFalse(any(c.isChecked() for c in tab.checks))
-        for c in tab.checks:
-            c.setChecked(True)
-        tab.rise_spin.setValue(tab.rise_spin.value() + 1)
-        self.assertFalse(any(c.isChecked() for c in tab.checks))
-
-    def test_checklist_resets_after_a_run_finishes(self):
-        tab = make_tab(FakeInstrument())
-        tab._start_runner(tab._one_shot(-100.0, -1e4))
-        self.assertTrue(wait_until(lambda: not tab.runner_active()))
-        self.assertFalse(any(c.isChecked() for c in tab.checks))
-
-    def test_restored_baseline_is_logged_with_real_values(self):
-        tab = make_tab(FakeInstrument())
-        tab._start_runner(tab._one_shot(-100.0, -1e4))
-        self.assertTrue(wait_until(lambda: not tab.runner_active()))
-        self.assertIn("Baseline restored: Kp=-100, Ki=-1e+04", tab.log.toPlainText())
-
-    def test_afl_voltage_warning_appears_only_beyond_the_limit(self):
-        tab = T.TuningTab(FakeInstrument(), None)
-        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("afl"))
-        tab.base_spin.setValue(6.0)
-        tab.step_spin.setValue(10.0)                            # +-10 % of 6 V: well inside +-10 V
-        self.assertEqual(tab._voltage_warning(), "")
-        tab.base_spin.setValue(12.0)                            # 12 V + 10 % = 13.2 V: over the limit
-        self.assertIn("Check:", tab._voltage_warning())
-        self.assertIn("Check:", tab.hint_label.text())
-
-    def test_pinned_stop_button_is_enabled_only_while_running(self):
-        tab = make_tab(FakeInstrument())
-        self.assertFalse(tab.btn_stop.isEnabled())
-        tab._start_runner(tab._one_shot(-100.0, -1e4))
-        self.assertTrue(tab.btn_stop.isEnabled())
-        tab.stop()
-        self.assertFalse(tab.btn_stop.isEnabled())
-
-    def test_context_label_reflects_loop_baseline_and_connection(self):
-        tab = T.TuningTab(FakeInstrument(), None)
-        text = tab.context_label.text()
-        self.assertIn("PLL", text)
-        self.assertIn("-100", text)
-        self.assertIn("OFFLINE", text)
-        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("afl"))
-        self.assertIn("AFL", tab.context_label.text())
-
-
-class ScaleSweepUI(unittest.TestCase):
-    """The amplitude-loop guided scale-sweep protocol, driven end to end against FakeInstrument."""
-
-    def make_afl_tab(self, inst):
-        tab = T.TuningTab(inst, inst)
-        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("afl"))
-        tab.LEAD_S, tab.TAIL_S = 0.2, 0.1
-        tab.hold_spin.setValue(0.15)
-        tab.events_spin.setValue(FAST["events"])
-        tab.settle_spin.setValue(0.2)
-        for c in tab.checks:
-            c.setChecked(True)
-        tab._confirmed_baseline[tab.loop_def.key] = (tab.kp_spin.value(), tab.ki_spin.value())
-        return tab
-
-    def test_scale_list_parsing_rejects_garbage(self):
-        tab = self.make_afl_tab(FakeInstrument())
-        for bad in ("0.1, abc, 2", "", "0, 1", "-1, 1"):
-            tab.scale_list_edit.setText(bad)
-            with self.assertRaises(ValueError):
-                tab._parse_scale_list()
-        tab.scale_list_edit.setText("0.1, 0.3, 1")
-        self.assertEqual(tab._parse_scale_list(), [0.1, 0.3, 1.0])
-
-    def test_an_invalid_scale_list_warns_instead_of_running(self):
-        tab = self.make_afl_tab(FakeInstrument())
-        tab.scale_list_edit.setText("not, numbers")
-        orig = QtWidgets.QMessageBox.warning
-        QtWidgets.QMessageBox.warning = staticmethod(lambda *a, **k: None)      # a real dialog would block here
-        try:
-            tab._run_scale_sweep()
-        finally:
-            QtWidgets.QMessageBox.warning = orig
-        self.assertFalse(tab.runner_active())
-
-    def test_running_a_short_sweep_fills_the_table_and_logs_a_recommendation(self):
-        inst = FakeInstrument()
-        tab = self.make_afl_tab(inst)
-        tab.scale_list_edit.setText("1, 2")
-        tab._run_scale_sweep()
-        self.assertTrue(tab.runner_active())
-        self.assertIs(tab.detail_tabs.currentWidget(), tab.sweep_tab)           # watch it fill, no per-point tab jump
-        self.assertTrue(wait_until(lambda: not tab.runner_active(), 40), "sweep did not finish")
-        self.assertGreaterEqual(tab.sweep_table.rowCount(), 1)
-        self.assertTrue(any(r is not None for r in tab._sweep_results))
-        self.assertIn("Scale sweep finished", tab.log.toPlainText())
-        # the baseline (not the last-tested scale point) is what got restored, via Kp/Ki/Ref in that order
-        kp, ki = tab.kp_spin.value(), tab.ki_spin.value()
-        self.assertEqual(inst.writes[-3:], [("Edit32", kp), ("Edit24", ki), ("Edit23", tab.base_spin.value())])
-
-
-class AmplitudeLoopSimplified(unittest.TestCase):
-    """The amplitude loop is tuned with the 1-D sweep: the map and its controls are PLL-only."""
-
-    def test_map_controls_are_hidden_for_the_amplitude_loop_and_back_for_the_pll(self):
-        tab = T.TuningTab(FakeInstrument(), FakeInstrument())
-        tab.show()
-        try:
-            map_widgets = (tab.btn_scan, tab.btn_map, tab.btn_narrow, tab.btn_zoom, tab.map_plot, tab.factor_spin)
-            self.assertTrue(all(w.isVisible() for w in map_widgets))
-            tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("afl"))
-            self.assertFalse(any(w.isVisible() for w in map_widgets))
-            self.assertFalse(tab._search_form.labelForField(tab.factor_spin).isVisible())
-            for w in (tab.btn_sweep, tab.btn_single, tab.scale_list_edit, tab.range_spin, tab.ina_combo):
-                self.assertTrue(w.isVisible())
-            self.assertEqual(tab._parse_scale_list(), [0.25, 0.5, 1.0, 2.0, 4.0])
-            tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("pll"))
-            self.assertTrue(all(w.isVisible() for w in map_widgets))
-        finally:
-            tab.hide()
-
-
-class FakeReadout:
-    def __init__(self, values):
-        import datetime
-        self.values, self.errors, self.timestamp = dict(values), {}, datetime.datetime(2026, 10, 2, 14, 30, 12)
-        self.ok = True
-
-    def get(self, k):
-        return self.values.get(k)
-
-    def by_code(self, ptype, pcode):
-        return None
-
-
-class FakeReader:
-    def __init__(self, values):
-        self.values = values
-
-    def read(self):
-        return FakeReadout(self.values)
-
-
-SXM_VALUES = {"amp_ref": 0.55, "amp_kp": 1e7, "amp_ki": 1200.0, "amp_tau_s": 0.05, "pll_kp": -100.0, "pll_ki": -1e4,
-              "input_gain_ina": 10.0, "afl_output_gain": 0.1, "dnc_time_constant_s": 0.002, "used_freq": 25562.49,
-              "q": 148699.0, "f_peak": 25562.0}
-
-
-class InputGainAndExport(unittest.TestCase):
-    def make_afl(self, inst, values=SXM_VALUES):
-        tab = T.TuningTab(inst, inst, reader=FakeReader(values))
-        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("afl"))
-        tab.LEAD_S, tab.TAIL_S = 0.2, 0.1
-        tab.hold_spin.setValue(0.15)
-        tab.events_spin.setValue(FAST["events"])
-        tab.settle_spin.setValue(0.2)
-        for c in tab.checks:
-            c.setChecked(True)
-        tab._confirm_baseline = lambda kp, ki: True                              # no blocking dialog offscreen
-        return tab
-
-    def test_read_from_sxm_selects_the_input_gain(self):
-        tab = self.make_afl(FakeInstrument())
-        tab.read_from_sxm(quiet=True)
-        self.assertEqual(tab.ina_combo.currentData(), 10.0)
-        self.assertIn("input gain=x10", tab.log.toPlainText())
-
-    def test_a_run_is_refused_when_sxm_has_another_input_gain(self):
-        inst = FakeInstrument()
-        tab = self.make_afl(inst)
-        tab.ina_combo.setCurrentIndex(tab.ina_combo.findData(1.0))               # intended x1, SXM shows x10
-        orig = QtWidgets.QMessageBox.warning
-        QtWidgets.QMessageBox.warning = staticmethod(lambda *a, **k: None)
-        try:
-            tab._run_single()
-        finally:
-            QtWidgets.QMessageBox.warning = orig
-        self.assertFalse(tab.runner_active())
-        self.assertEqual(inst.writes, [])                                        # nothing written to SXM
-        self.assertIn("Input Gain InA is x10", tab.log.toPlainText())
-
-    def test_a_run_records_the_settings_and_exports_csv_and_json(self):
-        import json
-        import tempfile
-        inst = FakeInstrument()
-        tab = self.make_afl(inst)
-        tab.ina_combo.setCurrentIndex(tab.ina_combo.findData(10.0))
-        tab._run_single()
-        self.assertTrue(tab.runner_active())
-        self.assertTrue(wait_until(lambda: not tab.runner_active(), 40), "test did not finish")
-        self.assertEqual(len(tab.results_log), 1)
-        res = tab.results_log[0]
-        self.assertEqual(res.meta["source"], "run")
-        self.assertEqual(res.meta["metadata"].get("input_gain_ina"), 10.0)
-        self.assertEqual(res.meta["plan"]["selected_input_gain"], 10.0)
         self.assertTrue(tab.btn_export.isEnabled())
+
+    def test_exploration_stops_cleanly_and_does_not_retest(self):
+        inst = FakeAFLInstrument()
+        tab = typed_afl_tab(inst)
+        tab.explore()
+        self.assertTrue(wait_until(lambda: len(tab.tests) >= 2, 120), "exploration did not measure two points")
+        tab.stop()
+        self.assertFalse(tab.runner_active())
+        self.assertEqual(inst.writes[-3:], [("Edit32", 2e8), ("Edit24", 2e4), ("Edit23", 1.0)])
+        done = {X._key(r.assessment.kp, r.assessment.ki) for r in tab.tests}
+        ex = X.Explorer(tab.region(), X.ExplorePlan())                           # how the next Explore plans
+        for r in tab.tests:
+            ex.add_manual(r.assessment)
+        p = ex.next()
+        self.assertNotIn(X._key(p.kp, p.ki), done)
+
+    def test_export_writes_up_and_down_per_test(self):
+        tab = typed_afl_tab(FakeAFLInstrument())
+        res = W.StepTestResult(kp=2e8, ki=2e4, loop="afl", failure="lost: amplitude collapsed")
+        res.meta["baseline_check"] = {"recover_s": 1.2, "settle_s": 0.7}
+        tab.tests.append(T.TestRecord(X.Proposal(2e8, 2e4, "grid", "coarse grid"), res, X.assess(res), None,
+                                      tab.plan(), "now"))
+        tab._refresh_all()
         name = tab.default_export_name()
-        self.assertIn("_tuning_AFL-1tests_AFL-Ref0.55-Kp1e7-Ki1200-Tau50ms_PLL-Kp-100-Ki-1e4_InA10_OG0.1V_TC2ms", name)
+        self.assertIn("_tuning_AFL-1tests", name)
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, name)
-            json_path = tab.export_results_to(path)
-            text = open(path, encoding="utf-8").read()
+            js = tab.export_results_to(path)
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
             self.assertIn("# SXM nc-AFM tuning results", text)
-            self.assertIn("# [Amplitude feedback (AFL)]", text)
-            self.assertRegex(text, r"#   Input gain InA +10 x")
-            data_lines = [ln for ln in text.splitlines() if not ln.startswith("#")]
-            self.assertTrue(data_lines[0].startswith("time,source,loop,Kp,Ki,verdict"))
-            self.assertEqual(len(data_lines), 2)                                  # header + one test
-            payload = json.load(open(json_path, encoding="utf-8"))
-            self.assertEqual(payload["kind"], "ncafm_tuning_results")
-            self.assertEqual(payload["groups"]["DNC (lock-in and excitation)"]["Input gain InA"]["value"], 10.0)
-            self.assertEqual(len(payload["tests"]), 1)
-            self.assertEqual(payload["tests"][0]["input_gain"], "10")
+            header = [ln for ln in text.splitlines() if not ln.startswith("#")][0]
+            for col in ("up-steps", "down-steps", "up rise 10-90 % [ms]", "recovered to baseline [s]", "Drive at zero [%]"):
+                self.assertIn(col, header)
+            with open(js, encoding="utf-8") as f:
+                payload = json.load(f)
+            self.assertEqual(payload["tests"][0]["result"], "lost")
+            self.assertEqual(payload["tests"][0]["baseline_check"]["recover_s"], 1.2)
 
 
-class SuggestedSetupGain(unittest.TestCase):
-    def test_output_gain_scales_the_amplitude_gains(self):
-        from sxm_ncafm_control.gui.suggested_tab import SuggestedTab
-        tab = SuggestedTab(FakeInstrument(), None)
-        tab.q_val.setValue(25000.0)
-        tab.f0_val.setValue(25000.0)
-        tab.out_gain.setCurrentIndex(tab.out_gain.findData(1.0))
-        tab._recalc()
-        ki1, kp1 = float(tab.ki_out.text()), float(tab.kp_out.text())
-        self.assertAlmostEqual(ki1, 2e4)
-        tab.out_gain.setCurrentIndex(tab.out_gain.findData(0.1))                # recalculates by itself
-        self.assertAlmostEqual(float(tab.ki_out.text()) / ki1, 10.0)
-        self.assertAlmostEqual(float(tab.kp_out.text()) / kp1, 10.0)
+class Guide(unittest.TestCase):
+    def test_guide_explains_the_method(self):
+        html = T.guide_html().lower()
+        for word in ("baseline", "bisection", "kp = 0", "up-steps", "down-steps", "margin", "ring-down"):
+            self.assertIn(word, html)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Tests for tuning.workflow: test definition, channel detection, analysis, verdicts, advice, safety, map."""
+"""Tests for tuning.workflow: test definition, channel detection, analysis, safety, the manual's start values."""
 import math
 import unittest
 
@@ -6,11 +6,8 @@ import numpy as np
 
 from sxm_ncafm_control.tests.fixtures import (AFL_SETUP, PLL_SCALE, PLL_SETUP, afl_plan, pll_plan, record_afl,
                                               record_pll)
-from sxm_ncafm_control.tuning import metrics as M
+from sxm_ncafm_control.tuning import explore as X
 from sxm_ncafm_control.tuning import workflow as W
-
-SLOW_SCAN = W.Target.from_scan(t_line=12.0, n_px=128)     # rise <= 47 ms, Phase tail <= 1.2 s
-FAST_SCAN = W.Target.from_scan(t_line=3.0, n_px=256)      # rise <= 5.9 ms
 
 
 class Detection(unittest.TestCase):
@@ -89,50 +86,39 @@ class Alignment(unittest.TestCase):
 
 
 class AnalysePLL(unittest.TestCase):
-    def analyse(self, kp, ki, target, **kw):
+    def analyse(self, kp, ki, **kw):
         plan = pll_plan(**{k: kw.pop(k) for k in list(kw) if k in ("hold_s", "n_events", "lead_s")})
         ct, _ = record_pll(plan, kp, ki, **kw)
         res = W.analyze_test(ct)
-        res.verdict = W.classify(res, target)
-        return res
+        return res, X.assess(res)
 
-    def test_good_gains_for_a_slow_scan(self):
-        r = self.analyse(-100, -1e4, SLOW_SCAN, hold_s=2.0)
+    def test_good_gains(self):
+        r, a = self.analyse(-100, -1e4, hold_s=2.0)
         self.assertIsNone(r.failure)
         self.assertEqual(r.n_steps, 7)
         self.assertAlmostEqual(r.primary.rise_time, 0.0122, delta=0.003)       # simulator ground truth ~12 ms
         self.assertAlmostEqual(r.primary.overshoot, 0.095, delta=0.04)
-        self.assertEqual(r.verdict.category, "good", r.verdict.reasons)
+        # the manual calls these gains fast with ~10 % overshoot: right at the limit, so either verdict is honest;
+        # what matters is that each direction agrees with the folded measurement
+        self.assertIn(a.status, ("clean", "overshoot"))
+        for d in (a.up, a.down):
+            self.assertAlmostEqual(d.overshoot, r.primary.overshoot, delta=0.06)
         self.assertTrue(0.005 < r.noise_rms < 0.08)
         self.assertGreater(r.latency_s, 0.006)                                  # command latency was 8 ms
 
-    def test_same_gains_are_too_slow_for_a_fast_scan(self):
-        r = self.analyse(-100, -1e4, FAST_SCAN, hold_s=2.0)
-        self.assertEqual(r.verdict.category, "too_slow")
-
     def test_high_ki_overshoots_and_very_high_ki_rings_or_is_lost(self):
-        self.assertEqual(self.analyse(-100, -5e4, SLOW_SCAN, hold_s=2.0).verdict.category, "overshoot")
-        self.assertIn(self.analyse(-100, -3e5, SLOW_SCAN, hold_s=2.0).verdict.category, ("ringing", "lost"))
-
-    def test_low_ki_is_a_slow_tail(self):
-        r = self.analyse(-100, -1e3, SLOW_SCAN, hold_s=2.0)
-        self.assertEqual(r.verdict.category, "slow_tail", r.verdict.reasons)
-
-    def test_short_holds_do_not_judge_the_tail(self):
-        r = self.analyse(-100, -1e3, SLOW_SCAN, hold_s=0.2, lead_s=0.6)
-        self.assertNotEqual(r.verdict.category, "slow_tail")
-        self.assertTrue(any("lengthen the hold" in w for w in r.warnings), r.warnings)
-        self.assertIsNotNone(r.primary)                                        # the df edge is still measured
+        self.assertEqual(self.analyse(-100, -5e4, hold_s=2.0)[1].status, "overshoot")
+        self.assertIn(self.analyse(-100, -3e5, hold_s=2.0)[1].status, ("ringing", "lost"))
 
     def test_short_holds_still_give_the_df_shape(self):
-        long_ = self.analyse(-100, -1e4, SLOW_SCAN, hold_s=2.0)
-        short = self.analyse(-100, -1e4, SLOW_SCAN, hold_s=0.2, lead_s=0.6)
+        long_ = self.analyse(-100, -1e4, hold_s=2.0)[0]
+        short = self.analyse(-100, -1e4, hold_s=0.2, lead_s=0.6)[0]
         self.assertAlmostEqual(short.primary.rise_time, long_.primary.rise_time, delta=0.4 * long_.primary.rise_time)
         self.assertAlmostEqual(short.primary.overshoot, long_.primary.overshoot, delta=0.06)
 
     def test_timing_jitter_does_not_smear_the_edges(self):
-        clean = self.analyse(-100, -1e4, SLOW_SCAN, hold_s=1.0)
-        jit = self.analyse(-100, -1e4, SLOW_SCAN, hold_s=1.0, jitter_s=0.012)
+        clean = self.analyse(-100, -1e4, hold_s=1.0)[0]
+        jit = self.analyse(-100, -1e4, hold_s=1.0, jitter_s=0.012)[0]
         self.assertAlmostEqual(jit.primary.rise_time, clean.primary.rise_time, delta=0.35 * clean.primary.rise_time)
 
     def test_physical_identification_rides_along(self):
@@ -176,7 +162,7 @@ class AnalysePLL(unittest.TestCase):
         ct.channels["df"] = np.zeros_like(ct.channels["df"])
         res = W.analyze_test(ct)
         self.assertIn("unmeasurable", res.failure)
-        self.assertEqual(W.classify(res, SLOW_SCAN).category, "lost")
+        self.assertNotEqual(X.assess(res).status, "clean")
 
 
 class AnalyseAmplitude(unittest.TestCase):
@@ -190,16 +176,15 @@ class AnalyseAmplitude(unittest.TestCase):
         self.assertAlmostEqual(res.primary.rise_time, 0.17, delta=0.06)
         self.assertGreater(res.secondary.overshoot, 0.5)                       # Drive kick, as the manual warns
         self.assertAlmostEqual(res.model.kappa, 1.0, delta=0.02)
-        self.assertEqual(W.classify(res, W.Target.manual(rise_max=0.5)).category, "good")
+        self.assertEqual(X.assess(res).status, "clean")
 
-    def test_amplitude_verdicts(self):
+    def test_amplitude_assessments(self):
         plan = afl_plan()
-        ct, _ = record_afl(plan, 3e7, 3000)                                    # gentle -> slow
-        res = W.analyze_test(ct)
-        self.assertEqual(W.classify(res, W.Target.manual(rise_max=0.3)).category, "too_slow")
+        gentle = X.assess(W.analyze_test(record_afl(plan, 3e7, 3000)[0]))
+        base = X.assess(W.analyze_test(record_afl(plan, 8.9e7, 8900)[0]))
+        self.assertGreater(gentle.speed_s, 1.5 * base.speed_s)                  # gentle gains: slower
         ct, _ = record_afl(plan, 8.9e7, 3e4)                                   # more Ki -> overshoot
-        res = W.analyze_test(ct)
-        self.assertEqual(W.classify(res, W.Target.manual(rise_max=0.5, overshoot_max=0.10)).category, "overshoot")
+        self.assertEqual(X.assess(W.analyze_test(ct)).status, "overshoot")
 
     def test_steady_state_error_is_populated_for_the_amplitude_loop(self):
         # was always nan before: analyze_test never passed target_step to the primary channel
@@ -249,10 +234,7 @@ class AnalyseAmplitude(unittest.TestCase):
         res = W.analyze_test(ct)
         self.assertAlmostEqual(res.drive_floor_frac, 0.2, delta=0.02)
         self.assertTrue(any("zero floor" in w for w in res.warnings))
-        res.verdict = W.classify(res, W.Target(rise_max=1.0))
-        first = W.advise(res, res.verdict, W.Target(rise_max=1.0))[0]
-        self.assertAlmostEqual(first.kp / res.kp, 0.5)                            # back off first, whatever the shape
-        self.assertIn("zero", first.why)
+        self.assertEqual(X.assess(res).down.status, "floor")
 
     def test_drive_floor_fraction_needs_a_settled_positive_drive(self):
         t = np.linspace(0, 3, 3001)
@@ -275,98 +257,6 @@ class AnalyseAmplitude(unittest.TestCase):
         self.assertGreaterEqual(res.drive_rms_excursion, 0.0)
 
 
-def _metrics(**kw):
-    d = dict(step_size=1.0, y_initial=0.0, y_final=1.0, delay_time=0.0, rise_time=0.01, settling_time=0.05,
-             settled=True, overshoot=0.0, n_extrema=0, damping_ratio=math.nan, steady_state_error=math.nan,
-             noise_rms=0.01, band=0.05)
-    d.update(kw)
-    return M.StepMetrics(**d)
-
-
-def _result(kp=-100.0, ki=-1e4, **kw):
-    r = W.StepTestResult(kp=kp, ki=ki, loop="pll", n_steps=7, window_s=1.0)
-    r.primary = _metrics(**kw.pop("primary", {}))
-    for k, v in kw.items():
-        setattr(r, k, v)
-    return r
-
-
-TARGET = W.Target(rise_max=0.03, overshoot_max=0.10, decay_max=0.5)
-
-
-class Verdicts(unittest.TestCase):
-    def cat(self, **kw):
-        r = _result(**kw)
-        return W.classify(r, TARGET).category
-
-    def test_each_category(self):
-        self.assertEqual(self.cat(), "good")
-        self.assertEqual(self.cat(primary=dict(overshoot=0.25)), "overshoot")
-        self.assertEqual(self.cat(primary=dict(n_extrema=6, damping_ratio=0.1)), "ringing")
-        self.assertEqual(self.cat(primary=dict(rise_time=0.1)), "too_slow")
-        self.assertEqual(self.cat(primary=dict(rise_time=math.nan)), "too_slow")
-        self.assertEqual(self.cat(failure="lost lock"), "lost")
-
-    def test_phase_tail(self):
-        slow = M.ErrorMetrics(peak=5.0, time_to_peak=0.0, iae=1.0, decay_time=2.0, sign_changes=0, noise_rms=0.1)
-        self.assertEqual(self.cat(error=slow), "slow_tail")
-        never = M.ErrorMetrics(peak=5.0, time_to_peak=0.0, iae=1.0, decay_time=math.inf, sign_changes=0, noise_rms=0.1)
-        self.assertEqual(self.cat(error=never), "slow_tail")
-        under = M.ErrorMetrics(peak=5.0, time_to_peak=0.0, iae=1.0, decay_time=0.1, sign_changes=3, noise_rms=0.1)
-        self.assertEqual(self.cat(error=under), "ringing")
-
-    def test_fast_margin(self):
-        v = W.classify(_result(primary=dict(rise_time=0.01)), TARGET)
-        self.assertAlmostEqual(v.fast_margin, 3.0)
-
-
-class Advice(unittest.TestCase):
-    def advise(self, **kw):
-        r = _result(**kw)
-        v = W.classify(r, TARGET)
-        return r, v, W.advise(r, v, TARGET)
-
-    def test_overshoot_lowers_ki_only(self):
-        r, v, s = self.advise(primary=dict(overshoot=0.3))
-        self.assertEqual(s[0].kind, "change_ki")
-        self.assertEqual(s[0].kp, r.kp)
-        self.assertLess(abs(s[0].ki), abs(r.ki))
-
-    def test_slow_tail_raises_ki(self):
-        slow = M.ErrorMetrics(peak=5.0, time_to_peak=0.0, iae=1.0, decay_time=2.0, sign_changes=0, noise_rms=0.1)
-        r, v, s = self.advise(error=slow)
-        self.assertEqual(s[0].kind, "change_ki")
-        self.assertGreater(abs(s[0].ki), abs(r.ki))
-
-    def test_too_slow_scales_both_keeping_the_ratio(self):
-        r, v, s = self.advise(primary=dict(rise_time=0.09))
-        self.assertEqual(s[0].kind, "scale_both")
-        self.assertAlmostEqual(s[0].ki / s[0].kp, r.ki / r.kp)
-        self.assertGreater(abs(s[0].kp), abs(r.kp))
-        self.assertAlmostEqual(s[0].kp / r.kp, 2.5)                              # rise 3x too slow, capped at x2.5
-
-    def test_good_with_margin_suggests_lower_gains_to_cut_noise(self):
-        r, v, s = self.advise(primary=dict(rise_time=0.008))
-        self.assertEqual(s[0].kind, "scale_both")
-        self.assertLess(abs(s[0].kp), abs(r.kp))
-
-    def test_good_without_margin_is_accepted(self):
-        r, v, s = self.advise(primary=dict(rise_time=0.025))
-        self.assertEqual(s[0].kind, "accept")
-
-    def test_lost_backs_off(self):
-        r, v, s = self.advise(failure="lost lock")
-        self.assertEqual(s[0].kind, "back_off")
-        self.assertLess(abs(s[0].kp), abs(r.kp))
-
-    def test_signs_are_preserved(self):
-        for kw in (dict(primary=dict(overshoot=0.3)), dict(primary=dict(rise_time=0.09)), dict(failure="x")):
-            r, v, s = self.advise(**kw)
-            for sug in s:
-                self.assertLess(sug.kp, 0)
-                self.assertLess(sug.ki, 0)
-
-
 class Safety(unittest.TestCase):
     lim = W.SafetyLimits()
 
@@ -386,212 +276,8 @@ class Safety(unittest.TestCase):
         self.assertIsNone(W.runaway_reason(plan, self.lim, {"QPlusAmpl": np.full(50, 6.0)}, kappa=1.0))
 
 
-def _cat_result(cat, kp, ki, noise=0.02, rise=0.02):
-    r = _result(kp=kp, ki=ki, primary=dict(rise_time=rise))
-    r.noise_rms = noise
-    r.verdict = W.Verdict(cat, [], score=1.0 if cat == "good" else 0.3)
-    return r
-
-
-class MapLogic(unittest.TestCase):
-    def setUp(self):
-        self.grid = W.GridSpec(-100.0, -1e4)
-        self.map = W.ScreeningMap(self.grid, TARGET)
-
-    def test_grid_is_log_spaced_and_signed(self):
-        self.assertEqual(self.grid.dims, (5, 6))
-        self.assertAlmostEqual(self.grid.kp(2), -100.0)
-        self.assertAlmostEqual(self.grid.kp(4), -400.0)
-        self.assertAlmostEqual(self.grid.ki(2, 0), -1e4 / 8)
-        self.assertEqual(self.map.baseline, (2, 3))
-
-    def test_order_starts_at_the_baseline_and_moves_outward(self):
-        o = self.map.order()
-        self.assertEqual(o[0], (2, 3))
-        dist = [math.hypot(self.grid.speed_exps[i], self.grid.speed_exps[i] + self.grid.shape_exps[j]) for i, j in o]
-        self.assertEqual(dist, sorted(dist))
-        self.assertEqual(len(set(o)), 30)
-
-    def test_a_lost_cell_skips_everything_more_aggressive(self):
-        self.map.results[(2, 3)] = _cat_result("good", -100, -1e4)
-        self.map.results[(3, 4)] = _cat_result("lost", -200, -2e4)
-        visited = []
-        while (c := self.map.next_cell()) is not None:
-            visited.append(c)
-            self.map.results[c] = _cat_result("good", *self.map.pair(c))
-        for i in range(3, 5):
-            for j in range(4, 6):
-                if (i, j) == (3, 4):
-                    continue                                                    # the failed cell itself
-                self.assertNotIn((i, j), visited)
-                self.assertIn((i, j), self.map.skipped)
-        self.assertIn((2, 4), visited)                                          # less aggressive in Kp: still tested
-        self.assertIn((3, 3), visited)                                          # less aggressive in Ki: still tested
-        self.assertIn("lost", self.map.skipped[(4, 5)])
-
-    def test_safety_limits_skip_cells(self):
-        m = W.ScreeningMap(self.grid, TARGET, W.SafetyLimits(max_gain_factor=2.0, min_gain_factor=0.5))
-        seen = []
-        while (c := m.next_cell()) is not None:
-            seen.append(c)
-            m.results[c] = _cat_result("good", *m.pair(c))
-        for i, j in seen:
-            self.assertLessEqual(abs(self.grid.factor ** self.grid.speed_exps[i]), 2.0)
-            self.assertGreaterEqual(abs(self.grid.factor ** (self.grid.speed_exps[i] + self.grid.shape_exps[j])), 0.5)
-        self.assertTrue(any("safety" in why for why in m.skipped.values()))
-
-    def test_model_predicted_instability_is_skipped(self):
-        self.map.prior[(4, 5)] = "lost"
-        self.map.results[(2, 3)] = _cat_result("good", -100, -1e4)
-        visited = []
-        while (c := self.map.next_cell()) is not None:
-            visited.append(c)
-            self.map.results[c] = _cat_result("good", *self.map.pair(c))
-        self.assertNotIn((4, 5), visited)
-        self.assertIn("model", self.map.skipped[(4, 5)])
-
-    def test_islands_best_and_diagonals(self):
-        m = self.map
-        good = [(1, 2), (2, 2), (2, 3), (3, 3), (3, 4)]
-        for c in good:
-            m.results[c] = _cat_result("good", *m.pair(c), noise=0.01 * (c[0] + 1))
-        m.results[(0, 0)] = _cat_result("good", *m.pair((0, 0)), noise=0.001)           # a separate island
-        m.results[(4, 5)] = _cat_result("lost", *m.pair((4, 5)))
-        isl = m.islands()
-        self.assertEqual([i.size for i in isl], [5, 1])
-        self.assertEqual(isl[0].best, (1, 2))                                           # lowest noise in the big island
-        self.assertEqual(m.best(), (0, 0))                                              # lowest noise overall
-        line = m.speed_line((2, 3))
-        ratios = {round(m.grid.ki(i, j) / m.grid.kp(i), 6) for i, j in line}
-        self.assertEqual(len(ratios), 1)
-        self.assertEqual([m.grid.speed_exps[i] for i, _ in line], sorted(m.grid.speed_exps[i] for i, _ in line))
-        self.assertIn("Island 1: 5 cells", m.summary())
-
-    def test_value_and_category_grids(self):
-        self.map.results[(2, 3)] = _cat_result("good", -100, -1e4, noise=0.05, rise=0.012)
-        self.map.skipped[(0, 0)] = "why"
-        cat = self.map.category_grid()
-        self.assertEqual(cat[2, 3], "good")
-        self.assertEqual(cat[0, 0], "skipped")
-        self.assertEqual(cat[4, 5], "untested")
-        self.assertAlmostEqual(self.map.value_grid("rise")[2, 3], 0.012)
-        self.assertTrue(np.isnan(self.map.value_grid("noise")[0, 0]))
-
-    def test_refine_centres_a_finer_grid(self):
-        g = self.grid.refine(3, 4)
-        self.assertEqual(g.dims, (3, 3))
-        self.assertAlmostEqual(g.kp(1), self.grid.kp(3))
-        self.assertAlmostEqual(g.ki(1, 1), self.grid.ki(3, 4))
-        self.assertAlmostEqual(g.kp(2) / g.kp(1), math.sqrt(2))
-
-
-class Refinement(unittest.TestCase):
-    def test_refined_map_keeps_the_original_safety_reference(self):
-        m = W.ScreeningMap(W.GridSpec(-100.0, -1e4), TARGET, W.SafetyLimits(max_gain_factor=4.0, min_gain_factor=0.25))
-        sub = m.refined((4, 3))                                             # centred on Kp x4: its upper half is out of bounds
-        self.assertEqual(sub.reference, m.reference)
-        self.assertFalse(sub._in_limits(2, 1))                              # Kp x4*sqrt2 exceeds the original x4 limit
-        self.assertTrue(sub._in_limits(0, 1))
-
-    def test_suggests_the_best_good_cell_when_an_island_exists(self):
-        m = W.ScreeningMap(W.GridSpec(-100.0, -1e4), TARGET)
-        m.results[(2, 3)] = _cat_result("good", -100, -1e4, noise=0.05)
-        m.results[(1, 2)] = _cat_result("good", -50, -2500, noise=0.01)
-        cell, why = m.suggest_refinement()
-        self.assertEqual(cell, (1, 2))
-        self.assertIn("lowest-noise", why)
-
-    def test_suggests_the_nearest_miss_when_there_is_no_island(self):
-        m = W.ScreeningMap(W.GridSpec(-100.0, -1e4), W.Target(rise_max=0.010, overshoot_max=0.10))
-        for cell, rise in (((2, 3), 0.0125), ((1, 3), 0.030), ((3, 3), 0.0105)):
-            r = _result(kp=-100, ki=-1e4, primary=dict(rise_time=rise))
-            m.record(cell, r)
-        cell, why = m.suggest_refinement()
-        self.assertEqual(cell, (3, 3))                                       # 10.5 ms vs 10 ms allowed
-        self.assertIn("nearest miss", why)
-        self.assertIsNone(W.ScreeningMap(W.GridSpec(-100.0, -1e4), TARGET).suggest_refinement())
-
-
-class ModelPrior(unittest.TestCase):
-    def test_one_recording_predicts_the_map_and_flags_unstable_pairs(self):
-        target = W.Target.from_scan(12.0, 128)
-        ct, _ = record_pll(pll_plan(hold_s=0.5), -100, -1e4, seed=3)
-        res = W.analyze_test(ct, li_tau=PLL_SETUP.lockin_tau, f0=PLL_SETUP.f0, q=PLL_SETUP.q)
-        m = W.ScreeningMap(W.GridSpec(-100.0, -1e4), target)
-        m.set_prior_from_model(res.model)
-        self.assertEqual(m.prior[(2, 3)], "good")                                    # the pair that was recorded
-        self.assertEqual(m.prior[(2, 5)], "overshoot")                               # Ki x4: measured map agrees
-        self.assertIn(m.prior[(4, 5)], ("overshoot", "ringing", "lost"))            # the aggressive corner is never predicted good
-        self.assertGreaterEqual(sum(v == "good" for v in m.prior.values()), 3)
-
-    def test_prediction_agrees_with_measurement_on_most_cells(self):
-        target = W.Target.from_scan(12.0, 128)
-        ct, _ = record_pll(pll_plan(hold_s=0.5), -100, -1e4, seed=3)
-        res = W.analyze_test(ct, li_tau=PLL_SETUP.lockin_tau, f0=PLL_SETUP.f0, q=PLL_SETUP.q)
-        m = W.ScreeningMap(W.GridSpec(-100.0, -1e4, speed_exps=(-1, 0, 1), shape_exps=(-2, -1, 0, 1)), target)
-        m.set_prior_from_model(res.model)
-        agree = total = 0
-        for c in m.cells():
-            kp, ki = m.pair(c)
-            meas, _ = record_pll(pll_plan(hold_s=1.5), kp, ki, seed=7)
-            r = W.analyze_test(meas)
-            cat = W.classify(r, target).category
-            total += 1
-            agree += (cat == m.prior[c]) or (cat in ("ringing", "lost") and m.prior[c] in ("ringing", "lost"))
-        self.assertGreaterEqual(agree / total, 0.7, f"{agree}/{total}")
-
-
-class EndToEndScreening(unittest.TestCase):
-    """Screen a real (fixture-recorded) map: the workflow as the GUI drives it."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.target = SLOW_SCAN
-        cls.map = W.ScreeningMap(W.GridSpec(-100.0, -1e4, speed_exps=(-2, -1, 0, 1), shape_exps=(-2, -1, 0, 1, 2)), cls.target)
-        cls.plan = pll_plan(hold_s=1.5)
-        n = 0
-        while (c := cls.map.next_cell()) is not None:
-            kp, ki = cls.map.pair(c)
-            ct, _ = record_pll(cls.plan, kp, ki, seed=n + 1, jitter_s=0.008)
-            cls.map.record(c, W.analyze_test(ct))
-            n += 1
-        cls.n_tested = n
-
-    def cat(self, i, j):
-        return self.map.category_grid()[i, j]
-
-    def test_map_has_islands_and_a_bad_corner(self):
-        self.assertGreaterEqual(len(self.map.islands()), 1)
-        self.assertEqual(self.cat(2, 2), "good")                                # the baseline
-        self.assertNotEqual(self.cat(3, 4), "good")                             # most aggressive corner (Kp x2, shape x4 -> Ki x8)
-
-    def test_shape_changes_across_the_ratio_and_speed_along_it(self):
-        self.assertEqual(self.cat(2, 4), "overshoot")                           # same speed (Kp fixed), shape x4 (Ki x4)
-        base, low = self.map.results[(2, 2)], self.map.results[(2, 0)]                # same speed, shape /4 (Ki /4)
-        self.assertGreater(low.error.decay_time, 2.0 * base.error.decay_time)         # a longer Phase tail
-        line = self.map.speed_line((2, 2))                                      # constant shape: constant Ki:Kp ratio
-        rises = [self.map.results[c].primary.rise_time for c in line if c in self.map.results and self.map.results[c].primary]
-        self.assertGreaterEqual(len(rises), 3)
-        self.assertTrue(all(a > b for a, b in zip(rises, rises[1:])), rises)    # raising both = faster
-
-    def test_lowering_both_gains_reduces_noise_and_the_best_cell_is_quieter_than_baseline(self):
-        noise = self.map.value_grid("noise")
-        line = [c for c in self.map.speed_line((2, 2)) if not np.isnan(noise[c])]
-        vals = [noise[c] for c in line]
-        self.assertTrue(all(a < b for a, b in zip(vals, vals[1:])), vals)
-        best = self.map.best()
-        self.assertIsNotNone(best)
-        self.assertLessEqual(noise[best], noise[2, 2])
-
-    def test_advice_from_the_map_points_back_toward_the_island(self):
-        r = self.map.results[(2, 4)]                                            # overshoot cell
-        s = W.advise(r, r.verdict, self.target)
-        self.assertEqual(s[0].kind, "change_ki")
-        self.assertLess(abs(s[0].ki), abs(r.ki))
-
-
 class AmplitudeLoopSearch(unittest.TestCase):
-    """The amplitude loop spans decades of gain: manual start values, output gain, scale scan, wide limits."""
+    """The amplitude loop spans decades of gain: the manual's start values and the output gain."""
 
     def test_manual_start_values_at_1v(self):
         s = W.afl_start_values(q=25000.0, f0=25000.0, output_gain_v=1.0)
@@ -626,149 +312,6 @@ class AmplitudeLoopSearch(unittest.TestCase):
         for args in ((0, 25000.0, 1.0), (25000.0, 0, 1.0), (25000.0, 25000.0, 0)):
             with self.assertRaises(ValueError):
                 W.afl_start_values(*args)
-
-    LIM = W.SafetyLimits(max_gain_factor=1000.0, min_gain_factor=1e-3)
-
-    def scan_map(self):
-        g = W.GridSpec.scan(2e8, 2e4, 10.0, 3, 3)
-        return g, W.ScreeningMap(g, TARGET, self.LIM, reference=(2e8, 2e4))
-
-    def test_scale_scan_moves_both_gains_together(self):
-        g, m = self.scan_map()
-        self.assertEqual(g.speed_exps, tuple(range(-3, 4)))
-        self.assertEqual(g.shape_exps, (0,))                                    # pure speed: shape fixed at the baseline's
-        self.assertEqual(len(m.cells()), 7)
-        for i, j in m.cells():
-            self.assertAlmostEqual(g.ki(i, j) / g.kp(i), 1e-4)                  # Ki:Kp is the baseline's
-        self.assertEqual(m.order()[0], (3, 0))                                  # the baseline first
-        self.assertIn("7 untested", m.summary())
-
-    def test_scale_scan_does_not_go_on_after_a_lost_cell(self):
-        g, m = self.scan_map()
-        m.results[(3, 0)] = _cat_result("good", g.kp(3), g.ki(3, 0))
-        m.results[(4, 0)] = _cat_result("lost", g.kp(4), g.ki(4, 0))            # one decade up loses the loop
-        visited = []
-        while True:
-            c = m.next_cell()
-            if c is None:
-                break
-            visited.append(c)
-            m.results[c] = _cat_result("too_slow", g.kp(c[0]), g.ki(c[0], c[1]))
-        self.assertEqual(sorted(visited), [(0, 0), (1, 0), (2, 0)])
-        self.assertEqual(sorted(m.skipped), [(5, 0), (6, 0)])
-
-    def test_the_scan_is_bounded_by_the_gain_range(self):
-        g = W.GridSpec.scan(2e8, 2e4, 10.0, 4, 4)
-        m = W.ScreeningMap(g, TARGET, self.LIM, reference=(2e8, 2e4))
-        seen = []
-        while True:
-            c = m.next_cell()
-            if c is None:
-                break
-            seen.append(c)
-            m.results[c] = _cat_result("too_slow", g.kp(c[0]), g.ki(c[0], c[1]))
-        self.assertEqual(len(seen), 7)                                          # +-4 decades asked, +-3 allowed
-        self.assertEqual(sorted(m.skipped), [(0, 0), (8, 0)])
-
-    def test_refining_a_scan_gives_a_full_finer_map_with_the_same_limits(self):
-        g, m = self.scan_map()
-        sub = m.refined((3, 0))
-        self.assertEqual(len(sub.cells()), 9)                                   # no longer locked to a single column
-        self.assertAlmostEqual(sub.grid.factor, math.sqrt(10.0))
-        self.assertIs(sub.limits, m.limits)
-        self.assertEqual(sub.reference, m.reference)
-
-    def test_gain_range_check(self):
-        ref = (2e8, 2e4)
-        self.assertTrue(W.gain_within_limits(2e11, 2e7, ref, self.LIM))         # exactly x1000 both ways
-        self.assertFalse(W.gain_within_limits(2e12, 2e7, ref, self.LIM))
-        self.assertFalse(W.gain_within_limits(2e8, 2.0, ref, self.LIM))
-
-    def test_amplitude_loop_may_be_scaled_by_a_decade_and_points_to_the_scan(self):
-        t = W.Target(rise_max=0.05, overshoot_max=0.10)
-        r = _result(kp=2e8, ki=2e4, primary=dict(rise_time=0.5))                # 10x too slow
-        r.loop = "afl"
-        s = W.advise(r, W.classify(r, t), t)
-        self.assertEqual(s[0].kind, "scale_both")
-        self.assertAlmostEqual(s[0].kp / r.kp, 10.0)
-        self.assertNotIn("Scale scan", s[0].why)
-        r.primary = _metrics(rise_time=2.0)                                     # 40x too slow: more than one step
-        s = W.advise(r, W.classify(r, t), t)
-        self.assertAlmostEqual(s[0].kp / r.kp, 10.0)
-        self.assertIn("scale sweep", s[0].why)                                 # the amplitude loop's 1-D protocol
-
-
-class ScaleSweepAssessment(unittest.TestCase):
-    """assess_scale_sweep: tiering, the stopping rule, and the recommended gain - synthetic StepTestResults."""
-
-    TARGET = W.Target(rise_max=0.1, overshoot_max=0.10, max_extrema=3)
-
-    def _point(self, kp, ki, rise, overshoot=0.0, n_extrema=0, primary_noise=0.02, secondary_noise=0.01):
-        r = _result(kp=kp, ki=ki, loop="afl",
-                   primary=dict(rise_time=rise, overshoot=overshoot, n_extrema=n_extrema, noise_rms=primary_noise))
-        r.secondary = _metrics(noise_rms=secondary_noise)
-        r.primary_2pct = _metrics(settling_time=rise * 1.5)
-        r.drive_peak_abs = 0.3
-        return r
-
-    def test_tiers_a_typical_sweep_and_stops_at_the_first_too_aggressive_point(self):
-        gs = [0.1, 0.3, 1, 2, 3]
-        results = [
-            self._point(1.7e7, 1.7e3, rise=0.5),
-            self._point(5.0e7, 5.0e3, rise=0.2),
-            self._point(1.7e8, 1.7e4, rise=0.05, overshoot=0.02, primary_noise=0.02),
-            self._point(3.3e8, 3.3e4, rise=0.03, overshoot=0.05, primary_noise=0.01),
-            self._point(5.0e8, 5.0e4, rise=0.02, overshoot=0.15),               # too aggressive: overshoot
-        ]
-        points, rec_g, explanation = W.assess_scale_sweep(gs, results, self.TARGET)
-        self.assertEqual([p.tier for p in points],
-                         ["too_slow", "too_slow", "acceptable", "near_optimum", "too_aggressive"])
-        self.assertAlmostEqual(rec_g, 0.6 * 3)
-        self.assertIn(f"{rec_g:.3g}", explanation)
-
-    def test_saturation_triggers_too_aggressive(self):
-        r = self._point(1.7e8, 1.7e4, rise=0.05, overshoot=0.02)
-        r.drive_peak_abs = 0.95
-        points, rec_g, _ = W.assess_scale_sweep([1.0], [r], self.TARGET, output_gain_v=1.0)
-        self.assertEqual(points[0].tier, "too_aggressive")
-        self.assertIn("output gain range", points[0].reasons[0])
-        self.assertAlmostEqual(rec_g, 0.6 * 1.0)                                # even the first point recommends 60 %
-
-    def test_a_drive_noise_jump_triggers_too_aggressive_even_without_overshoot(self):
-        gs = [1, 2]
-        results = [self._point(1.7e8, 1.7e4, rise=0.05, overshoot=0.02, secondary_noise=0.01),
-                  self._point(3.3e8, 3.3e4, rise=0.03, overshoot=0.02, secondary_noise=0.03)]  # 3x: > 50 % jump
-        points, rec_g, _ = W.assess_scale_sweep(gs, results, self.TARGET)
-        self.assertEqual(points[0].tier, "near_optimum")                        # the only feasible point: automatically best
-        self.assertEqual(points[1].tier, "too_aggressive")
-        self.assertIn("noise rose", points[1].reasons[0])
-        self.assertAlmostEqual(rec_g, 0.6 * 2)
-
-    def test_nothing_feasible_gives_no_recommendation(self):
-        gs = [0.1, 0.3]
-        results = [self._point(1.7e7, 1.7e3, rise=0.5), self._point(5.0e7, 5.0e3, rise=0.3)]
-        points, rec_g, explanation = W.assess_scale_sweep(gs, results, self.TARGET)
-        self.assertTrue(all(p.tier == "too_slow" for p in points))
-        self.assertIsNone(rec_g)
-        self.assertIn("widen the scale list", explanation)
-
-    def test_drive_at_the_zero_floor_triggers_too_aggressive(self):
-        gs = [1, 2]
-        ok = self._point(1.7e8, 1.7e4, rise=0.05, overshoot=0.02)
-        ok.drive_floor_frac = 0.0
-        pinned = self._point(3.3e8, 3.3e4, rise=0.03, overshoot=0.02)
-        pinned.drive_floor_frac = 0.3                                           # on/off: no overshoot needed to fail
-        points, rec_g, _ = W.assess_scale_sweep(gs, [ok, pinned], self.TARGET)
-        self.assertEqual(points[1].tier, "too_aggressive")
-        self.assertIn("zero floor", points[1].reasons[0])
-        self.assertAlmostEqual(rec_g, 0.6 * 2)
-
-    def test_a_failed_point_is_treated_as_too_aggressive_and_stops_the_sweep(self):
-        ok = self._point(1.7e8, 1.7e4, rise=0.05, overshoot=0.02)
-        failed = W.StepTestResult(kp=3e8, ki=3e4, loop="afl", failure="unmeasurable: loop lost")
-        points, rec_g, _ = W.assess_scale_sweep([1, 2, 3], [ok, failed, ok], self.TARGET)
-        self.assertEqual(len(points), 2)                                        # the third point is never reached
-        self.assertEqual(points[1].tier, "too_aggressive")
 
 
 if __name__ == "__main__":

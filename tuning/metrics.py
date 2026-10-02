@@ -157,7 +157,11 @@ def step_response_metrics(t, y, t_step, *, hold_end=None, pre_tail_frac=0.3,
     # Smooth just enough that the noise on z is ~1 % of the step.
     w = int(min(max(1, math.ceil((sigma_z / 0.01) ** 2)), max(1, len(z) // 20)))
     zs = ndimage.uniform_filter1d(z, size=w, mode="nearest") if w > 1 else z
-    sigma_zs = sigma_z / math.sqrt(w)
+    # Noise left after the smoothing. sigma_z / sqrt(w) holds only for white noise; the recorded channels come
+    # through the lock-in, so their noise is correlated and smoothing removes less - measure it on the smoothed
+    # tail (and the pre-step level) instead, or noise peaks pass as ringing and overshoot.
+    zs_pre = ndimage.uniform_filter1d((pre_tail - y0) / step, size=w, mode="nearest") if w > 1 else (pre_tail - y0) / step
+    sigma_zs = max(sigma_z / math.sqrt(w), detrended_std(zs[-n_final:]), detrended_std(zs_pre))
 
     t10 = _first_crossing(tt, zs, 0.1)
     t90 = _first_crossing(tt, zs, 0.9)
