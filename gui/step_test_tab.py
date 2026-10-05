@@ -21,6 +21,10 @@ import pyqtgraph as pg
 from ..common import PARAMS_BASE, confirm_high_voltage, append_log_line
 from .sci_spinbox import SciDoubleSpinBox
 
+# short ASCII names for the export file name (custom EditXX rows use their code)
+_NAME_TAGS = {"amp_ref": "AmpRef", "amp_ki": "AmpKi", "amp_kp": "AmpKp", "pll_kp": "PLLKp", "pll_ki": "PLLKi",
+              "used_freq": "f0", "drive": "Drive"}
+
 
 class StepTestTab(QtWidgets.QWidget):
     """Square wave parameter stepping with optional scope trigger."""
@@ -144,6 +148,7 @@ class StepTestTab(QtWidgets.QWidget):
         self._timer = QtCore.QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._events = []  # list of (QtCore.QDateTime, str) for scope overlay
+        self._run_settings = None  # settings of the current / last test, snapshot at start (see settings())
 
     def set_custom_params(self, customs: List[Tuple[str, object, str]]):
         """Sets custom parameters received from ParamsTab.
@@ -239,6 +244,30 @@ class StepTestTab(QtWidgets.QWidget):
         append_log_line(self.log, f"[{ts}] {verb} {label} ({code_text}) to {value}")
         return True
 
+    def settings(self) -> dict:
+        """The test as set up now, for the Scope export (metadata section and file name)."""
+        ptype, pcode, label = self.param.currentData()
+        key = next((k for k, pt, pc, _l, _v in PARAMS_BASE if (pt, pc) == (ptype, pcode)), None)
+        restore = self.chk_restore.isChecked()
+        return {
+            "parameter": label,
+            "code": pcode if ptype == "EDIT" else f"DNC {pcode}",
+            "name_tag": _NAME_TAGS.get(key, str(pcode) if ptype == "EDIT" else f"DNC{pcode}"),
+            "low": self.low.value(),
+            "high": self.high.value(),
+            "period_s": self.period.value(),
+            "steps": self.steps.value(),
+            "return_to_base": restore,
+            "base": self.base.value() if restore else None,
+        }
+
+    def _scope_settings(self) -> dict:
+        """The snapshot taken at start plus how the run went."""
+        out = dict(self._run_settings or self.settings())
+        out["steps_sent"] = self.step_index
+        out["completed"] = self.step_index >= out["steps"]
+        return out
+
     def preview(self):
         """Generates a step waveform preview in the plot area."""
         low, high, T, n = self.low.value(), self.high.value(), self.period.value(), self.steps.value()
@@ -266,6 +295,7 @@ class StepTestTab(QtWidgets.QWidget):
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self._events = []  # clear event list for overlay
+        self._run_settings = self.settings()
         self._timer.start(int(self.period.value() * 1000))
 
         if self.chk_trigger_scope.isChecked() and self.scope_tab:
@@ -309,7 +339,7 @@ class StepTestTab(QtWidgets.QWidget):
 
         if self.scope_tab:
             try:
-                self.scope_tab.set_event_markers(self._events)
+                self.scope_tab.set_event_markers(self._events, step_test=self._scope_settings())
             except Exception:
                 pass
 
