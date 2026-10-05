@@ -208,7 +208,6 @@ class TuningTab(QtWidgets.QWidget):
         self.tests: List[TestRecord] = []
         self.explorer: Optional[X.Explorer] = None
         self.runner: Optional[ConditionRunner] = None
-        self.reference: Optional[X.BaselineReference] = None
         self.selected: Optional[Tuple[float, float]] = None
         self._run_meta: Optional[MD.Metadata] = None
         self._last_export_dir = ""
@@ -597,7 +596,6 @@ class TuningTab(QtWidgets.QWidget):
             if i >= 0:
                 combo.setCurrentIndex(i)
         if self.baseline() != old_baseline:
-            self.reference = None                    # a different baseline: measure its reference again
             self._center_on_sxm()
         self._derive_method()
 
@@ -748,7 +746,6 @@ class TuningTab(QtWidgets.QWidget):
                 self.ki_spin.setValue(s.ki)
             except ValueError:
                 pass
-        self.reference = None
         self.explorer = None
         self.selected = None
         if self.sxm and not self.override_check.isChecked():
@@ -832,8 +829,7 @@ class TuningTab(QtWidgets.QWidget):
             return False
         self._run_meta = MD.collect(self.reader) if self.reader is not None else MD.Metadata.unavailable("no read-back")
         self.runner = ConditionRunner(self.dde, self.driver, plan, self.baseline(), criteria=self.criteria(),
-                                      recover_timeout_s=self.recover_spin.value(), reference=self.reference,
-                                      parent=self)
+                                      recover_timeout_s=self.recover_spin.value(), parent=self)
         self.runner.message.connect(self._log)
         self.runner.phase.connect(lambda t: self._status(f"<b>Running:</b> {t}"))
         self.runner.condition_started.connect(
@@ -853,11 +849,21 @@ class TuningTab(QtWidgets.QWidget):
                 if r.assessment.loop == self.loop:
                     self.explorer.add_manual(r.assessment)
         ex = self.explorer
+        reported = set(ex.skipped)
+
+        def report_skips():
+            for k, why in ex.skipped.items():
+                if k not in reported:
+                    reported.add(k)
+                    if not why.startswith(("Kp=", "Ki=")):            # _gain_ok skips are logged below
+                        self._log(f"skipped Kp={_fmt(k[0])}, Ki={_fmt(k[1])}: {why}")
 
         def nxt():
             while True:
                 p = ex.next()
+                report_skips()
                 if p is None:
+                    self._log(self._why_exploration_ended(ex))
                     return None
                 why = self._gain_ok(p.kp, p.ki)
                 if why is None:
@@ -865,6 +871,17 @@ class TuningTab(QtWidgets.QWidget):
                 self._log(f"skipped Kp={_fmt(p.kp)}, Ki={_fmt(p.ki)}: {why}")
                 ex.skip(why)
         self._start(nxt, "Exploration")
+
+    def _why_exploration_ended(self, ex: X.Explorer) -> str:
+        pts = ex.points()
+        n_clean = sum(p.clean for p in pts.values())
+        text = (f"Exploration complete: {len(pts)} point(s) measured, {n_clean} clean, "
+                f"{len(ex.skipped)} skipped.")
+        if not n_clean:
+            text += (" No clean point, so there was nothing to refine (edge, ratio and repeat stages need one). "
+                     "Look at the statuses on the map: relax the overshoot / Drive-floor limits, lengthen the hold, "
+                     "or move the search centre.")
+        return text
 
     def test_selected(self):
         if self.selected is None:
@@ -901,8 +918,6 @@ class TuningTab(QtWidgets.QWidget):
         self._refresh_all()
 
     def _on_finished(self, reason: str):
-        if self.runner is not None and self.runner.reference is not None:
-            self.reference = self.runner.reference
         if self.explorer is not None and self.explorer._pending is not None:
             self.explorer = None                   # stopped mid-proposal: plan again next time (tests are kept)
         self._log(f"Run {reason}.")
@@ -1324,8 +1339,8 @@ press <i>Read SXM again</i>.</li>
 </ol>
 <h3>Every condition starts from the same baseline</h3>
 <p>Before each condition the baseline gains are written back and the tab waits until the loop is <i>verifiably</i>
-back at the reference state measured at the start (amplitude within 2 % and Drive back; or Phase within 0.5° and df
-back). Only then are the candidate gains applied; they must settle before the steps start. A loop that does not come
+back at the reference state measured at the start of the run (amplitude within 2 % and Drive back; or Phase within
+0.5° and df back; Drive and df are compared with the previous recovery, so slow drift does not stop the run). Only then are the candidate gains applied; they must settle before the steps start. A loop that does not come
 back stops the run: later results would not be comparable.</p>
 <h3>The automatic exploration</h3>
 <ol>

@@ -107,6 +107,12 @@ class Recovery(unittest.TestCase):
         self.assertIn("Phase", X.recovered("pll", ph + 3, df, ref)[1])
         self.assertIn("df", X.recovered("pll", ph, df + 0.5, ref)[1])
 
+    def test_the_reference_follows_drift_of_the_output_only(self):
+        ref = X.reference_from(np.full(200, 1.0), np.full(200, 0.30))
+        moved = X.follow_drift(ref, np.full(200, 0.33))
+        self.assertAlmostEqual(moved.u, 0.33)
+        self.assertEqual((moved.y, moved.y_sigma, moved.u_sigma), (ref.y, ref.y_sigma, ref.u_sigma))
+
     def test_settled_at_the_first_level(self):
         y, u = np.full(100, 0.95), np.full(100, 0.02)
         self.assertTrue(X.settled_at("afl", y, u, 0.95)[0])
@@ -185,6 +191,34 @@ class Exploring(unittest.TestCase):
         for k, why in ex.skipped.items():
             self.assertIn("where the loop was lost", why)
         self.assertNotIn(X._key(2e10, 2e6), {X._key(p.kp, p.ki) for p in seen})
+
+    def test_only_a_runaway_prunes_the_more_aggressive_points(self):
+        """An incomplete recording, an unmeasurable step or a candidate that did not settle is not a broken loop."""
+        for failure in ("incomplete recording (40 slices, 3/7 events)",
+                        "unmeasurable: no clean step in the primary channel (loop lost, ringing or not driven)",
+                        "did not settle at these gains within 7 s (Phase +3.10 deg)"):
+            ex = X.Explorer(X.SearchRegion(2e8, 2e4, span_decades=1))
+            seen = []
+            while (p := ex.next()) is not None:
+                seen.append(p)
+                bad = (p.kp, p.ki) == (2e7, 2e4)                       # the first grid point
+                ex.record(X.assess(W.StepTestResult(kp=p.kp, ki=p.ki, loop="afl", failure=failure)) if bad
+                          else synthetic(p.kp, p.ki))
+            self.assertFalse(any("where the loop was lost" in w for w in ex.skipped.values()), failure)
+            self.assertIn(X._key(2e9, 2e4), {X._key(p.kp, p.ki) for p in seen}, failure)
+        self.assertEqual(X.assess(W.StepTestResult(kp=1, ki=1, loop="afl",
+                                                   failure="did not settle at these gains within 7 s")).status, "slow")
+
+    def test_a_lost_integral_only_point_does_not_prune_points_with_kp(self):
+        ex = X.Explorer(X.SearchRegion(2e8, 2e4, span_decades=1))
+        ex.add_manual(X.assess(W.StepTestResult(kp=0.0, ki=2e3, loop="afl", failure="lost: amplitude collapsed")))
+        seen = []
+        while (p := ex.next()) is not None:
+            seen.append(p)
+            ex.record(synthetic(p.kp, p.ki))
+        keys = {X._key(p.kp, p.ki) for p in seen}
+        self.assertIn(X._key(2e8, 2e5), keys)
+        self.assertNotIn(X._key(0.0, 2e5), keys)                     # the Kp = 0 column itself is still pruned
 
     def test_bisection_locates_the_edge_along_g(self):
         ex, seen = self.run_all(X.SearchRegion(2e8, 2e4, span_decades=1))

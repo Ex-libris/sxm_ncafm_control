@@ -164,7 +164,7 @@ class Running(unittest.TestCase):
         rec = tab.tests[0]
         self.assertEqual((rec.assessment.kp, rec.assessment.ki), (4e8, 4e4))
         self.assertIn("recover_s", rec.result.meta["baseline_check"])
-        self.assertIsNotNone(tab.reference)                                       # kept for the next run
+        self.assertIsNotNone(tab.runner.reference)                                # measured at the start of the run
         self.assertEqual(inst.writes[-3:], [("Edit32", 2e8), ("Edit24", 2e4), ("Edit23", 1.0)])
         text = tab.detail.toPlainText()
         self.assertIn("Kp 4e8, Ki 4e4", text)

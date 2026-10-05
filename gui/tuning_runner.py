@@ -4,8 +4,9 @@ Runs tuning conditions on the instrument, every one from the same verified basel
 For each condition (a Kp/Ki pair proposed by the explorer, or picked by hand):
 
 1. **Recover** - write the baseline gains and the base setpoint, then wait until the loop is verifiably back
-   at the reference state measured at the start of the run (tuning/explore.py: ``recovered``). The first
-   condition instead waits until the loop is steady and takes that as the reference. No recovery within
+   at the reference state measured at the start of the run (tuning/explore.py: ``recovered``; Drive / df are
+   compared with the previous recovery, ``follow_drift``). The first condition instead waits until the loop is
+   steady and takes that as the reference. No recovery within
    the timeout stops the run: later conditions would not start from the same place.
 2. **Settle** - write the candidate gains and the first level, wait at least ``settle_s``, then until the
    loop is steady at that level. Not steady within the timeout: the condition is recorded as failed and the
@@ -132,14 +133,22 @@ class ConditionRunner(QtCore.QObject):
         self._check: dict = {}
         self._prev_lost = False
         self._last_why = ""
+        self._writing = 0                     # > 0 while a DDE write is in progress (see _write)
 
     # -- instrument writes ----------------------------------------------------------------------------
     def _write(self, param, value):
+        # SendWait pumps the thread's message queue (GetMessage/DispatchMessage) until SXM answers, so Qt timers
+        # fire *inside* a write; _on_poll and _later hold off while _writing is set, or the state machine
+        # would advance re-entrantly (apply a candidate twice, end a test half-way through a write, ...)
         ptype, code = param
-        if ptype == "DNC":
-            self.dde.send_dncpara(int(code), float(value))
-        else:
-            self.dde.send_scanpara(str(code), float(value))
+        self._writing += 1
+        try:
+            if ptype == "DNC":
+                self.dde.send_dncpara(int(code), float(value))
+            else:
+                self.dde.send_scanpara(str(code), float(value))
+        finally:
+            self._writing -= 1
 
     def _apply_gains(self, kp, ki):
         self._write(self.loop.kp_param, kp)
@@ -189,8 +198,12 @@ class ConditionRunner(QtCore.QObject):
         tok = self._token
 
         def call():
-            if self.running and tok == self._token:
-                fn(*args)
+            if not (self.running and tok == self._token):
+                return
+            if self._writing:                       # fired inside a DDE write: run it once the write is done
+                QtCore.QTimer.singleShot(2, QtCore.Qt.PreciseTimer, call)
+                return
+            fn(*args)
         QtCore.QTimer.singleShot(max(0, int(ms)), QtCore.Qt.PreciseTimer, call)
 
     def _stop_capture(self):
@@ -259,7 +272,7 @@ class ConditionRunner(QtCore.QObject):
         return W.runaway_reason(self.plan, self.limits, tail, self._kappa())
 
     def _on_poll(self):
-        if not self.running or self._cap is None or self._cap.t0 == 0.0:
+        if not self.running or self._writing or self._cap is None or self._cap.t0 == 0.0:
             return
         elapsed = self._cap.now() - self._t_state
         if self._state in ("settle", "test"):
@@ -287,6 +300,10 @@ class ConditionRunner(QtCore.QObject):
                                       f"{self.loop.u_channel} {r.u:.5g} (+-{r.u_sigma:.2g})")
             else:
                 ok, why = X.recovered(self.loop.key, y, u, self.reference, self.criteria)
+                if ok:
+                    # follow slow drift of the controller output (df with f0, Drive with damping) from one
+                    # recovery to the next; the amplitude itself is fixed by Ref and stays the start value
+                    self.reference = X.follow_drift(self.reference, u)
             if ok:
                 self._check = {"recover_s": round(elapsed, 3), "y": float(np.median(y)), "u": float(np.median(u))}
                 self._apply_candidate()
