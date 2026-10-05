@@ -226,6 +226,50 @@ class Metadata:
         out.append(stamp)
         return out
 
+    # columns of the PNG legend: the loops work together, so each is shown in full, side by side
+    LEGEND_SXM = (
+        ("Amplitude (AFL)", (("amp_ref", "Ref", "", 1.0), ("amp_kp", "Kp", "", 1.0), ("amp_ki", "Ki", "", 1.0),
+                             ("amp_tau_s", "Tau", "ms", 1e3), ("afl_output_gain", "Out gain", "+-V", 1.0))),
+        ("PLL", (("pll_kp", "Kp", "", 1.0), ("pll_ki", "Ki", "", 1.0),
+                 ("dnc_time_constant_s", "TC", "ms", 1e3), ("dnc_rolloff", "RollOff", "", 1.0))),
+        ("DNC", (("used_freq", "use", "Hz", 1.0), ("drive", "Drive", "", 1.0),
+                 ("input_gain_ina", "InA", "x", 1.0))),
+        ("Resonance", (("f_peak", "f peak", "Hz", 1.0), ("q", "Q", "", 1.0), ("ring_down_s", "Ring-down", "ms", 1e3))),
+    )
+    LEGEND_SECTIONS = ("Capture", "Step Test")      # app sections shown in the legend (not the event list)
+
+    def legend(self) -> Tuple[List[Tuple[str, List[Tuple[str, str]]]], str]:
+        """
+        The PNG legend: ``(columns, footer)``, columns as ``(title, [(label, value text)])``. Every loop column
+        is listed in full (``n/a`` = not read), so a missing value is visible rather than silently dropped.
+        """
+        def text(x, unit="", sig=5):
+            if x is None:
+                return "n/a"
+            v = fmt_value(x, sig)
+            if unit == "x":
+                return f"x{v}"
+            if unit == "+-V":
+                return f"+-{v} V"
+            return f"{v} {unit}" if unit else v
+
+        cols = []
+        if self.has_sxm:
+            for title, rows in self.LEGEND_SXM:
+                items = []
+                for key, label, unit, factor in rows:
+                    x = self.values.get(key)
+                    if isinstance(x, (int, float)) and not isinstance(x, bool):
+                        x = x * factor
+                    items.append((label, text(x, unit, 8 if unit == "Hz" or key == "q" else 5)))  # keep mHz, all of Q
+                cols.append((title, items))
+        for title, rows in self.sections:
+            if title in self.LEGEND_SECTIONS:
+                cols.append((title, [(lbl, text(v, u)) for lbl, v, u in rows]))
+        footer = (f"SXM settings read {self.timestamp:%Y-%m-%d %H:%M:%S}, in SXM GUI units" if self.has_sxm
+                  else f"SXM settings: {self.source}")
+        return cols, footer
+
     def filename_tag(self, loops: Sequence[str] = ("afl", "pll")) -> str:
         """
         The key settings as a file-name fragment, in the order the loops are given. Values that could not

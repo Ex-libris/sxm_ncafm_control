@@ -165,6 +165,54 @@ class ScopeExport(unittest.TestCase):
         self.assertRegex(text, r"t = 0\.500 s +Amplitude Ref=0\.5775")
         self.assertIn("no SXM read-back", text)
 
+    def test_step_test_settings_and_name(self):
+        from sxm_ncafm_control.gui.scope_tab import ScopeTab
+        from sxm_ncafm_control.gui.step_test_tab import StepTestTab
+        from sxm_ncafm_control.dde_client import MockDDEClient
+        step = StepTestTab(MockDDEClient())
+        step.param.setCurrentIndex(step.param.findText("Amplitude Ref"))
+        step.low.setValue(0.5225); step.high.setValue(0.5775); step.period.setValue(0.5); step.steps.setValue(4)
+        step.chk_restore.setChecked(True)
+        tab = ScopeTab(None, reader=Reader())
+        step.scope_tab = tab
+        tab.npoints_spin.setValue(tab.npoints_spin.minimum())
+        tab.start_capture()
+        step._run_settings = step.settings()
+        step.step_index = 2                                                      # stopped half-way
+        tab.set_event_markers([(tab.capture_start_dt.addMSecs(500), "Amplitude Ref=0.5225")],
+                              step_test=step._scope_settings())
+        text = "\n".join(tab._export_metadata().header_lines())
+        self.assertIn("[Step Test]", text)
+        self.assertIn("Amplitude Ref (Edit23)", text)
+        self.assertIn("2 of 4 (stopped early)", text)
+        self.assertRegex(text, r"Base +0\.55")
+        name = tab.default_export_name()
+        self.assertIn("_steptest_AmpRef0.5225-0.5775_", name)
+        with tempfile.TemporaryDirectory() as d:
+            written = tab.export_to(os.path.join(d, name + ".csv"))
+            payload = json.load(open(written[1], encoding="utf-8"))
+            self.assertEqual(payload["step_test"]["steps_sent"], 2)
+            self.assertFalse(payload["step_test"]["completed"])
+            img = QtGui.QImage(written[2])
+            self.assertGreater(img.height(), 0)
+        tab.start_capture()                                                      # a plain capture afterwards
+        self.assertIn("_scope_", tab.default_export_name())
+        self.assertNotIn("Step Test", "\n".join(tab._export_metadata().header_lines()))
+
+    def test_legend_shows_every_loop_and_marks_unread_values(self):
+        values = dict(VALUES)
+        del values["pll_ki"]
+        cols, footer = MD.Metadata(values, timestamp=STAMP).add_section("Capture", [("Samples", 10, "")]).legend()
+        titles = [t for t, _r in cols]
+        self.assertEqual(titles, ["Amplitude (AFL)", "PLL", "DNC", "Resonance", "Capture"])
+        d = {t: dict(r) for t, r in cols}
+        self.assertEqual(d["PLL"]["Ki"], "n/a")
+        self.assertEqual(d["DNC"]["use"], "25562.49 Hz")
+        self.assertEqual(d["DNC"]["InA"], "x10")
+        self.assertEqual(d["Amplitude (AFL)"]["Out gain"], "+-0.1 V")
+        self.assertEqual(d["Amplitude (AFL)"]["Tau"], "50 ms")
+        self.assertIn("2026-10-02 14:30:12", footer)
+
 
 if __name__ == "__main__":
     unittest.main()

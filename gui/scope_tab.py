@@ -123,6 +123,7 @@ class ScopeTab(QtWidgets.QWidget):
         # Time + markers state
         self.capture_start_dt = None
         self._event_markers = []
+        self._step_test = None    # StepTestTab.settings() of the test that sent the events (None: plain capture)
         self._marker_items1 = []  # markers for plot1
         self._marker_items2 = []  # markers for plot2
         
@@ -321,8 +322,10 @@ class ScopeTab(QtWidgets.QWidget):
         self.plot1.setLabel("left", f"{chan1_name} ({unit1})")
         self.plot2.setLabel("left", f"{chan2_name} ({unit2})")
 
-        # Clear markers and set capture start time
+        # Clear markers and set capture start time; events / step test of an earlier capture do not belong here
         self._clear_markers()
+        self._event_markers = []
+        self._step_test = None
         self.capture_start_dt = QtCore.QDateTime.currentDateTime()
 
         self.start_btn.setEnabled(False)
@@ -476,14 +479,39 @@ class ScopeTab(QtWidgets.QWidget):
             for dt, label in sorted(self._event_markers, key=lambda e: e[0].toMSecsSinceEpoch()):
                 rows.append((f"t = {self.capture_start_dt.msecsTo(dt) / 1000.0:.3f} s", label, ""))
             meta.add_section("Step Test events", rows)
+        if self._step_test:
+            meta.add_section("Step Test", self._step_test_rows(self._step_test))
         return meta
 
+    @staticmethod
+    def _step_test_rows(st):
+        rows = [
+            ("Parameter", f"{st['parameter']} ({st['code']})", ""),
+            ("Low", st["low"], ""),
+            ("High", st["high"], ""),
+            ("Period", st["period_s"], "s"),
+            ("Steps", f"{st.get('steps_sent', st['steps'])} of {st['steps']}"
+                      + ("" if st.get("completed", True) else " (stopped early)"), ""),
+            ("Return to base", "yes" if st["return_to_base"] else "no", ""),
+        ]
+        if st["return_to_base"]:
+            rows.append(("Base", st["base"], ""))
+        return rows
+
     def default_export_name(self):
-        """``<date-time>_scope_<chan1>-<chan2>_<key settings>`` (no extension)."""
+        """
+        ``<date-time>_scope_<chan1>-<chan2>_<key settings>`` (no extension), or for a Step Test capture
+        ``<date-time>_steptest_<param><low>-<high>_<chan1>-<chan2>_<key settings>``.
+        """
         meta = self.last_meta or MD.Metadata.unavailable("none")
         pll_first = {self.last_chan1, self.last_chan2} & {"df", "Phase"}
         loops = ("pll", "afl") if pll_first else ("afl", "pll")
-        return meta.filename("scope", f"{self.last_chan1}-{self.last_chan2}", loops=loops)
+        channels = f"{self.last_chan1}-{self.last_chan2}"
+        st = self._step_test
+        if st:
+            detail = f"{st['name_tag']}{MD.short_value(st['low'])}-{MD.short_value(st['high'])}_{channels}"
+            return meta.filename("steptest", detail, loops=loops)
+        return meta.filename("scope", channels, loops=loops)
 
     def export_to(self, path):
         """
@@ -508,21 +536,24 @@ class ScopeTab(QtWidgets.QWidget):
         written.append(MD.write_sidecar(stem + ".json", meta, {
             "kind": "ncafm_scope_capture", "data_file": os.path.basename(path), "columns": columns,
             "rate_hz": self.last_rate, "samples": int(len(self.last_data1)),
+            "step_test": dict(self._step_test) if self._step_test else None,
         }))
         png_path = stem + ".png"
         try:
-            save_scene_png(self.plot_widget.scene(), png_path, meta.caption_lines())
+            save_scene_png(self.plot_widget.scene(), png_path, legend=meta.legend())
             written.append(png_path)
         except Exception as img_e:
             written.append(f"(plot image not saved: {img_e})")
         return written
 
-    def set_event_markers(self, events):
+    def set_event_markers(self, events, step_test=None):
         """
         Accept a list of (QtCore.QDateTime, str_label) to overlay as vertical
         lines with small text on both plots. Units on X are seconds from capture start.
+        ``step_test`` (StepTestTab settings) goes into the export metadata and file name.
         """
         self._event_markers = list(events or [])
+        self._step_test = dict(step_test) if step_test else None
         self._update_markers()
 
     def _clear_markers(self):
