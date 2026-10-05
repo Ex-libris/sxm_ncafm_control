@@ -40,7 +40,11 @@ STATUS_LABEL = {"clean": "clean", "slow": "too slow for the hold", "overshoot": 
                 "ringing": "ringing / oscillating", "lost": "lost / not measurable"}
 # analyze_test failures that mean "did not get there within the hold", not "the loop broke": such a point is
 # not clean, but it must not make the exploration skip the faster (more aggressive) points beyond it
-_SLOW_FAILURES = ("did not follow the step", "moved far less than the commanded step")
+_SLOW_FAILURES = ("did not follow the step", "moved far less than the commanded step", "did not settle")
+# failures that show the loop itself broke (runaway seen live, or in the recording): only these make the
+# exploration skip the more aggressive points. A lost point for any other reason (an incomplete recording, an
+# unmeasurable step) says nothing about the gains beyond it.
+_RUNAWAY_FAILURES = ("lost:", "ran away", "collapsed")
 
 
 @dataclass(frozen=True)
@@ -214,6 +218,15 @@ def reference_from(y, u) -> BaselineReference:
     return BaselineReference(float(np.median(y)), float(np.median(u)), M.detrended_std(y), M.detrended_std(u))
 
 
+def follow_drift(ref: BaselineReference, u) -> BaselineReference:
+    """
+    The reference after a successful recovery: the controller output (df / Drive) drifts slowly with f0 and the
+    damping, so the next recovery is judged against where it just was, not where it was at the start of the run.
+    The controller input (amplitude, set by Ref) keeps its start value.
+    """
+    return BaselineReference(ref.y, float(np.median(u)), ref.y_sigma, ref.u_sigma)
+
+
 def recovered(loop: str, y, u, ref: BaselineReference, crit: RecoveryCriteria = RecoveryCriteria()) -> Tuple[bool, str]:
     """Back at the reference state (and steady)."""
     ok, why = steady(loop, y, u, crit)
@@ -308,6 +321,11 @@ class PointSummary:
     @property
     def clean(self) -> bool:
         return self.status == "clean"
+
+    @property
+    def ran_away(self) -> bool:
+        """The loop broke here (not just: no usable measurement)."""
+        return any(any(k in r for k in _RUNAWAY_FAILURES) for a in self.assessments for r in a.reasons)
 
     @property
     def speed_s(self) -> float:
@@ -476,7 +494,15 @@ class Explorer:
         yield Proposal(kp, ki, stage, why)
 
     def _lost_points(self):
-        return [(p.kp, p.ki) for p in self.points().values() if p.status == "lost"]
+        return [(p.kp, p.ki) for p in self.points().values() if p.status == "lost" and p.ran_away]
+
+    @staticmethod
+    def _beyond(point, lost) -> bool:
+        """``point`` is more aggressive than the ``lost`` one. Integral-only (Kp = 0) is a column of its own: a
+        lost Kp = 0 point says nothing about points with Kp, whose proportional part damps the loop."""
+        if lost[0] == 0 and point[0] != 0:
+            return False
+        return _more_aggressive(point, lost)
 
     def _run(self) -> Iterator[Proposal]:
         r, plan = self.region, self.plan
@@ -485,7 +511,7 @@ class Explorer:
         # 1. coarse grid, nearest first; never go deeper into a region where the loop was lost
         for kp, ki in sorted(r.points(), key=lambda p: (r.log_distance(*p), abs(p[0]) + abs(p[1]))):
             k = _key(kp, ki)
-            lost = next((l for l in self._lost_points() if _more_aggressive((kp, ki), l)), None)
+            lost = next((l for l in self._lost_points() if self._beyond((kp, ki), l)), None)
             if lost is not None:
                 self.skipped[k] = f"more aggressive than Kp={lost[0]:.3g}, Ki={lost[1]:.3g}, where the loop was lost"
                 continue

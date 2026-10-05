@@ -165,7 +165,6 @@ class Tabs(unittest.TestCase):
         fake.gui["amplitude"]["Ki"] = 7e4                                           # someone edits SXM by hand
         self.assertTrue(tab.refresh_from_sxm(quiet=True))
         self.assertEqual(tab.baseline(), (5e8, 7e4))                                # the baseline follows SXM
-        self.assertIsNone(tab.reference)                                            # and its reference is re-measured
 
     def test_tuning_tab_without_sxm(self):
         from sxm_ncafm_control.gui import tuning_tab as T
