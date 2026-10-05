@@ -25,6 +25,9 @@ unparseable status raises SXMBridgeError instead of returning a guess.
 Run ``python AnfatecSXMBridge.py`` to print and save a snapshot, or
 ``python AnfatecSXMBridgeMonitor.py`` for a live view.
 
+``sxm.control(path)`` locates the control behind a path without touching it;
+AnfatecSXMWriter uses it to write the same paths this module reads.
+
 Master copy: anfatec_code/AnfatecSXMBridge.py in the author's development
 folder. sxm_ncafm_control ships a copy, updated from the master; make changes
 in the master, not in the copy.
@@ -41,7 +44,7 @@ import re
 from collections.abc import Mapping
 from typing import Any, Callable, NamedTuple
 
-__all__ = ['AnfatecSXMBridge', 'Win32Backend', 'Section', 'Discovery',
+__all__ = ['AnfatecSXMBridge', 'Win32Backend', 'Control', 'Section', 'Discovery',
            'SXMBridgeError', 'SXMPathError', 'parse_dnc_status']
 
 TARGET_EXE = 'femto_28_4.exe'
@@ -255,12 +258,108 @@ def _inventory(form: int) -> dict:
 # Backend: GUI structure -> named parameters
 # =============================================================================
 
-class Win32Backend:
-    """Passive GUI reader. Each method raises RuntimeError when the layout is not as expected."""
+class Control(NamedTuple):
+    """The GUI control behind one parameter, located structurally at one moment.
 
-    # -- forms read directly by structure --
+    ``kind`` is ``'edit'``, ``'combo'``, ``'check'`` or ``'choice'`` (a set of radio
+    buttons whose value is the caption of the checked one). ``hwnds`` holds the one
+    control, or the buttons of a choice. HWNDs are not identities: locate again for
+    every access.
+    """
+    kind: str
+    hwnds: tuple
+    numeric: bool = False          # combo whose text is read as a number
+
+
+def _edit(h: int) -> Control:
+    return Control('edit', (h,))
+
+
+def _combo(h: int, numeric: bool = False) -> Control:
+    return Control('combo', (h,), numeric)
+
+
+def _check(h: int) -> Control:
+    return Control('check', (h,))
+
+
+def _choice(hwnds: list) -> Control:
+    return Control('choice', tuple(hwnds))
+
+
+def _value(c: Control) -> Any:
+    h = c.hwnds[0] if c.hwnds else 0
+    if c.kind == 'edit':
+        return _num(_text(h))
+    if c.kind == 'combo':
+        return _num(_text(h)) if c.numeric else _text(h)
+    if c.kind == 'check':
+        return _checked(h)
+    return next((_text(b) for b in c.hwnds if _checked(b)), None)
+
+
+def _resolve(tree: Any) -> Any:
+    """Read a control tree into the same structure of values."""
+    if isinstance(tree, Control):
+        return _value(tree)
+    if isinstance(tree, dict):
+        return {k: _resolve(v) for k, v in tree.items()}
+    if isinstance(tree, list):
+        return [_resolve(v) for v in tree]
+    return tree
+
+
+class Win32Backend:
+    """Passive GUI reader. Each method raises RuntimeError when the layout is not as expected.
+
+    Every section is located once, by ``_locate_<section>``, as a tree of Controls;
+    the section read resolves that tree. ``controls(section)`` exposes the same tree,
+    so anything that acts on a path acts on exactly the control that is read for it.
+    """
+
+    def controls(self, method: str) -> dict:
+        """Control tree behind the read method ``method`` (same shape as its values)."""
+        locate = getattr(self, f'_locate_{method}', None)
+        if locate is None:
+            raise RuntimeError(f'{method!r} has no control map')
+        return locate()
 
     def scan(self) -> dict:
+        return _resolve(self._locate_scan())
+
+    def topography(self) -> dict:
+        return _resolve(self._locate_topography())
+
+    def amplitude(self) -> dict:
+        return _resolve(self._locate_amplitude())
+
+    def pll(self) -> dict:
+        return _resolve(self._locate_pll())
+
+    def zcontrol(self) -> dict:
+        return _resolve(self._locate_zcontrol())
+
+    def spectroscopy(self) -> dict:
+        return _resolve(self._locate_spectroscopy())
+
+    def lockin(self) -> dict:
+        return _resolve(self._locate_lockin())
+
+    def dynamic_non_contact(self) -> dict:
+        return _resolve(self._locate_dynamic_non_contact())
+
+    def feedback_mode(self) -> dict:
+        return _resolve(self._locate_feedback_mode())
+
+    def tip_conditioning(self) -> dict:
+        return _resolve(self._locate_tip_conditioning())
+
+    def oscilloscope_state(self) -> dict:
+        return _resolve(self._locate_oscilloscope_state())
+
+    # -- forms located directly by structure --
+
+    def _locate_scan(self) -> dict:
         f = _form('TScanParaForm')
         left = _rect(f)[0]
 
@@ -272,40 +371,40 @@ class Win32Backend:
         edits, combos = column('TEdit'), column('TComboBox')
         if len(edits) < 5:
             raise RuntimeError('Scan layout changed')
-        rng, speed, xc, yc, angle = (_num(_text(h)) for h in edits[:5])
-        return {'Range': rng, 'Speed': speed, 'Pixel': _num(_text(combos[0])) if combos else None,
+        rng, speed, xc, yc, angle = (_edit(h) for h in edits[:5])
+        return {'Range': rng, 'Speed': speed, 'Pixel': _combo(combos[0], numeric=True) if combos else None,
                 'x-Center': xc, 'y-Center': yc, 'Angle': angle}
 
-    def topography(self) -> dict:
+    def _locate_topography(self) -> dict:
         edits = _direct(_group(_form('TScanParaForm'), 'Topography feedback'), 'TEdit')
         if len(edits) != 3:
             raise RuntimeError('Topography feedback layout changed')
-        return dict(zip(('Ref', 'Ki', 'Kp'), (_num(_text(h)) for h in edits)))
+        return dict(zip(('Ref', 'Ki', 'Kp'), map(_edit, edits)))
 
-    def amplitude(self) -> dict:
+    def _locate_amplitude(self) -> dict:
         g = _group(_form('TScanParaForm'), 'Amplitude feedback')
         edits, combos = _direct(g, 'TEdit'), _direct(g, 'TComboBox')
         if len(edits) != 5 or len(combos) != 1:
             raise RuntimeError('Amplitude feedback layout changed')
-        out = dict(zip(('Ref', 'Ki', 'Kp', 'Pull back at', 'Pull Speed'), (_num(_text(h)) for h in edits)))
-        out['Tau'] = _text(combos[0])
+        out = dict(zip(('Ref', 'Ki', 'Kp', 'Pull back at', 'Pull Speed'), map(_edit, edits)))
+        out['Tau'] = _combo(combos[0])
         return out
 
-    def pll(self) -> dict:
+    def _locate_pll(self) -> dict:
         edits = _direct(_group(_form('TScanParaForm'), 'PLL'), 'TEdit')
         if len(edits) != 2:
             raise RuntimeError('PLL layout changed')
-        return dict(zip(('Kp', 'Ki'), (_num(_text(h)) for h in edits)))
+        return dict(zip(('Kp', 'Ki'), map(_edit, edits)))
 
-    def zcontrol(self) -> dict:
+    def _locate_zcontrol(self) -> dict:
         f = _form('TzControlForm')
         edits, boxes = _direct(f, 'TEdit'), _direct(f, 'TCheckBox')
         if len(edits) != 3 or len(boxes) != 1:
             raise RuntimeError('zControl layout changed')
-        dz, per_tick, slew = (_num(_text(h)) for h in edits)
-        return {'Feedback Off': _checked(boxes[0]), 'dz': dz, 'dz per Mouse Tick': per_tick, 'Slew Rate': slew}
+        dz, per_tick, slew = map(_edit, edits)
+        return {'Feedback Off': _check(boxes[0]), 'dz': dz, 'dz per Mouse Tick': per_tick, 'Slew Rate': slew}
 
-    def spectroscopy(self) -> dict:
+    def _locate_spectroscopy(self) -> dict:
         f = _form('TSpektForm')
         panels = [h for h in _children(f, True) if _cls(h) == 'TPanel' and _rect(h)[2] < 250]
         if not panels:
@@ -313,34 +412,83 @@ class Win32Backend:
         p = min(panels, key=lambda h: _rect(h)[0])
         edits, combos = _direct(p, 'TEdit'), _direct(p, 'TComboBox')
         names = ('X', 'Y', 'Delay1', 'AguT', 'dz', 'U Start', 'U Stop')
-        out = {n: _num(_text(h)) for n, h in zip(names, edits)}
-        out['Mode'] = _text(combos[0]) if combos else None
+        out = {n: _edit(h) for n, h in zip(names, edits)}
+        out['Mode'] = _combo(combos[0]) if combos else None
         acquire = [h for h in _children(p) if _cls(h) == 'TGroupBox' and _norm(_text(h)) == 'acquire']
         if acquire:
-            out['Acquire'] = [_text(h) for h in _direct(acquire[0], 'TComboBox')]
+            out['Acquire'] = [_combo(h) for h in _direct(acquire[0], 'TComboBox')]
         return out
 
-    def lockin(self) -> dict:
+    def _locate_lockin(self) -> dict:
         f = _form('TMultiLockInForm')
         out = {}
         for caption, key in (('TimeConstant t', 'TimeConstant'), ('RollOff', 'RollOff')):
             combos = _direct(_group(f, caption), 'TComboBox')
-            out[key] = _text(combos[0]) if combos else None
+            out[key] = _combo(combos[0]) if combos else None
         for n in (1, 2, 3):
             g = _group(f, f'Lia {n}')
             edits, combos = _direct(g, 'TEdit'), _direct(g, 'TComboBox')
-            d = {'Link': _text(combos[0]) if combos else None}
+            d = {'Link': _combo(combos[0]) if combos else None}
             if edits:
-                d['Value1'] = _num(_text(edits[0]))
+                d['Value1'] = _edit(edits[0])
             # The phase edit sits in a nested 'Phase' group.
             phases = [h for h in _children(g) if _cls(h) == 'TGroupBox' and _norm(_text(h)) == 'phase']
             if phases:
                 pe = _direct(phases[0], 'TEdit')
-                d['Phase'] = _num(_text(pe[0])) if pe else None
+                d['Phase'] = _edit(pe[0]) if pe else None
             out[f'Lia{n}'] = d
         return out
 
-    # -- forms read from their control inventory --
+    # -- forms located over all their controls, in enumeration order --
+
+    @staticmethod
+    def _all(form_class: str):
+        f = _form(form_class)
+        kids = [h for h in _children(f) if _cls(h) != 'TPUtilWindow']
+        return f, lambda control_class: [h for h in kids if _cls(h) == control_class]
+
+    def _locate_dynamic_non_contact(self) -> dict:
+        _, of = self._all('TdncForm')
+        groups = {_text(h): h for h in of('TGroupBox')}
+
+        def combo_in(caption):
+            if caption not in groups:
+                raise RuntimeError(f'DNC group {caption!r} not found')
+            x, y, w, h = _rect(groups[caption])
+            hits = [c for c in of('TComboBox') if x <= _rect(c)[0] <= x + w and y <= _rect(c)[1] <= y + h]
+            if len(hits) != 1:
+                raise RuntimeError(f'Ambiguous DNC group {caption!r}')
+            return _combo(hits[0])
+
+        edits = sorted(of('TEdit'), key=_top)
+        status = of('TStatusBar')
+        return {
+            'Input Gain InA': _choice(of('TRadioButton')),
+            'TimeConstant': combo_in('TimeConstant t'),
+            'RollOff': combo_in('RollOff'),
+            'Range': _choice(of('TGroupButton')),
+            'Status': _text(status[0]) if status else '',
+            'unmapped_numeric_controls': [{'value': _edit(h), 'rect': _rect(h)} for h in edits],
+        }
+
+    def _locate_feedback_mode(self) -> dict:
+        _, of = self._all('TfeedbackForm')
+        combos = of('TComboBox')
+        return {'Mode': _combo(combos[0]) if combos else None}
+
+    def _locate_tip_conditioning(self) -> dict:
+        _, of = self._all('TTipForm')
+        edits = sorted(of('TEdit'), key=_top)
+        return {'Mode': _choice(of('TGroupButton')),
+                'unmapped_numeric_controls': [{'value': _edit(h), 'rect': _rect(h)} for h in edits]}
+
+    def _locate_oscilloscope_state(self) -> dict:
+        _, of = self._all('TOszi2Form')
+        return {'Channels': [_combo(h) for h in of('TComboBox')],
+                'x_axis_values': [_edit(h) for h in of('TEdit')],
+                'selected_modes': [_text(h) for h in of('TRadioButton') if _checked(h)]}
+
+    # -- forms read from their control inventory (read-only) --
 
     @staticmethod
     def _of(form: dict, control_class: str) -> list:
@@ -351,37 +499,6 @@ class Win32Backend:
         v = control['value']
         return v if isinstance(v, dict) else {'caption': str(v), 'checked': None}
 
-    @staticmethod
-    def _checked_caption(states: list) -> str | None:
-        return next((s['caption'] for s in states if s.get('checked')), None)
-
-    def dynamic_non_contact(self) -> dict:
-        f = self.discovery_form('TdncForm')
-        groups = {str(c['value']).strip(): c for c in self._of(f, 'TGroupBox')}
-
-        def combo_in(caption):
-            if caption not in groups:
-                raise RuntimeError(f'DNC group {caption!r} not found')
-            x, y, w, h = groups[caption]['rect']
-            hits = [c for c in self._of(f, 'TComboBox') if x <= c['rect'][0] <= x + w and y <= c['rect'][1] <= y + h]
-            if len(hits) != 1:
-                raise RuntimeError(f'Ambiguous DNC group {caption!r}')
-            return hits[0]['value']['text']
-
-        edits = sorted(self._of(f, 'TEdit'), key=lambda c: c['rect'][1])
-        return {
-            'Input Gain InA': self._checked_caption([self._state(c) for c in self._of(f, 'TRadioButton')]),
-            'TimeConstant': combo_in('TimeConstant t'),
-            'RollOff': combo_in('RollOff'),
-            'Range': self._checked_caption([self._state(c) for c in self._of(f, 'TGroupButton')]),
-            'Status': next((c['value'] for c in self._of(f, 'TStatusBar')), ''),
-            'unmapped_numeric_controls': [{'value': c['value'], 'rect': c['rect']} for c in edits],
-        }
-
-    def feedback_mode(self) -> dict:
-        combos = self._of(self.discovery_form('TfeedbackForm'), 'TComboBox')
-        return {'Mode': combos[0]['value']['text'] if combos else None}
-
     def scanner_state(self) -> dict:
         f = self.discovery_form('TScannerForm')
         buttons = [self._state(c) for c in self._of(f, 'TGroupButton')]
@@ -390,19 +507,6 @@ class Win32Backend:
                 'selected_group_buttons': [s['caption'] for s in buttons if s.get('checked')],
                 'selected_radio_buttons': [s['caption'] for s in radios if s.get('checked')],
                 'combos': [c['value'] for c in self._of(f, 'TComboBox')]}
-
-    def tip_conditioning(self) -> dict:
-        f = self.discovery_form('TTipForm')
-        edits = sorted(self._of(f, 'TEdit'), key=lambda c: c['rect'][1])
-        return {'Mode': self._checked_caption([self._state(c) for c in self._of(f, 'TGroupButton')]),
-                'unmapped_numeric_controls': [{'value': c['value'], 'rect': c['rect']} for c in edits]}
-
-    def oscilloscope_state(self) -> dict:
-        f = self.discovery_form('TOszi2Form')
-        radios = [self._state(c) for c in self._of(f, 'TRadioButton')]
-        return {'Channels': [c['value']['text'] for c in self._of(f, 'TComboBox')],
-                'x_axis_values': [c['value'] for c in self._of(f, 'TEdit')],
-                'selected_modes': [s['caption'] for s in radios if s.get('checked')]}
 
     # -- discovery --
 
@@ -681,6 +785,20 @@ class AnfatecSXMBridge:
         return Section('.'.join([spec.name, *rest]), value) if isinstance(value, Mapping) else copy.deepcopy(value)
 
     __getitem__ = get
+
+    def control(self, path: str) -> Any:
+        """Locate, without reading or sending anything, what ``get(path)`` reads.
+
+        Returns a Control, or the subtree of Controls under ``path``. Used by
+        AnfatecSXMWriter so that writing a path acts on exactly the control read for it.
+        """
+        head, *rest = path.split('.')
+        spec = _find_section(head)
+        try:
+            tree = self._backend.controls(spec.method)
+        except Exception as exc:
+            raise SXMBridgeError(f'{spec.name}: {exc}') from exc
+        return _walk(tree, rest, spec.name)
 
     def paths(self) -> list:
         """All leaf paths currently readable. Sections that fail to read are left out."""
