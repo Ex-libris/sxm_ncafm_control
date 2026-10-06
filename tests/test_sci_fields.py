@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt5 import QtGui, QtWidgets                                       # noqa: E402
 
 from sxm_ncafm_control.common import NumericItemDelegate, format_number  # noqa: E402
-from sxm_ncafm_control.gui import tuning_tab as T                        # noqa: E402
+from sxm_ncafm_control.gui import runsheet_tab as T                      # noqa: E402
 from sxm_ncafm_control.gui.sci_spinbox import SciDoubleSpinBox           # noqa: E402
 from sxm_ncafm_control.tests.fake_instrument import FakeInstrument       # noqa: E402
 
@@ -126,16 +126,6 @@ class PlainFrequencyFields(unittest.TestCase):
         s.stepBy(1)
         self.assertEqual(s.value(), 25100.0)                                # ordinary stepping, not +-10 %
 
-    def test_tuning_tab_f0_keeps_mhz_resolution(self):
-        tab = T.TuningTab(FakeInstrument(), FakeInstrument())
-        tab.override_check.setChecked(True)
-        self.assertEqual(tab.f0_spin.text(), "25000.000 Hz")
-        tab.f0_spin.lineEdit().setText("25132.457 Hz")
-        tab.f0_spin.interpretText()
-        self.assertEqual(tab.f0_spin.value(), 25132.457)                    # was rounded to 25132.5 with one decimal
-        self.assertEqual(tab.f0_spin.text(), "25132.457 Hz")
-        self.assertIn("25132.457 Hz", tab.instrument_label.text())          # the panel does not round it either
-
     def test_suggested_setup_f0(self):
         from sxm_ncafm_control.gui.suggested_tab import SuggestedTab
         tab = SuggestedTab(FakeInstrument(), None)
@@ -146,25 +136,19 @@ class PlainFrequencyFields(unittest.TestCase):
 
 
 class FieldsInTheTabs(unittest.TestCase):
-    def test_tuning_tab_gain_fields(self):
-        tab = T.TuningTab(FakeInstrument(), FakeInstrument())
-        tab.override_check.setChecked(True)
-        self.assertEqual((tab.kp_spin.text(), tab.ki_spin.text()), ("2e8", "2e4"))    # amplitude loop first
-        self.assertEqual((tab.kp_center.text(), tab.ki_center.text()), ("2e8", "2e4"))
-        tab.gain_combo.setCurrentIndex(tab.gain_combo.findData(0.1))
-        tab.btn_center_manual.click()
-        self.assertEqual((tab.kp_center.text(), tab.ki_center.text()), ("2e9", "2e5"))
-        tab.kp_center.lineEdit().setText("3.5e9")
-        tab.kp_center.interpretText()
-        self.assertEqual(tab.kp_center.value(), 3.5e9)
+    def test_tuning_tab_anchor_fields(self):
+        tab = T.RunSheetTab(FakeInstrument(), FakeInstrument())
+        self.assertEqual((tab.kp0.text(), tab.ki0.text()), ("1e6", "100"))       # amplitude loop first
+        tab.kp0.lineEdit().setText("3.5e5")
+        tab.kp0.interpretText()
+        self.assertEqual(tab.kp0.value(), 3.5e5)
         tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("pll"))
-        self.assertEqual((tab.kp_spin.text(), tab.ki_spin.text()), ("-100", "-1e4"))
-        self.assertEqual(tab.base_spin.text(), "25000.0000")                # a frequency: fixed decimals
+        self.assertEqual((tab.kp0.text(), tab.ki0.text()), ("-200", "-1.65e4"))
 
     def test_every_number_field_of_the_tuning_tab_takes_scientific_input(self):
-        tab = T.TuningTab(FakeInstrument(), FakeInstrument())
+        tab = T.RunSheetTab(FakeInstrument(), FakeInstrument())
         spins = [w for w in tab.findChildren(QtWidgets.QDoubleSpinBox)]
-        self.assertGreater(len(spins), 10)
+        self.assertGreater(len(spins), 8)
         self.assertTrue(all(isinstance(w, SciDoubleSpinBox) for w in spins))
 
     def test_step_test_fields(self):
