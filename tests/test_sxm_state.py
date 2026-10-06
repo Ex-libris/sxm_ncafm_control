@@ -155,25 +155,31 @@ class Tabs(unittest.TestCase):
         self.assertNotIn("PLL Kp: sent", log)
         self.assertEqual(tab._pending_verify, {})
 
-    def test_tuning_tab_reads_the_baseline_without_rescaling_it(self):
-        from sxm_ncafm_control.gui import tuning_tab as T
+    def test_tuning_tab_takes_the_anchor_from_sxm_without_rescaling_it(self):
+        from sxm_ncafm_control.gui import runsheet_tab as T
         from sxm_ncafm_control.tests.fake_instrument import FakeInstrument
         rd, fake = reader()
-        tab = T.TuningTab(FakeInstrument(), None, reader=rd)
-        self.assertEqual(tab.gain_combo.currentData(), 0.1)
-        self.assertEqual(tab.baseline(), (5e8, 5e4))                                # as read, not x10
+        tab = T.RunSheetTab(FakeInstrument(), None, reader=rd)
+        self.assertEqual(tab.anchor_og.currentData(), 0.1)
+        self.assertEqual((tab.kp0.value(), tab.ki0.value()), (5e8, 5e4))            # as read, not x10
+        self.assertEqual(tab.current_settings()["amp_tau_ms"], 2.0)
+        self.assertEqual(tab.current_settings()["dnc_rolloff"], "6")
         fake.gui["amplitude"]["Ki"] = 7e4                                           # someone edits SXM by hand
         self.assertTrue(tab.refresh_from_sxm(quiet=True))
-        self.assertEqual(tab.baseline(), (5e8, 7e4))                                # the baseline follows SXM
+        self.assertEqual(tab.ki0.value(), 7e4)                                      # an empty sheet follows SXM
+        tab.add_ramp()
+        fake.gui["amplitude"]["Ki"] = 9e4
+        self.assertTrue(tab.refresh_from_sxm(quiet=True))
+        self.assertEqual(tab.ki0.value(), 7e4)                                      # a built sheet keeps its anchor
 
     def test_tuning_tab_without_sxm(self):
-        from sxm_ncafm_control.gui import tuning_tab as T
+        from sxm_ncafm_control.gui import runsheet_tab as T
         from sxm_ncafm_control.tests.fake_instrument import FakeInstrument
-        tab = T.TuningTab(FakeInstrument(), None, reader=reader(broken=set(GUI))[0])
-        kp = tab.kp_spin.value()
+        tab = T.RunSheetTab(FakeInstrument(), None, reader=reader(broken=set(GUI))[0])
+        kp = tab.kp0.value()
         self.assertFalse(tab.refresh_from_sxm(quiet=True))
-        self.assertEqual(tab.kp_spin.value(), kp)
-        self.assertTrue(any("SXM not readable" in t for _, t in tab.checks()))
+        self.assertEqual(tab.kp0.value(), kp)
+        self.assertTrue(any("SXM not read" in t for _, t in tab.checks()))
 
     def test_step_test_base_and_suggested_q_f0(self):
         from sxm_ncafm_control.gui.step_test_tab import StepTestTab

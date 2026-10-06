@@ -15,7 +15,7 @@ Tabs:
     - Suggested Setup: View recommended starting values.
     - QPlus Calibration: Sweep amplitude and calibrate delta-topography response.
     - Constant Height: Control Z in constant-height mode.
-    - Tuning: guided PLL / amplitude-loop tuning (step trains, (Kp, Ki) map, advice).
+    - Tuning: run sheets of step tests for the PLL / amplitude loop (G and rho ramps, settings ramps, quiet-window noise).
 
 Safety:
     Displays a footer warning if voltage-like parameters exceed ±10 V.
@@ -38,7 +38,7 @@ from sxm_ncafm_control.gui.scope_tab import ScopeTab
 from sxm_ncafm_control.gui.live_scope_tab import LiveScopeTab
 from sxm_ncafm_control.gui.qplus_calibration_tab import QplusCalibrationTab
 from sxm_ncafm_control.gui.z_const_acquisition import ZConstAcquisition
-from sxm_ncafm_control.gui.tuning_tab import TuningTab
+from sxm_ncafm_control.gui.runsheet_tab import RunSheetTab
 from sxm_ncafm_control.gui.gui_accessibility_manager import (
     AccessibilityManager, 
     AccessibilityToolbar,
@@ -139,8 +139,7 @@ class MainWindow(QtWidgets.QWidget):
         self.suggest_tab = SuggestedTab(conn.dde, self.params_tab, reader=conn.reader)
         self.qplus_tab = QplusCalibrationTab(conn.dde, reader=conn.reader)
         self.topo_hold_tab = ZConstAcquisition(conn.dde, conn.driver)
-        self.tuning_tab = TuningTab(conn.dde, conn.driver, scope_tab=self.scope_tab, params_tab=self.params_tab,
-                                    reader=conn.reader)
+        self.tuning_tab = RunSheetTab(conn.dde, conn.driver, params_tab=self.params_tab, reader=conn.reader)
 
         # Link StepTest to Scope and Tabs
         self.step_tab.scope_tab = self.scope_tab
@@ -163,9 +162,7 @@ class MainWindow(QtWidgets.QWidget):
 
         layout.addWidget(self.tabs)
 
-        # Safety footer: a short one-line reminder, not a permanent alarm. The Tuning tab now also
-        # warns inline, only when a value it would actually write exceeds the limit (see
-        # TuningTab._voltage_warning); this stays as the general, always-true reminder for every tab.
+        # Safety footer: a short one-line reminder, not a permanent alarm, true for every tab.
         self.footer = QtWidgets.QLabel(
             "Check SXM units; never exceed ±10 V without attenuation. <a href='#'>Details</a>"
         )
@@ -568,7 +565,7 @@ class MainWindow(QtWidgets.QWidget):
         # only the top-level MainWindow is closed, so this is done centrally.)
         if self.live_scope_tab.capture_thread is not None:
             self.live_scope_tab.stop_live()
-        if self.tuning_tab.runner_active():          # restores the baseline gains before the driver closes
+        if self.tuning_tab.runner_active():          # restores the anchor gains before the driver closes
             self.tuning_tab.stop()
 
         # The IOCTL driver is shared across tabs (Scope, Constant Height), so it
