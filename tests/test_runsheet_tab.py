@@ -60,8 +60,9 @@ class Building(unittest.TestCase):
         tab2.retracted_check.setChecked(True)
         self.assertIsNone(tab2._blocked())
         self.assertTrue(tab2.btn_run.isEnabled())
-        tab2.raw_check.setChecked(True)
-        self.assertIn("folder", tab2._blocked())
+        tab2.raw_check.setChecked(True)            # saving is on by default; no folder yet: Run asks, not blocks
+        self.assertIsNone(tab2._blocked())
+        self.assertIn("ask", " ".join(t for _k, t in tab2.checks()))
 
     def test_switching_loop_resets_the_anchor_and_clears_the_sheet(self):
         tab = T.RunSheetTab(MockDDEClient(), None)
@@ -99,11 +100,22 @@ class Running(unittest.TestCase):
             for i in (0, 1):
                 self.assertNotEqual(tab.table.item(i, T.COLUMNS.index("Result")).text(), "")
                 self.assertTrue(tab.table.item(i, T.COLUMNS.index("Amp noise")).text().endswith("%"))
-            recordings = [f for f in os.listdir(d) if f.endswith(".csv")]
-            self.assertEqual(len(recordings), 2)
+            files = os.listdir(d)
+            recordings = sorted(f for f in files if "_steptest_AmpRef" in f and f.endswith(".csv"))
+            self.assertEqual(len(recordings), 2, files)
+            self.assertIn("_QPlusAmpl-Drive_cond01", recordings[0])
+            for r in recordings:
+                stem = r[:-4]
+                self.assertIn(stem + ".json", files)
+                self.assertIn(stem + ".png", files)
             with open(os.path.join(d, recordings[0]), encoding="utf-8") as f:
-                head = [ln for ln in f if not ln.startswith("#")][0]
-            self.assertTrue(head.startswith("time_s,QPlusAmpl,Drive,df,Phase"))
+                lines = f.readlines()
+            head = [ln for ln in lines if not ln.startswith("#")][0]
+            self.assertTrue(head.startswith("time_s,QPlusAmpl_V,Drive_V,df_"), head)
+            text = "".join(lines)
+            self.assertIn("[Step Test]", text)
+            self.assertIn("[Run sheet condition]", text)
+            self.assertEqual(len([f for f in files if "_runsheet_AFL-2conditions" in f and f.endswith(".csv")]), 1)
             tab.table.selectRow(1)
             self.assertGreater(len(tab.p_rec.listDataItems()), 0)
             self.assertGreater(len(tab.p_asd.listDataItems()), 0)
