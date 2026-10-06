@@ -143,7 +143,8 @@ class Outcome:
     status: str = "pending"                  # explore.STATUSES, or 'skipped' / 'stopped'
     note: str = ""
     time: str = ""
-    meta: Optional[MD.Metadata] = None
+    meta: Optional[MD.Metadata] = None       # SXM read when the condition ended (see _end_meta)
+    plan: Optional[W.StepTestPlan] = None    # the step train as run (its base, levels, hold)
     # display copy of the recording (DISPLAY_BIN_S bins) and its marks, seconds from the capture start
     t: Optional[np.ndarray] = None
     data: Dict[str, np.ndarray] = field(default_factory=dict)
@@ -402,6 +403,7 @@ class SheetRunner(QtCore.QObject):
         except ValueError as e:
             self._end_condition(failure=f"step train not possible here: {e}")
             return
+        out.plan = self._plan
         out.settings = {**self.current, **cond.settings}
         if self.meta_fn is not None:
             try:
@@ -582,6 +584,7 @@ class SheetRunner(QtCore.QObject):
         out.note = " | ".join(([out.result.failure] if out.result.failure else []) + out.assessment.reasons
                               + list(out.result.warnings))
         lost = out.status == "lost" or (out.result.failure or "").startswith("lost")
+        out.meta = self._end_meta(out, lost)
         for j in R.stop_rule(self.cfg.sheet, self._i, out.status):
             if j not in self.skip:
                 self.skip[j] = f"stop rule: #{self._i + 1} was {X.STATUS_LABEL.get(out.status, out.status)}"
@@ -592,6 +595,28 @@ class SheetRunner(QtCore.QObject):
             self._recover()
             return
         self._later(self.PAUSE_MS, self._next)
+
+    def _end_meta(self, out: Outcome, lost: bool) -> Optional[MD.Metadata]:
+        """
+        The settings the condition ran at. The read at its start comes before its gains are written, so SXM is
+        read again now, with the gains still in place (as a Step Test export reads SXM when the capture ends).
+        A lost condition is not re-read (recovery comes first): its start read gets the gains as written.
+        """
+        if not lost and self.meta_fn is not None:
+            try:
+                meta = self.meta_fn()
+                if meta is not None and meta.has_sxm:
+                    return meta
+            except Exception:
+                pass
+        start = out.meta
+        if start is None or not start.has_sxm:
+            return start
+        meta = MD.Metadata(start.values, start.errors, start.timestamp,
+                           f"{start.source}, before the condition; {self.loop.key.upper()} gains as written")
+        kp_key, ki_key = ("amp_kp", "amp_ki") if self.loop.key == "afl" else ("pll_kp", "pll_ki")
+        meta.values[kp_key], meta.values[ki_key] = out.kp, out.ki
+        return meta
 
     # -- after a lost condition ------------------------------------------------------------------------------
     def _recover(self):

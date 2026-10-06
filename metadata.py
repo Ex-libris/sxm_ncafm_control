@@ -236,7 +236,7 @@ class Metadata:
                  ("input_gain_ina", "InA", "x", 1.0))),
         ("Resonance", (("f_peak", "f peak", "Hz", 1.0), ("q", "Q", "", 1.0), ("ring_down_s", "Ring-down", "ms", 1e3))),
     )
-    LEGEND_SECTIONS = ("Capture", "Step Test")      # app sections shown in the legend (not the event list)
+    LEGEND_SECTIONS = ("Capture", "Step Test", "Run sheet condition")   # app sections in the legend (not the events)
 
     def legend(self) -> Tuple[List[Tuple[str, List[Tuple[str, str]]]], str]:
         """
@@ -268,6 +268,8 @@ class Metadata:
                 cols.append((title, [(lbl, text(v, u)) for lbl, v, u in rows]))
         footer = (f"SXM settings read {self.timestamp:%Y-%m-%d %H:%M:%S}, in SXM GUI units" if self.has_sxm
                   else f"SXM settings: {self.source}")
+        if self.has_sxm and self.source != "SXM read-back":
+            footer += f" ({self.source})"
         return cols, footer
 
     def filename_tag(self, loops: Sequence[str] = ("afl", "pll")) -> str:

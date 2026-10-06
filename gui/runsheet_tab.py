@@ -34,6 +34,7 @@ from sxm_ncafm_control.tuning import runsheet as R
 from sxm_ncafm_control.tuning import workflow as W
 
 from ..common import append_log_line, format_number
+from . import condition_export as CX
 from .sci_spinbox import SciDoubleSpinBox
 from .sheet_runner import LOOP_CHANNELS, Outcome, RunConfig, SheetRunner
 
@@ -253,7 +254,11 @@ class RunSheetTab(QtWidgets.QWidget):
                                    "and asks you to set them, then checks SXM's read-back.")
         v.addWidget(self.auto_check)
         row = QtWidgets.QHBoxLayout()
-        self.raw_check = QtWidgets.QCheckBox("Save every recording to:")
+        self.raw_check = QtWidgets.QCheckBox("Save every condition (CSV + JSON + PNG, as a Step Test) to:")
+        self.raw_check.setToolTip("Each condition is saved when it ends, named and laid out like a Step Test export "
+                                  "from the Scope tab; the results table is saved there too at the end of the run. "
+                                  "Run asks for the folder if none is set.")
+        self.raw_check.setChecked(True)
         self.raw_check.toggled.connect(self._update_enabled)
         self.btn_raw_dir = QtWidgets.QPushButton("Folder…")
         self.btn_raw_dir.clicked.connect(self._choose_raw_dir)
@@ -473,7 +478,9 @@ class RunSheetTab(QtWidgets.QWidget):
         if not self.retracted_check.isChecked():
             out.append(("block", "Confirm that the tip is retracted."))
         if self.raw_check.isChecked() and not self._raw_dir:
-            out.append(("block", "Choose a folder for the recordings, or untick 'Save every recording'."))
+            out.append(("warn", "No folder for the recordings yet: Run will ask for one."))
+        elif not self.raw_check.isChecked():
+            out.append(("warn", "Recordings are not saved (only the results table, on Export)."))
         return out
 
     def _refresh_panels(self, *_):
@@ -699,6 +706,10 @@ class RunSheetTab(QtWidgets.QWidget):
         if why:
             QtWidgets.QMessageBox.warning(self, "Run sheet", why)
             return
+        if self.raw_check.isChecked() and not self._raw_dir:
+            self._choose_raw_dir()
+            if not self._raw_dir:
+                return
         try:
             plan = self.plan()
             anchor = self.anchor()
@@ -761,10 +772,13 @@ class RunSheetTab(QtWidgets.QWidget):
         self._fill_row(i)
 
     def _on_finished_condition(self, out: Outcome):
-        if out.raw is not None and self.raw_check.isChecked() and self._raw_dir:
+        if out.raw is not None and len(out.raw[0]) and self.raw_check.isChecked() and self._raw_dir:
             try:
-                path = self._save_raw(out)
-                out.note = (out.note + " | " if out.note else "") + f"saved {os.path.basename(path)}"
+                written = self._save_raw(out)
+                out.note = (out.note + " | " if out.note else "") + f"saved {os.path.basename(written[0])}"
+                for w in written[1:]:
+                    if w.startswith("("):
+                        self._log(f"  {w}")
             except OSError as e:
                 self._log(f"  could not save the recording: {e}")
         out.raw = None                             # the display copy stays; the full one is on disk (or dropped)
@@ -787,29 +801,29 @@ class RunSheetTab(QtWidgets.QWidget):
         if self._best is not None:
             o = self.outcomes[self._best]
             self._log(f"Best so far: #{self._best + 1} {o.condition.label()} (Kp {_gain(o.kp)}, Ki {_gain(o.ki)}).")
+        if self.raw_check.isChecked() and self._raw_dir and any(o.status != "skipped" for o in self.outcomes.values()):
+            try:
+                path = os.path.join(self._raw_dir, self._results_name())
+                jp = self.export_results_to(path)
+                self._log(f"Results saved: {os.path.basename(path)} (+ {os.path.basename(jp)}).")
+            except OSError as e:
+                self._log(f"Could not save the results: {e}")
         self._update_enabled()
         self._refresh_table()
 
-    def _save_raw(self, out: Outcome) -> str:
-        t, data = out.raw
-        meta = _copy_meta(out.meta)
+    def _save_raw(self, out: Outcome) -> List[str]:
+        """The condition as a Step Test export (CSV + JSON + PNG) in the recordings folder. Returns the paths."""
         c = out.condition
-        meta.add_section("Run sheet condition", [
-            ("Index", out.index + 1, ""), ("Ramp", c.group, ""), ("G", c.g, ""), ("rho", c.rho, ""),
-            ("Kp written", out.kp, ""), ("Ki written", out.ki, ""),
-            ("Settings", c.label(), ""), ("Result", out.status, ""),
-            ("Marks (s)", ", ".join(f"{k}={v:.3f}" for k, v in out.marks.items()), ""),
-            ("Events (s)", ", ".join(f"{e:.3f}" for e in out.events), "")])
-        stem = os.path.join(self._raw_dir, meta.filename("runsheet", f"{out.index + 1:02d}_{self.loop}_G{c.g:g}_rho{c.rho:g}",
-                                                         loops=(self.loop, "pll" if self.loop == "afl" else "afl")))
-        names = list(data)
-        with open(stem + ".csv", "w", encoding="utf-8", newline="") as f:
-            f.write(MD.csv_preamble(meta.header_lines("SXM nc-AFM run sheet recording")))
-            f.write(",".join(["time_s"] + names) + "\n")
-            np.savetxt(f, np.column_stack([t] + [data[n] for n in names]), delimiter=",")
-        MD.write_sidecar(stem + ".json", meta, {"kind": "ncafm_runsheet_recording", "columns": ["time_s"] + names,
-                                                "events_s": out.events, "marks_s": out.marks})
-        return stem + ".csv"
+        rows = [("Index", f"#{out.index + 1} of {len(self.sheet)}", ""), ("Ramp", c.group, ""),
+                ("G", c.g, ""), ("rho", c.rho, ""), ("Kp written", out.kp, ""), ("Ki written", out.ki, ""),
+                ("Settings", c.label(), ""), ("Result", STATUS_TEXT.get(out.status, out.status), "")]
+        if out.note:
+            rows.append(("Notes", out.note, ""))
+        a = self.runner.cfg.anchor if self.runner is not None else self.anchor()
+        rows += [("Anchor Kp0 / Ki0", f"{_gain(a.kp)} / {_gain(a.ki)}", "")]
+        title = f"#{out.index + 1}  {c.label()}  (Kp {_gain(out.kp)}, Ki {_gain(out.ki)}): "                 f"{STATUS_TEXT.get(out.status, out.status)}"
+        return CX.save_condition(self._raw_dir, out, self.loop, _copy_meta(out.meta), rows,
+                                 offline=self.driver is None, title=title)
 
     # ================================================================== results
     def _df_pixel(self, out: Outcome) -> float:
@@ -1116,12 +1130,15 @@ class RunSheetTab(QtWidgets.QWidget):
             "kind": "ncafm_runsheet_results", "sheet": R.sheet_to_dict(a, self.sheet, {"train": self._train_dict()}),
             "results": detail})
 
+    def _results_name(self) -> str:
+        meta = next((o.meta for o in self.outcomes.values() if o.meta is not None), None) or MD.Metadata.unavailable("none")
+        return meta.filename("runsheet", f"{self.loop.upper()}-{len(self.outcomes)}conditions",
+                             loops=(self.loop, "pll" if self.loop == "afl" else "afl")) + ".csv"
+
     def _export_results(self):
         if not self.outcomes:
             return
-        meta = next((o.meta for o in self.outcomes.values() if o.meta is not None), None) or MD.Metadata.unavailable("none")
-        name = meta.filename("runsheet", f"{self.loop.upper()}-{len(self.outcomes)}conditions",
-                             loops=(self.loop, "pll" if self.loop == "afl" else "afl")) + ".csv"
+        name = self._results_name()
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export results", os.path.join(self._last_dir, name),
                                                         "CSV (*.csv)")
         if not path:
