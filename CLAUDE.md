@@ -113,4 +113,5 @@ Goal: tune the PLL or the amplitude loop the way it is done by hand - set parame
 - Long-running `QTextEdit` logs should go through `common.append_log_line()` (bounded to `LOG_MAX_BLOCKS`), not `.append()`.
 - **Known bug:** `ZConstAcquisition.toggle_feedback` calls `self.dde.get_channel(0)`, but the DDE clients only define `read_channel()`. The `AttributeError` is swallowed by its `try/except`, so `ch0_base` stays `0.0` and absolute-Z writes use the wrong base. Fix by calling `read_channel(0)`.
 - Values sent are in **SXM's current GUI units**; the app does no unit conversion for DDE parameters.
-- `__pycache__/*.pyc` files are tracked in git despite `.gitignore`, so they show up as modified/deleted after any run. Don't stage them.
+- `__pycache__/` and `*.pyc` are ignored and no longer tracked (older history still contains some). Never `git add -f` them.
+- `AnfatecSXMBridge.py` / `AnfatecSXMWriter.py` often show as modified with an empty `git diff --ignore-cr-at-eol`: the sync copies the masters with LF line endings. Leave them unstaged.
