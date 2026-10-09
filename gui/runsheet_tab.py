@@ -437,7 +437,7 @@ class RunSheetTab(QtWidgets.QWidget):
             return None
         if self._writer is None:
             try:
-                from sxm_ncafm_control.AnfatecSXMWriter import AnfatecSXMWriter
+                from sxm_anfatec.writer import AnfatecSXMWriter
                 self._writer = AnfatecSXMWriter()
             except Exception as e:
                 self._log(f"Automatic settings unavailable ({e}): the run will ask you instead.")

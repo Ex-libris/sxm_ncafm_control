@@ -1,6 +1,6 @@
 # sxm_ncafm_control/connection.py
-from .dde_client import RealDDEClient, MockDDEClient
-from .device_driver import SXMIOCTL
+from sxm_anfatec.dde import RealDDEClient, MockDDEClient
+from sxm_anfatec.driver import SXMIOCTL
 from .sxm_state import make_reader
 from . import common
 class SXMConnection:

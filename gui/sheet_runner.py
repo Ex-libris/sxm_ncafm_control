@@ -32,7 +32,7 @@ import numpy as np
 from PyQt5 import QtCore
 
 from sxm_ncafm_control import metadata as MD
-from sxm_ncafm_control.device_driver import CHANNELS
+from sxm_anfatec.driver import CHANNELS
 from sxm_ncafm_control.tuning import explore as X
 from sxm_ncafm_control.tuning import noise as N
 from sxm_ncafm_control.tuning import runsheet as R

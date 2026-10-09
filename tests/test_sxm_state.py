@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt5 import QtWidgets                                              # noqa: E402
 
-from sxm_ncafm_control.AnfatecSXMBridge import AnfatecSXMBridge         # noqa: E402
+from sxm_anfatec.bridge import AnfatecSXMBridge                    # noqa: E402
 from sxm_ncafm_control.sxm_state import SXMReader, parse_gain_v, parse_time_s   # noqa: E402
 
 app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])

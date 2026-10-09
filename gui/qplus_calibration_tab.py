@@ -162,7 +162,7 @@ class QplusCalibrationTab(QtWidgets.QWidget):
 
         if self.driver:
             try:
-                from sxm_ncafm_control.device_driver import CHANNELS
+                from sxm_anfatec.driver import CHANNELS
                 idx, _short, _unit, scale = CHANNELS["Topo"]
                 raw = self.driver.read_raw(idx)
                 return float(raw) * float(scale)

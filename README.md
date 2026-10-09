@@ -25,9 +25,13 @@ conda activate sxm-ncafm
 
 **IMPORTANT**: Using a dedicated environment with a proper package manager prevents conflicts with other Python software on your system. This is strongly recommended.
 
-**Get the code first:**
-- **Download ZIP (no git required)**: Go to https://github.com/Ex-libris/sxm_ncafm_control, click "Code" → "Download ZIP", extract to a folder
-- **Using git**: `git clone https://github.com/Ex-libris/sxm_ncafm_control.git`
+**Get the code first.** You need two folders side by side in the same parent folder: this
+program and [sxm_anfatec](https://github.com/Ex-libris/sxm_anfatec), which holds all the code that talks
+to SXM (DDE, driver, GUI read-back):
+```
+<parent folder>  sxm_ncafm_control  sxm_anfatec```
+- **Download ZIP (no git required)**: on https://github.com/Ex-libris/sxm_ncafm_control and on https://github.com/Ex-libris/sxm_anfatec, click "Code" → "Download ZIP"; extract both into the same folder and remove the `-main` suffix from the folder names
+- **Using git**: `git clone https://github.com/Ex-libris/sxm_ncafm_control.git` and `git clone https://github.com/Ex-libris/sxm_anfatec.git` in the same folder
 
 **Then install dependencies** (choose one method):
 
@@ -130,14 +134,13 @@ If the GUI fails to connect to SXM:
 3. Restart both SXM and the GUI
 
 ## Project Structure
+SXM communication (DDE, driver, GUI read-back and writer) is in the separate
+[sxm_anfatec](https://github.com/Ex-libris/sxm_anfatec) folder next to this one.
 ```
 sxm_ncafm_control/
 ├── app.py                                  # Main entry point
-├── dde_client.py                           # SXM communication
-├── device_driver.py                        # Low-level driver interface
 ├── common.py                               # Shared functions between the tabs
 ├── connection.py                           # Creation of the DDE and IOCTL connections
-├── SXMRemote.py                            # DDE server creator and management of commands towards SXM
 └── gui/                                    # GUI components
     ├── params_tab.py                       # Parameter adjustment
     ├── step_test_tab.py                    # Square wave testing

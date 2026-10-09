@@ -168,7 +168,7 @@ class ScopeExport(unittest.TestCase):
     def test_step_test_settings_and_name(self):
         from sxm_ncafm_control.gui.scope_tab import ScopeTab
         from sxm_ncafm_control.gui.step_test_tab import StepTestTab
-        from sxm_ncafm_control.dde_client import MockDDEClient
+        from sxm_anfatec.dde import MockDDEClient
         step = StepTestTab(MockDDEClient())
         step.param.setCurrentIndex(step.param.findText("Amplitude Ref"))
         step.low.setValue(0.5225); step.high.setValue(0.5775); step.period.setValue(0.5); step.steps.setValue(4)

@@ -2,7 +2,7 @@ import time
 from collections import deque
 from PyQt5 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
-from sxm_ncafm_control.device_driver import CHANNELS
+from sxm_anfatec.driver import CHANNELS
 from sxm_ncafm_control.gui.gui_accessibility_manager import AccessibilityManager
 
 

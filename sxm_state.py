@@ -1,7 +1,7 @@
 """
 Read-back of SXM parameters from the running SXM GUI.
 
-DDE is effectively write-only (see dde_client.py), so this module reads what SXM *shows* instead,
+DDE is effectively write-only (see sxm_anfatec.dde), so this module reads what SXM *shows* instead,
 through the passive AnfatecSXMBridge (Win32 query messages only: no clicks, no writes, no DDE,
 no driver access). One ``SXMReader.read()`` reads every section once and returns an ``SXMReadout``
 keyed like the app's parameter registry (``common.PARAMS_BASE``), plus a few extras the tabs use.
@@ -120,7 +120,7 @@ class SXMReader:
 
     def __init__(self, bridge=None):
         if bridge is None:
-            from .AnfatecSXMBridge import AnfatecSXMBridge
+            from sxm_anfatec.bridge import AnfatecSXMBridge
             bridge = AnfatecSXMBridge(strict=False)
         self.bridge = bridge
 
