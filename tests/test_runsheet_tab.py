@@ -13,7 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt5 import QtWidgets                                             # noqa: E402
 
-from sxm_ncafm_control.dde_client import MockDDEClient                  # noqa: E402
+from sxm_anfatec.dde import MockDDEClient                  # noqa: E402
 from sxm_ncafm_control.gui import runsheet_tab as T                     # noqa: E402
 from sxm_ncafm_control.tests.fake_instrument import FakeAFLInstrument   # noqa: E402
 

@@ -14,7 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt5 import QtCore, QtWidgets                                    # noqa: E402
 
-from sxm_ncafm_control.device_driver import CHANNELS                   # noqa: E402
+from sxm_anfatec.driver import CHANNELS                   # noqa: E402
 from sxm_ncafm_control.gui.sheet_runner import RunConfig, SheetRunner  # noqa: E402
 from sxm_ncafm_control.tests.fake_instrument import FakeAFLInstrument, FakeInstrument   # noqa: E402
 from sxm_ncafm_control.tuning import explore as X                      # noqa: E402

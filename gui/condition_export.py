@@ -18,7 +18,7 @@ import pyqtgraph as pg
 from PyQt5 import QtCore
 
 from .. import metadata as MD
-from ..device_driver import CHANNELS
+from sxm_anfatec.driver import CHANNELS
 from .export_image import save_scene_png
 
 # the stepped parameter per loop: label, code and file-name tag as the Step Test tab writes them

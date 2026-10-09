@@ -17,7 +17,7 @@ import numpy as np
 from PyQt5 import QtWidgets, QtCore
 import pyqtgraph as pg
 from sxm_ncafm_control import metadata as MD
-from sxm_ncafm_control.device_driver import CHANNELS
+from sxm_anfatec.driver import CHANNELS
 from .export_image import save_scene_png
 
 

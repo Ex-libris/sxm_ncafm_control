@@ -10,7 +10,7 @@ import time
 
 import numpy as np
 
-from sxm_ncafm_control.device_driver import CHANNELS
+from sxm_anfatec.driver import CHANNELS
 from sxm_ncafm_control.tests.sim import PLLSetup, SXMScale
 
 

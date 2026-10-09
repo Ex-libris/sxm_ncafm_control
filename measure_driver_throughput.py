@@ -3,9 +3,9 @@ measure_driver_throughput.py
 
 Standalone, READ-ONLY diagnostic that measures the actual achievable
 throughput of:
-  1. The IOCTL driver (device_driver.SXMIOCTL.read_raw) - what ScopeTab's
+  1. The IOCTL driver (sxm_anfatec.driver.SXMIOCTL.read_raw) - what ScopeTab's
      CaptureThread uses.
-  2. The DDE channel-read path (dde_client.RealDDEClient.read_channel) -
+  2. The DDE channel-read path (sxm_anfatec.dde.RealDDEClient.read_channel) -
      what the Parameters/Suggested/QPlus-Calibration tabs use for reads.
 
 Run this ON THE PC WITH THE HARDWARE ATTACHED. It never writes/sets any
@@ -14,9 +14,9 @@ run at any time without affecting a running experiment.
 
 Setup:
   1. This file lives in the sxm_ncafm_control project folder, next to
-     app.py, device_driver.py, dde_client.py (NOT inside the gui/ folder).
-     Copy the whole project (or at least this file plus device_driver.py,
-     dde_client.py, common.py, SXMRemote.py) onto the hardware PC.
+     app.py (NOT inside the gui/ folder). The driver and DDE code come from
+     the sxm_anfatec folder next to sxm_ncafm_control: copy both onto the
+     hardware PC.
   2. From that folder, run:
         python measure_driver_throughput.py
   3. Paste the console output back for interpretation, or read the
@@ -25,11 +25,14 @@ Setup:
 Expected runtime: well under a minute, unless the driver is unusually slow.
 """
 
+import os
+import sys
 import time
 import statistics
 
-import device_driver
-import dde_client
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # the folder holding sxm_anfatec
+from sxm_anfatec import dde as dde_client          # noqa: E402
+from sxm_anfatec import driver as device_driver    # noqa: E402
 
 
 # ---------------------------------------------------------------------------

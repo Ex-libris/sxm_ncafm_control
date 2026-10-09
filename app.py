@@ -10,9 +10,19 @@ This module is intentionally thin. It:
 5) Starts the Qt event loop
 """
 
-import os
 import sys
 from PyQt5 import QtWidgets
+
+try:
+    import sxm_anfatec
+except ImportError as exc:
+    raise SystemExit("sxm_anfatec not found. Put the sxm_anfatec folder "
+                     "(https://github.com/Ex-libris/sxm_anfatec) next to sxm_ncafm_control "
+                     "and run 'python -m sxm_ncafm_control.app' from that parent folder.") from exc
+
+# Oldest sxm_anfatec this app works with (its version is the commit date). Raise it when the
+# app starts relying on a change made there; an older copy then stops here with a clear message.
+SXM_ANFATEC_MIN = "2026.10.09"
 
 from sxm_ncafm_control.connection import SXMConnection
 from sxm_ncafm_control.gui import hidpi
@@ -89,11 +99,8 @@ def main() -> int:
     hidpi.install_pen_scaling()
     print(f"[DISPLAY] {hidpi.describe_display()}")
 
-    # Ensure the package directory is in sys.path so local modules (e.g., SXMRemote.py)
-    # can be found when the connection layer tries to import them.
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    if current_dir not in sys.path:
-        sys.path.insert(0, current_dir)
+    sxm_anfatec.require(SXM_ANFATEC_MIN)
+    print(f"[SXM] sxm_anfatec {sxm_anfatec.__version__} ({sxm_anfatec.__path__[0]})")
 
     # Build a single, centralized connection manager.
     # SXMConnection is responsible for:
