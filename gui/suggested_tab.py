@@ -1,5 +1,6 @@
 import datetime
 import math
+import threading
 import numpy as np
 from scipy.optimize import curve_fit
 from PyQt5 import QtWidgets, QtCore, QtGui
@@ -8,6 +9,11 @@ import pyqtgraph as pg
 from ..common import PARAMS_BASE, confirm_high_voltage, format_number
 from ..tuning.workflow import AFL_OUTPUT_GAINS, afl_start_values
 from .sci_spinbox import SciDoubleSpinBox
+
+
+# The SXM windows this tab reads. Reading all of them takes one query per control, each of which can wait
+# 250 ms when SXM is busy.
+SXM_SECTIONS = ("Dynamic Non-Contact R / Phi", "Amplitude feedback")
 
 
 def lorentzian_amp(f, A0, f0, Q):
@@ -54,6 +60,8 @@ class SuggestedTab(QtWidgets.QWidget):
     Can stage or send values to the SXM system or parameters tab.
     Displays fit results and plots for loaded spectra.
     """
+
+    _sxm_read_done = QtCore.pyqtSignal(object)    # the readout (or None), from the reading thread
 
     def __init__(self, dde_client, params_tab, reader=None):
         """
@@ -254,7 +262,10 @@ class SuggestedTab(QtWidgets.QWidget):
 
         # Wiring
         self.btn_recalc.clicked.connect(self._recalc)
-        self.btn_read_sxm.clicked.connect(lambda: self.read_from_sxm())
+        self.btn_read_sxm.clicked.connect(lambda: self.read_from_sxm_async(quiet=False))
+        self._read_thread = None                  # the SXM read in progress, if any
+        self._read_quiet = True
+        self._sxm_read_done.connect(self._on_sxm_read)
         for w in (self.q_val, self.f0_val, self.bw_pll):
             w.valueChanged.connect(self._recalc)
         self._bw_manual = False                   # True once the PLL bandwidth was typed: SXM no longer sets it
@@ -274,12 +285,17 @@ class SuggestedTab(QtWidgets.QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         if self.reader is not None:               # by hand too: it refreshes the 'SXM now' column
-            self.read_from_sxm(quiet=True)
+            self.read_from_sxm_async()
 
     def _on_source_changed(self, from_sxm: bool):
         if from_sxm:
             self._bw_manual = False
-        self.read_from_sxm(quiet=True)            # by hand too: the 'SXM now' column is still read
+        else:
+            self._set_sxm_status(None)            # typing is possible at once, not when the read returns
+        if self.reader is None:
+            self._apply_readout(None, quiet=True)
+        else:
+            self.read_from_sxm_async()            # by hand too: the 'SXM now' column is still read
 
     def _on_bw_edited(self, _value):
         self._bw_manual = True
@@ -397,14 +413,46 @@ class SuggestedTab(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "DDE error", f"Failed to send: {e}"); return
         QtWidgets.QMessageBox.information(self, "Sent", "Amplitude Ki (Edit24) and Kp (Edit32) sent.")
 
+    def _read_sxm(self):
+        if self.reader is None:
+            return None
+        try:
+            return self.reader.read(sections=SXM_SECTIONS)
+        except Exception:
+            return None
+
     def read_from_sxm(self, quiet: bool = False) -> bool:
-        """Q and f0 from the DNC status bar (last sweep) and the AFL output gain, as SXM shows them."""
-        readout = None
-        if self.reader is not None:
+        """Q and f0 from the DNC status bar (last sweep) and the AFL output gain, as SXM shows them.
+
+        Reads on the calling thread; the tab itself uses ``read_from_sxm_async``.
+        """
+        return self._apply_readout(self._read_sxm(), quiet)
+
+    def read_from_sxm_async(self, quiet: bool = True):
+        """The same read on a worker thread: a busy SXM answers slowly and must not freeze the window."""
+        self._read_quiet = self._read_quiet and quiet
+        if self._read_thread is not None:         # one read at a time; its result is applied as things are then
+            return
+        self._read_quiet = quiet
+        self.btn_read_sxm.setEnabled(False)
+        self.sxm_status.setText("Reading SXM ...")
+
+        def work():
+            readout = self._read_sxm()
             try:
-                readout = self.reader.read()
-            except Exception:
-                readout = None
+                self._sxm_read_done.emit(readout)
+            except RuntimeError:                  # the tab was closed meanwhile
+                pass
+
+        self._read_thread = threading.Thread(target=work, name="suggested-sxm-read", daemon=True)
+        self._read_thread.start()
+
+    def _on_sxm_read(self, readout):
+        self._read_thread = None
+        self.btn_read_sxm.setEnabled(True)
+        self._apply_readout(readout, self._read_quiet)
+
+    def _apply_readout(self, readout, quiet: bool) -> bool:
         self._show_sxm_now(readout)
         q = readout.get("q") if readout else None
         f0 = readout.get("f_peak") if readout else None

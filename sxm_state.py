@@ -124,8 +124,18 @@ class SXMReader:
             bridge = AnfatecSXMBridge(strict=False)
         self.bridge = bridge
 
-    def read(self) -> SXMReadout:
-        raw = self.bridge.snapshot()["parameters"]      # strict=False: failing sections carry '_error'
+    def read(self, sections=None) -> SXMReadout:
+        """Read SXM. ``sections``: bridge section names to read instead of all of them (much quicker: every
+        control is one query to SXM); values from the other sections are then None, 'section not read'."""
+        if sections is None:
+            raw = self.bridge.snapshot()["parameters"]  # strict=False: failing sections carry '_error'
+        else:
+            raw = {}
+            for name in sections:
+                try:
+                    raw[name] = dict(self.bridge.section(name))
+                except Exception as exc:
+                    raw[name] = {"_error": str(exc)}
         values: Dict[str, Any] = {}
         errors: Dict[str, str] = {}
 
@@ -140,7 +150,9 @@ class SXMReader:
             values[key] = v
 
         def section(name):
-            data = raw.get(name, {})
+            if name not in raw:
+                raise RuntimeError(f"{name}: section not read")
+            data = raw[name]
             if "_error" in data:
                 raise RuntimeError(data["_error"])
             return data
