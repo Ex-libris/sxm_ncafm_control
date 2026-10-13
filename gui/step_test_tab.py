@@ -96,7 +96,8 @@ class StepTestTab(QtWidgets.QWidget):
 
         self.btn_preview.clicked.connect(self.preview)
         self.btn_start.clicked.connect(self.start)
-        self.btn_stop.clicked.connect(self.stop)
+        # clicked passes checked=False, which must not land in restore
+        self.btn_stop.clicked.connect(lambda _checked=False: self.stop())
 
         grid.addWidget(self.btn_preview, 0, c); c += 1
         grid.addWidget(self.btn_start, 0, c); c += 1

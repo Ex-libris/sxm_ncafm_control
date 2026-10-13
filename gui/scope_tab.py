@@ -174,7 +174,8 @@ class ScopeTab(QtWidgets.QWidget):
         hbox.addWidget(self.npoints_spin)
 
         self.start_btn = QtWidgets.QPushButton("Start Capture")
-        self.start_btn.clicked.connect(self.start_capture)
+        # clicked passes checked=False, which must not land in npoints_override
+        self.start_btn.clicked.connect(lambda _checked=False: self.start_capture())
         hbox.addWidget(self.start_btn)
 
         self.stop_btn = QtWidgets.QPushButton("Stop")
