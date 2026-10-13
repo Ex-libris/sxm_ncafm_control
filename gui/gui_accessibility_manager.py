@@ -32,6 +32,8 @@ import os
 from PyQt5 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 
+from . import hidpi
+
 
 class AccessibilityManager(QtCore.QObject):
     """
@@ -74,6 +76,7 @@ class AccessibilityManager(QtCore.QObject):
     # nothing needs to be bundled; each falls back gracefully if genuinely absent.
     HEADER_FONT_STACK = '"Bahnschrift", "Segoe UI Semibold", "Segoe UI", sans-serif'
     MONO_FONT_STACK = '"Cascadia Mono", "Cascadia Code", "Consolas", "Courier New", monospace'
+    MIN_BASE_POINT = 9.0          # the Windows interface font size; see _base_point_size
 
     def __init__(self):
         super().__init__()
@@ -87,6 +90,7 @@ class AccessibilityManager(QtCore.QObject):
         # who prefers that.
         self.settings = {
             "font_scale": 1.0,
+            "font_scale_auto": True,     # font_scale follows the screen (hidpi.suggested_font_scale) until one is chosen
             "font_family": "default",
             "high_contrast": False,
             "dark_mode": True,
@@ -120,8 +124,12 @@ class AccessibilityManager(QtCore.QObject):
                 with open(self.settings_file, "r") as f:
                     saved = json.load(f)
                     self.settings.update(saved)
+                    if "font_scale_auto" not in saved:      # a file from before: 'Normal' was the default, not a choice
+                        self.settings["font_scale_auto"] = abs(float(saved.get("font_scale", 1.0)) - 1.0) < 0.01
         except Exception as e:
             print(f"Could not load accessibility settings: {e}")
+        if self.settings.get("font_scale_auto"):
+            self.settings["font_scale"] = hidpi.suggested_font_scale(tuple(self.scale_options.values()))
 
     def save_settings(self):
         """
@@ -150,6 +158,7 @@ class AccessibilityManager(QtCore.QObject):
         """
         if scale_name in self.scale_options:
             self.settings["font_scale"] = self.scale_options[scale_name]
+            self.settings["font_scale_auto"] = False     # chosen: no longer follows the screen
             self.save_settings()
             self.settings_changed.emit(self.settings)
             return True
@@ -207,15 +216,17 @@ class AccessibilityManager(QtCore.QObject):
         """
         The application font's size in points. ``pointSize()`` is -1 when the font is defined in pixels
         (common on scaled Windows displays); the old ``pointSize() or 10`` then produced a 6 pt interface.
+        Never below ``MIN_BASE_POINT``: on a display scaled 125 % / 150 % Qt reports the Windows 9 pt font
+        as about 7.8 pt, which made 'Normal' smaller than every other program on the screen.
         """
         app = QtWidgets.QApplication.instance()
         font = app.font() if app is not None else QtGui.QFont()
         if font.pointSizeF() > 0:
-            return font.pointSizeF()
+            return max(AccessibilityManager.MIN_BASE_POINT, font.pointSizeF())
         if font.pixelSize() > 0:
             screen = QtGui.QGuiApplication.primaryScreen()
             dpi = screen.logicalDotsPerInchY() if screen is not None else 96.0
-            return font.pixelSize() * 72.0 / (dpi or 96.0)
+            return max(AccessibilityManager.MIN_BASE_POINT, font.pixelSize() * 72.0 / (dpi or 96.0))
         return 10.0
 
     def get_scaled_size(self, base_size: int) -> int:
@@ -296,10 +307,7 @@ class AccessibilityManager(QtCore.QObject):
         plot_widget : pg.PlotWidget
             Target plot widget.
         """
-        tick_font = QtGui.QFont()
-        tick_font.setPointSize(self.get_scaled_size(9))
-        plot_widget.getAxis("bottom").setTickFont(tick_font)
-        plot_widget.getAxis("left").setTickFont(tick_font)
+        self._apply_axis_fonts(plot_widget.getPlotItem())
 
         grid_alpha = (
             0.5 if self.settings.get("high_contrast") else self.settings["grid_alpha"]
@@ -320,6 +328,19 @@ class AccessibilityManager(QtCore.QObject):
             plot_widget.getAxis("bottom").setPen(pg.mkPen("k"))
             plot_widget.showGrid(x=True, y=True, alpha=grid_alpha)
 
+    def _apply_axis_fonts(self, plot_item: pg.PlotItem):
+        """Tick values and axis labels at the interface font size (the labels used to stay at pyqtgraph's default)."""
+        font = self.get_scaled_font()
+        size = f"{font.pointSizeF():.1f}pt"
+        for name in ("bottom", "left"):
+            axis = plot_item.getAxis(name)
+            axis.setTickFont(font)
+            style = dict(axis.labelStyle)
+            if style.get("font-size") != size:
+                style["font-size"] = size
+                axis.labelStyle = style              # kept by later setLabel(text) calls
+                axis._updateLabel()
+
     def apply_to_plotitem(self, plot_item: pg.PlotItem):
         """
         Apply accessibility settings to a pyqtgraph PlotItem.
@@ -329,10 +350,7 @@ class AccessibilityManager(QtCore.QObject):
         plot_item : pg.PlotItem
             Target plot item.
         """
-        tick_font = QtGui.QFont()
-        tick_font.setPointSize(self.get_scaled_size(9))
-        plot_item.getAxis("bottom").setTickFont(tick_font)
-        plot_item.getAxis("left").setTickFont(tick_font)
+        self._apply_axis_fonts(plot_item)
 
         grid_alpha = (
             0.5 if self.settings.get("high_contrast") else self.settings["grid_alpha"]

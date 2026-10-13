@@ -197,6 +197,72 @@ class Tabs(unittest.TestCase):
         self.assertTrue(sg.read_from_sxm(quiet=True))
         self.assertEqual((sg.q_val.value(), sg.f0_val.value(), sg.out_gain.currentData()), (148699.0, 25562.0, 0.1))
 
+    def test_suggested_takes_its_inputs_from_sxm_or_by_hand(self):
+        from sxm_ncafm_control.gui.suggested_tab import SuggestedTab
+        from sxm_ncafm_control.tests.fake_instrument import FakeInstrument
+        rd, _ = reader()
+        sg = SuggestedTab(FakeInstrument(), None, reader=rd)
+        self.assertTrue(sg.chk_from_sxm.isChecked())                      # the default when SXM can be read
+        sg.show()                                                         # opening the tab reads SXM
+        self.assertEqual((sg.q_val.value(), sg.f0_val.value(), sg.out_gain.currentData()), (148699.0, 25562.0, 0.1))
+        self.assertFalse(sg.q_val.isEnabled() or sg.f0_val.isEnabled() or sg.out_gain.isEnabled())
+        self.assertTrue(sg.bw_pll.isEnabled())                            # a target: always editable
+        self.assertEqual(sg.bw_pll.value(), 100.0)                        # 1 / (10 * TimeConstant), TimeConstant 1 ms
+        self.assertIn("From SXM", sg.sxm_status.text())
+        # what SXM is set to now, next to the suggestions (Tau 2 ms, TimeConstant 1 ms, ring-down 1851.628 ms)
+        self.assertEqual({k: w.text() for k, w in sg.sxm_now.items()},
+                         {"ki": "5e4", "kp": "5e8", "tau": "2", "tpll": "1", "ring": "1851.63"})
+        self.assertAlmostEqual(float(sg.ki_out.text()), 5e8 / 148699.0 * 10, delta=1.0)   # recalculated: +-0.1 V range
+
+        sg.chk_from_sxm.setChecked(False)                                 # by hand
+        self.assertTrue(sg.q_val.isEnabled() and sg.f0_val.isEnabled() and sg.out_gain.isEnabled())
+        sg.q_val.setValue(1000.0)
+        for w in sg.sxm_now.values():
+            w.clear()
+        sg.hide(); sg.show()                                              # reopening does not read over it
+        self.assertEqual(sg.q_val.value(), 1000.0)
+        self.assertIn("typed by hand", sg.sxm_status.text())
+        self.assertEqual(sg.sxm_now["tau"].text(), "2")                   # but 'SXM now' is refreshed
+
+        sg.chk_from_sxm.setChecked(True)                                  # back to SXM: read at once
+        self.assertEqual(sg.q_val.value(), 148699.0)
+
+        sg.bw_pll.setValue(30.0)                                          # a typed target is not read over
+        sg.hide(); sg.show()
+        self.assertEqual(sg.bw_pll.value(), 30.0)
+        self.assertEqual(sg.tpll_out.text(), f"{1000.0 / 300.0:.6g}")
+        self.assertNotIn("PLL bandwidth", sg.sxm_status.text())
+        sg.close()
+
+    def test_suggested_keeps_what_sxm_does_not_give_editable(self):
+        from sxm_ncafm_control.gui.suggested_tab import SuggestedTab
+        from sxm_ncafm_control.tests.fake_instrument import FakeInstrument
+        gui = copy.deepcopy(GUI)
+        gui["dynamic_non_contact"]["Status"] = ""                         # no sweep done: no Q, no fPeak
+        rd, _ = reader(gui)
+        sg = SuggestedTab(FakeInstrument(), None, reader=rd)
+        self.assertFalse(sg.read_from_sxm(quiet=True))
+        self.assertEqual(sg.out_gain.currentData(), 0.1)                  # the output gain is still taken
+        self.assertFalse(sg.out_gain.isEnabled())
+        self.assertTrue(sg.q_val.isEnabled() and sg.f0_val.isEnabled())
+        self.assertIn("Not read (type by hand): Q, f", sg.sxm_status.text())
+
+        none = SuggestedTab(FakeInstrument(), None)                       # no read-back in this session
+        self.assertFalse(none.chk_from_sxm.isChecked() or none.chk_from_sxm.isEnabled())
+        self.assertTrue(none.q_val.isEnabled())
+
+    def test_suggested_spectrum_values_switch_to_by_hand(self):
+        from sxm_ncafm_control.gui.suggested_tab import SuggestedTab
+        from sxm_ncafm_control.tests.fake_instrument import FakeInstrument
+        rd, _ = reader()
+        sg = SuggestedTab(FakeInstrument(), None, reader=rd)
+        sg.read_from_sxm(quiet=True)
+        sg._last_fit = (5000.0, 30000.0, 0.0)
+        sg._apply_from_spectrum()
+        self.assertFalse(sg.chk_from_sxm.isChecked())
+        self.assertEqual((sg.q_val.value(), sg.f0_val.value()), (5000.0, 30000.0))
+        self.assertTrue(sg.q_val.isEnabled())
+
 
 if __name__ == "__main__":
     unittest.main()

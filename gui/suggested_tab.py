@@ -84,6 +84,24 @@ class SuggestedTab(QtWidgets.QWidget):
         # ---------------- Left column ----------------
         left = QtWidgets.QVBoxLayout()
 
+        # Where the inputs come from: SXM (read whenever the tab is shown) or typed by hand
+        self.chk_from_sxm = QtWidgets.QCheckBox("Take the inputs from SXM")
+        self.chk_from_sxm.setChecked(reader is not None)
+        self.chk_from_sxm.setEnabled(reader is not None)
+        self.chk_from_sxm.setToolTip(
+            "On: Q and fPeak come from the DNC window's status bar (the last sweep), the output gain from the\n"
+            "DNC window, and the PLL bandwidth from the DNC TimeConstant now set (1 / (10 * TimeConstant)),\n"
+            "read each time this tab is opened and with 'Read from SXM'.\n"
+            "Off: type them. A value SXM does not give stays editable either way.\n"
+            "The PLL bandwidth is a target: it stays editable, and once typed it is no longer read over.\n"
+            "The 'SXM now' column is read in both cases."
+        )
+        self.sxm_status = QtWidgets.QLabel("")
+        self.sxm_status.setWordWrap(True)
+        self.sxm_status.setStyleSheet("QLabel { color: #555; }")
+        left.addWidget(self.chk_from_sxm)
+        left.addWidget(self.sxm_status)
+
         # Input form
         form = QtWidgets.QGridLayout()
         r = 0
@@ -126,7 +144,7 @@ class SuggestedTab(QtWidgets.QWidget):
         # Outputs
         sep = QtWidgets.QFrame()
         sep.setFrameShape(QtWidgets.QFrame.HLine)
-        form.addWidget(sep, r, 0, 1, 2)
+        form.addWidget(sep, r, 0, 1, 3)
         r += 1
 
         self.ki_out = QtWidgets.QLineEdit(); self.ki_out.setReadOnly(True)
@@ -145,18 +163,33 @@ class SuggestedTab(QtWidgets.QWidget):
         self.tau_ring_out.setToolTip("Amplitude ring-down time of the resonator, Q / (pi * f0).\n"
                                      "The amplitude loop cannot usefully be faster than this.")
 
-        form.addWidget(QtWidgets.QLabel("Suggested Amplitude Ki:"), r, 0)
-        form.addWidget(self.ki_out, r, 1); r += 1
-        form.addWidget(QtWidgets.QLabel("Suggested Amplitude Kp:"), r, 0)
-        form.addWidget(self.kp_out, r, 1); r += 1
-        form.addWidget(QtWidgets.QLabel("Suggested Amplitude tau (ms):"), r, 0)
-        form.addWidget(self.tau_amp, r, 1); r += 1
-        form.addWidget(QtWidgets.QLabel("PLL TimeConstant (ms):"), r, 0)
-        form.addWidget(self.tpll_out, r, 1); r += 1
-        form.addWidget(QtWidgets.QLabel("Resonator bandwidth f₀/Q (Hz):"), r, 0)
-        form.addWidget(self.bw_res_out, r, 1); r += 1
-        form.addWidget(QtWidgets.QLabel("Amplitude ring-down Q/(π·f₀) (ms):"), r, 0)
-        form.addWidget(self.tau_ring_out, r, 1); r += 1
+        # What SXM is set to now, next to each suggestion: (read-back key, factor to the row's unit)
+        self.sxm_now = {}
+        now_keys = {"ki": ("amp_ki", 1.0), "kp": ("amp_kp", 1.0), "tau": ("amp_tau_s", 1e3),
+                    "tpll": ("dnc_time_constant_s", 1e3), "ring": ("ring_down_s", 1e3)}
+        self._now_keys = now_keys
+        form.addWidget(QtWidgets.QLabel("Suggested"), r, 1)
+        form.addWidget(QtWidgets.QLabel("SXM now"), r, 2)
+        r += 1
+
+        def out_row(text, widget, now=None):
+            nonlocal r
+            form.addWidget(QtWidgets.QLabel(text), r, 0)
+            form.addWidget(widget, r, 1)
+            if now:
+                box = QtWidgets.QLineEdit(); box.setReadOnly(True)
+                box.setToolTip("As SXM shows it now (read with the inputs).")
+                self.sxm_now[now] = box
+                form.addWidget(box, r, 2)
+            r += 1
+
+        out_row("Amplitude Ki:", self.ki_out, "ki")
+        out_row("Amplitude Kp:", self.kp_out, "kp")
+        out_row("Amplitude Tau (ms):", self.tau_amp, "tau")
+        out_row("PLL TimeConstant (ms):", self.tpll_out, "tpll")
+        out_row("Resonator bandwidth f₀/Q (Hz):", self.bw_res_out)
+        out_row("Amplitude ring-down Q/(π·f₀) (ms):", self.tau_ring_out, "ring")
+        self.sxm_now["ring"].setToolTip("The ring-down time SXM measured in the last sweep (DNC status bar).")
 
         left.addLayout(form)
 
@@ -181,8 +214,8 @@ class SuggestedTab(QtWidgets.QWidget):
         # Buttons
         h = QtWidgets.QHBoxLayout()
         self.btn_recalc = QtWidgets.QPushButton("Recalculate")
-        self.btn_read_sxm = QtWidgets.QPushButton("Read Q / f₀ from SXM")
-        self.btn_read_sxm.setToolTip("Q and fPeak from the DNC window's status bar (the last sweep), and the output gain.")
+        self.btn_read_sxm = QtWidgets.QPushButton("Read from SXM")
+        self.btn_read_sxm.setToolTip("Q and fPeak from the DNC window's status bar (the last sweep), and the output gain, now.")
         self.btn_stage = QtWidgets.QPushButton("Load to Parameters Tab")
         self.btn_send = QtWidgets.QPushButton("Send Now")
         h.addWidget(self.btn_recalc); h.addWidget(self.btn_read_sxm); h.addStretch(1)
@@ -224,15 +257,59 @@ class SuggestedTab(QtWidgets.QWidget):
         self.btn_read_sxm.clicked.connect(lambda: self.read_from_sxm())
         for w in (self.q_val, self.f0_val, self.bw_pll):
             w.valueChanged.connect(self._recalc)
+        self._bw_manual = False                   # True once the PLL bandwidth was typed: SXM no longer sets it
+        self.bw_pll.valueChanged.connect(self._on_bw_edited)
         self.out_gain.currentIndexChanged.connect(self._recalc)
         self.btn_stage.clicked.connect(self._stage)
         self.btn_send.clicked.connect(self._send)
         self.btn_load_spec.clicked.connect(self._load_spectrum)
         self.btn_apply_spec.clicked.connect(self._apply_from_spectrum)
         self.chk_fit.stateChanged.connect(self._reload_fit_visibility)
+        self.chk_from_sxm.toggled.connect(self._on_source_changed)
 
         # Initial compute
         self._recalc()
+        self._set_sxm_status(None)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.reader is not None:               # by hand too: it refreshes the 'SXM now' column
+            self.read_from_sxm(quiet=True)
+
+    def _on_source_changed(self, from_sxm: bool):
+        if from_sxm:
+            self._bw_manual = False
+        self.read_from_sxm(quiet=True)            # by hand too: the 'SXM now' column is still read
+
+    def _on_bw_edited(self, _value):
+        self._bw_manual = True
+
+    def _show_sxm_now(self, readout):
+        for name, (key, factor) in self._now_keys.items():
+            v = readout.get(key) if readout is not None else None
+            self.sxm_now[name].setText("" if v is None else format_number(v * factor, 6, 1e4))
+
+    def _set_sxm_status(self, got):
+        """Lock the fields SXM supplied (``got``: field -> read or not; None: nothing read) and say where values come from."""
+        from_sxm = self.chk_from_sxm.isChecked() and got is not None
+        fields = {"Q": self.q_val, "f₀": self.f0_val, "output gain": self.out_gain}
+        for name, w in fields.items():
+            w.setEnabled(not (from_sxm and got.get(name)))
+        if not self.chk_from_sxm.isChecked():
+            self.sxm_status.setText("Inputs typed by hand." if self.reader is not None
+                                    else "No SXM read-back in this session: the inputs are typed by hand.")
+        elif got is None:
+            self.sxm_status.setText("Not read from SXM yet.")
+        else:
+            read = [n for n in got if got.get(n)]
+            missing = [n for n in got if not got.get(n)]
+            text = (f"From SXM at {datetime.datetime.now():%H:%M:%S}: {', '.join(read)}." if read
+                    else "Nothing could be read from SXM.")
+            if missing:
+                text += f" Not read (type by hand): {', '.join(missing)}."
+                if "Q" in missing or "f₀" in missing:
+                    text += " Q and f₀ need SXM running with a resonance sweep done."
+            self.sxm_status.setText(text)
 
     # ------------------------------------------------------------------
     def _recalc(self):
@@ -328,8 +405,27 @@ class SuggestedTab(QtWidgets.QWidget):
                 readout = self.reader.read()
             except Exception:
                 readout = None
+        self._show_sxm_now(readout)
         q = readout.get("q") if readout else None
         f0 = readout.get("f_peak") if readout else None
+        if not self.chk_from_sxm.isChecked() and quiet:
+            self._set_sxm_status(None)            # by hand: only the 'SXM now' column is refreshed
+            return q is not None and f0 is not None
+        idx = self.out_gain.findData(readout.get("afl_output_gain")) if readout else -1
+        if idx >= 0:                              # each value on its own: the output gain does not need a sweep
+            self.out_gain.setCurrentIndex(idx)
+        if q is not None:
+            self.q_val.setValue(q)
+        if f0 is not None:
+            self.f0_val.setValue(f0)
+        got = {"Q": q is not None, "f₀": f0 is not None, "output gain": idx >= 0}
+        tc = readout.get("dnc_time_constant_s") if readout else None
+        if not self._bw_manual:                   # the bandwidth SXM's TimeConstant stands for, until one is typed
+            if tc:
+                self.bw_pll.setValue(1.0 / (10.0 * tc))
+                self._bw_manual = False
+            got["PLL bandwidth (from TimeConstant)"] = bool(tc)
+        self._set_sxm_status(got)
         if q is None or f0 is None:
             if not quiet:
                 why = "" if readout is None else "\n\n" + (readout.errors.get("q") or readout.errors.get("f_peak") or "")
@@ -337,11 +433,6 @@ class SuggestedTab(QtWidgets.QWidget):
                                               "Q / fPeak could not be read from the DNC window. Is SXM running, "
                                               "with a resonance sweep done?" + why)
             return False
-        idx = self.out_gain.findData(readout.get("afl_output_gain"))
-        if idx >= 0:
-            self.out_gain.setCurrentIndex(idx)
-        self.q_val.setValue(q)
-        self.f0_val.setValue(f0)
         return True
 
     # ------------------------------------------------------------------
@@ -497,5 +588,6 @@ class SuggestedTab(QtWidgets.QWidget):
         if not self._last_fit:
             QtWidgets.QMessageBox.information(self, "No fit", "Please load and fit a spectrum first."); return
         Q_fit, f0_fit, _ = self._last_fit
+        self.chk_from_sxm.setChecked(False)       # the spectrum's values, not SXM's: they must not be read over
         self.q_val.setValue(Q_fit); self.f0_val.setValue(f0_fit)
         self._recalc()
