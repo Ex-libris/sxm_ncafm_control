@@ -59,6 +59,18 @@ class FakeGUI:
         return read
 
 
+def settle(tab):
+    """Wait for the Suggested tab's background SXM read and let its result be applied."""
+    from PyQt5 import QtWidgets
+    for _ in range(200):
+        thread = tab._read_thread
+        if thread is None:
+            return
+        thread.join(5)
+        QtWidgets.QApplication.processEvents()
+    raise AssertionError("the SXM read did not finish")
+
+
 def reader(gui=None, broken=()):
     fake = FakeGUI(gui, broken)
     return SXMReader(AnfatecSXMBridge(strict=False, backend=fake)), fake
@@ -204,6 +216,10 @@ class Tabs(unittest.TestCase):
         sg = SuggestedTab(FakeInstrument(), None, reader=rd)
         self.assertTrue(sg.chk_from_sxm.isChecked())                      # the default when SXM can be read
         sg.show()                                                         # opening the tab reads SXM
+        self.assertIn("Reading SXM", sg.sxm_status.text())                # in the background
+        self.assertFalse(sg.btn_read_sxm.isEnabled())
+        settle(sg)
+        self.assertTrue(sg.btn_read_sxm.isEnabled())
         self.assertEqual((sg.q_val.value(), sg.f0_val.value(), sg.out_gain.currentData()), (148699.0, 25562.0, 0.1))
         self.assertFalse(sg.q_val.isEnabled() or sg.f0_val.isEnabled() or sg.out_gain.isEnabled())
         self.assertTrue(sg.bw_pll.isEnabled())                            # a target: always editable
@@ -219,20 +235,56 @@ class Tabs(unittest.TestCase):
         sg.q_val.setValue(1000.0)
         for w in sg.sxm_now.values():
             w.clear()
-        sg.hide(); sg.show()                                              # reopening does not read over it
+        sg.hide(); sg.show(); settle(sg)                                  # reopening does not read over it
         self.assertEqual(sg.q_val.value(), 1000.0)
         self.assertIn("typed by hand", sg.sxm_status.text())
         self.assertEqual(sg.sxm_now["tau"].text(), "2")                   # but 'SXM now' is refreshed
 
-        sg.chk_from_sxm.setChecked(True)                                  # back to SXM: read at once
+        sg.chk_from_sxm.setChecked(True); settle(sg)                      # back to SXM: read at once
         self.assertEqual(sg.q_val.value(), 148699.0)
 
         sg.bw_pll.setValue(30.0)                                          # a typed target is not read over
-        sg.hide(); sg.show()
+        sg.hide(); sg.show(); settle(sg)
         self.assertEqual(sg.bw_pll.value(), 30.0)
         self.assertEqual(sg.tpll_out.text(), f"{1000.0 / 300.0:.6g}")
         self.assertNotIn("PLL bandwidth", sg.sxm_status.text())
         sg.close()
+
+    def test_suggested_reads_only_its_own_windows_and_off_the_gui_thread(self):
+        import threading
+        from sxm_ncafm_control.gui.suggested_tab import SuggestedTab
+        from sxm_ncafm_control.tests.fake_instrument import FakeInstrument
+        rd, fake = reader()
+        asked, threads = [], set()
+        plain = type(fake).__getattr__
+
+        class Watching(type(fake)):
+            def __getattr__(self, method):
+                read = plain(self, method)
+
+                def watched():
+                    asked.append(method)
+                    threads.add(threading.current_thread())
+                    return read()
+                return watched
+        fake.__class__ = Watching
+        sg = SuggestedTab(FakeInstrument(), None, reader=rd)
+        sg.show(); settle(sg)
+        self.assertEqual(sorted(set(asked)), ["amplitude", "dynamic_non_contact"])
+        self.assertNotIn(threading.main_thread(), threads)
+        self.assertEqual(sg.q_val.value(), 148699.0)
+        sg.btn_read_sxm.click(); sg.btn_read_sxm.click()                  # a second request joins the first
+        settle(sg)
+        self.assertEqual(sg.sxm_now["tau"].text(), "2")
+        sg.close()
+
+    def test_a_partial_read_says_what_it_left_out(self):
+        rd, _ = reader()
+        ro = rd.read(sections=("Amplitude feedback",))
+        self.assertEqual(ro.get("amp_tau_s"), 0.002)
+        self.assertIsNone(ro.get("q"))
+        self.assertIn("section not read", ro.errors["q"])
+        self.assertEqual(rd.read().get("q"), 148699.0)
 
     def test_suggested_keeps_what_sxm_does_not_give_editable(self):
         from sxm_ncafm_control.gui.suggested_tab import SuggestedTab
