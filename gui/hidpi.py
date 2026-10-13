@@ -11,6 +11,9 @@ Three things go wrong without it (measured, see tests/test_hidpi.py):
   2-pixel line at any scale, i.e. 1 logical pixel on a 200 % display. Pen widths therefore have to be
   multiplied by the device pixel ratio (``install_pen_scaling``).
 * The window was created at a fixed size, whatever the screen.
+* A dense screen left at 100 % in Windows (4K, 2560x1440 on a small panel) gets no scaling from Qt at
+  all, so the default font is physically small: ``suggested_font_scale`` picks the starting font scale
+  from the screen's pixel density.
 
 Set ``SXM_PLOT_LINE_SCALE`` (a number, e.g. 2) to force the line-width multiplier when Qt's detection
 is wrong (remote desktop, mixed-DPI monitors).
@@ -101,6 +104,22 @@ def initial_window_size(widget=None, wanted=(1500, 950), fraction=0.95) -> QtCor
     return QtCore.QSize(min(wanted[0], int(avail.width() * fraction)), min(wanted[1], int(avail.height() * fraction)))
 
 
+def suggested_font_scale(options=(1.0, 1.25, 1.5, 1.8, 2.2), screen=None) -> float:
+    """
+    The font scale to start with on this screen: its logical pixels per inch relative to the 96 a
+    100 % Windows display is designed for, as the nearest of ``options`` (never below 1). A screen that
+    Windows already scales reports about 96 here and gets 1; a size Qt cannot tell (remote desktop) too.
+    """
+    screen = screen or QtGui.QGuiApplication.primaryScreen()
+    try:
+        ratio = float(screen.physicalDotsPerInch()) / 96.0
+    except Exception:
+        return 1.0
+    if not 0.5 < ratio < 4.0:                                     # no usable panel size
+        return 1.0
+    return min((o for o in options if o >= 1.0), key=lambda o: abs(o - ratio), default=1.0)
+
+
 def describe_display() -> str:
     """One ASCII line saying what Qt detected, for the console / tooltips."""
     screen = QtGui.QGuiApplication.primaryScreen()
@@ -109,5 +128,6 @@ def describe_display() -> str:
     g = screen.geometry()
     dpr = float(screen.devicePixelRatio())
     return (f"Display: {g.width()}x{g.height()} logical px, scale x{dpr:g} "
-            f"({round(g.width() * dpr)}x{round(g.height() * dpr)} device px), logical DPI {screen.logicalDotsPerInch():.0f}; "
-            f"plot line widths x{pen_scale():g}")
+            f"({round(g.width() * dpr)}x{round(g.height() * dpr)} device px), logical DPI {screen.logicalDotsPerInch():.0f}, "
+            f"{screen.physicalDotsPerInch():.0f} logical px per inch; "
+            f"plot line widths x{pen_scale():g}; suggested font scale x{suggested_font_scale():g}")

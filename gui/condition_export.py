@@ -176,4 +176,7 @@ def save_plot_png(path: str, t: np.ndarray, data: Dict[str, np.ndarray], loop: s
         win.ci.setGeometry(QtCore.QRectF(0, 0, PNG_SIZE[0], PNG_SIZE[1]))
         save_scene_png(win.ci, path, width=PNG_SIZE[0], legend=meta.legend())
     finally:
+        # empty the layout while everything is alive: left to the deferred delete, the scene can ask an axis
+        # for its bounds after its view box is gone, and an exception there aborts PyQt
+        win.ci.clear()
         win.deleteLater()

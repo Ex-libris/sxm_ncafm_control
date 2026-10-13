@@ -10,6 +10,7 @@ Enhanced with comprehensive accessibility features for users with visual impairm
 Tabs:
     - Parameters: Adjust feedback gains, amplitude reference, and other settings.
     - Step Test: Automatically switch parameters to test system response.
+    - Single Step: One step X0 -> X1 with its own recorder, for long times on either side.
     - Scope: Capture and export discrete signal snapshots (one-shot).
     - Live Scope: Continuously rolling live oscilloscope view.
     - Suggested Setup: View recommended starting values.
@@ -29,6 +30,7 @@ Accessibility:
 """
 
 from PyQt5 import QtWidgets, QtCore, QtGui
+import pyqtgraph as pg
 
 from sxm_ncafm_control.gui import hidpi
 from sxm_ncafm_control.gui.params_tab import ParamsTab
@@ -36,6 +38,7 @@ from sxm_ncafm_control.gui.step_test_tab import StepTestTab
 from sxm_ncafm_control.gui.suggested_tab import SuggestedTab
 from sxm_ncafm_control.gui.scope_tab import ScopeTab
 from sxm_ncafm_control.gui.live_scope_tab import LiveScopeTab
+from sxm_ncafm_control.gui.single_step_tab import SingleStepTab
 from sxm_ncafm_control.gui.qplus_calibration_tab import QplusCalibrationTab
 from sxm_ncafm_control.gui.z_const_acquisition import ZConstAcquisition
 from sxm_ncafm_control.gui.runsheet_tab import RunSheetTab
@@ -92,10 +95,12 @@ class MainWindow(QtWidgets.QWidget):
         """
         super().__init__()
         self.setWindowTitle("NC-AFM Control Suite")
-        self.resize(hidpi.initial_window_size(self))          # sized to the screen it opens on, not a fixed 768 x 768
         self.conn = conn
         # Initialize accessibility manager
         self.setup_accessibility()
+        # sized to the screen it opens on, and with the font it starts with (larger on a dense screen)
+        scale = max(1.0, self.accessibility_manager.settings["font_scale"])
+        self.resize(hidpi.initial_window_size(self, wanted=(int(1500 * scale), int(950 * scale))))
 
         # Create main layout
         layout = QtWidgets.QVBoxLayout(self)
@@ -136,6 +141,7 @@ class MainWindow(QtWidgets.QWidget):
         self.step_tab = StepTestTab(conn.dde, reader=conn.reader)
         self.scope_tab = ScopeTab(conn.driver, reader=conn.reader)
         self.live_scope_tab = LiveScopeTab(conn.driver)
+        self.single_step_tab = SingleStepTab(conn.dde, conn.driver, reader=conn.reader)
         self.suggest_tab = SuggestedTab(conn.dde, self.params_tab, reader=conn.reader)
         self.qplus_tab = QplusCalibrationTab(conn.dde, reader=conn.reader)
         self.topo_hold_tab = ZConstAcquisition(conn.dde, conn.driver)
@@ -144,21 +150,23 @@ class MainWindow(QtWidgets.QWidget):
         # Link StepTest to Scope and Tabs
         self.step_tab.scope_tab = self.scope_tab
         self.step_tab.tabs_widget = self.tabs
-        self.step_tab.scope_tab_index = 2  # Tab order: 0=Parameters, 1=Step Test, 2=Scope, ...
         self.scope_tab.set_test_tab_reference(self.step_tab)
         
         # Add tabs to UI
         self.tabs.addTab(self.params_tab, "Parameters")
         self.tabs.addTab(self.step_tab, "Step Test")
+        self.tabs.addTab(self.single_step_tab, "Single Step")
         self.tabs.addTab(self.scope_tab, "Scope")
         self.tabs.addTab(self.live_scope_tab, "Live Scope")
         self.tabs.addTab(self.suggest_tab, "Suggested Setup")
         self.tabs.addTab(self.qplus_tab, "QPlus Amplitude calibration")
         self.tabs.addTab(self.topo_hold_tab, "Constant Height")
         self.tabs.addTab(self.tuning_tab, "Tuning")
+        self.step_tab.scope_tab_index = self.tabs.indexOf(self.scope_tab)   # Step Test jumps there on Start
 
         # Connect custom parameters from ParamsTab to StepTestTab
         self.params_tab.custom_params_changed.connect(self.step_tab.set_custom_params)
+        self.params_tab.custom_params_changed.connect(self.single_step_tab.set_custom_params)
 
         layout.addWidget(self.tabs)
 
@@ -171,8 +179,9 @@ class MainWindow(QtWidgets.QWidget):
         self.footer.setWordWrap(True)
         layout.addWidget(self.footer)
 
-        # Apply initial accessibility settings
-        self.apply_accessibility_to_all_tabs()
+        # Apply initial accessibility settings: the window too (toolbar, tab bar, footer), not only the tabs,
+        # or they start at a different font size than the tabs' contents
+        self.on_accessibility_changed(self.accessibility_manager.settings)
 
         self.update_connection_status()
 
@@ -202,6 +211,8 @@ class MainWindow(QtWidgets.QWidget):
         self.tuning_tab._update_enabled()
         self.scope_tab.driver = self.conn.driver
         self.live_scope_tab.driver = self.conn.driver
+        self.single_step_tab.dde = self.conn.dde
+        self.single_step_tab.driver = self.conn.driver
 
     def reconnect_hardware(self):
         """
@@ -233,6 +244,9 @@ class MainWindow(QtWidgets.QWidget):
         step_test_was_running = self.step_tab._timer.isActive()
         if step_test_was_running:
             self.step_tab.stop()
+
+        if self.single_step_tab.is_running():        # keeps what it recorded; writes X0 back if asked to
+            self.single_step_tab.stop()
 
         self.topo_hold_tab.timer.stop()
 
@@ -311,6 +325,12 @@ class MainWindow(QtWidgets.QWidget):
 
     def show_accessibility_context_menu(self, position):
         """Show accessibility options in context menu"""
+        # not over a plot: pyqtgraph shows its own menu there (View All, axes, export) and this one landed on top
+        under = self.childAt(position)
+        while under is not None and under is not self:
+            if isinstance(under, pg.GraphicsView):
+                return
+            under = under.parentWidget()
         menu = QtWidgets.QMenu(self)
         
         # Font size submenu
@@ -361,6 +381,7 @@ class MainWindow(QtWidgets.QWidget):
             self.step_tab,
             self.scope_tab,
             self.live_scope_tab,
+            self.single_step_tab,
             self.suggest_tab,
             self.qplus_tab,
             self.topo_hold_tab,
@@ -567,6 +588,8 @@ class MainWindow(QtWidgets.QWidget):
             self.live_scope_tab.stop_live()
         if self.tuning_tab.runner_active():          # restores the anchor gains before the driver closes
             self.tuning_tab.stop()
+        if self.single_step_tab.is_running():        # its recorder reads the driver
+            self.single_step_tab.stop()
 
         # The IOCTL driver is shared across tabs (Scope, Constant Height), so it
         # is closed once here rather than by any individual tab.

@@ -236,7 +236,7 @@ class Metadata:
                  ("input_gain_ina", "InA", "x", 1.0))),
         ("Resonance", (("f_peak", "f peak", "Hz", 1.0), ("q", "Q", "", 1.0), ("ring_down_s", "Ring-down", "ms", 1e3))),
     )
-    LEGEND_SECTIONS = ("Capture", "Step Test", "Run sheet condition")   # app sections in the legend (not the events)
+    LEGEND_SECTIONS = ("Capture", "Step Test", "Single Step", "Run sheet condition")   # app sections in the legend (not the events)
 
     def legend(self) -> Tuple[List[Tuple[str, List[Tuple[str, str]]]], str]:
         """
