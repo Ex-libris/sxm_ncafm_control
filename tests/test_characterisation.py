@@ -59,7 +59,7 @@ class Config(unittest.TestCase):
 
     def test_refusals(self):
         base = json.loads(DEFAULT.read_text(encoding='utf-8'))
-        for path, value in ((('loops', 'afl'), 'on'), (('factors', 'drives'), [1e-5, 2e-3]),
+        for path, value in ((('loops', 'afl'), 'on'), (('factors', 'drives'), [1e-5, 5e-3]),
                             (('factors', 'tcs'), ['1 msec']), (('timing', 'discard_s'), 99.0)):
             d = json.loads(json.dumps(base))
             d[path[0]][path[1]] = value
@@ -282,6 +282,30 @@ class RingdownFit(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class DriveLevels(unittest.TestCase):
+    """SXM's Drive field keeps only the digits it shows (5 decimals on the instrument)."""
+
+    def test_rounded_level_is_refused_at_preflight(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = small_cfg()
+            cfg.factors.drives = [2.5e-6, 1e-5]
+            out, inst, d = run(cfg, SimSensor(drive_decimals=5), tmp=tmp)
+            self.assertEqual(out['status'], 'refused')
+            self.assertIn('drive levels SXM accepts', out['message'])
+            self.assertIn('2.5e-06 -> 0.0', out['message'])
+            self.assertEqual(inst.state['dnc.drive'], 0.0)
+            self.assertFalse(list((d / 'raw').glob('c0*.json')))       # no condition ran
+
+    def test_default_levels_are_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = C.load(DEFAULT)
+            cfg.operator.afl_off_confirmed = cfg.operator.no_surface_confirmed = True
+            out, _, d = run(cfg, SimSensor(drive_decimals=5), tmp=tmp, preflight_only=True)
+            self.assertEqual(out['status'], 'preflight', out['message'])
+            pf = json.loads(next(d.glob('preflight_*.json')).read_text(encoding='utf-8'))
+            self.assertEqual(set(pf['drive_levels_shown']), {'1e-05', '3e-05', '0.0001', '0.0003', '0.001', '0.003'})
 
 
 class PllOffCheck(unittest.TestCase):

@@ -264,10 +264,41 @@ class Campaign:
               + (f'df {fr["df_dac"]:+.4f} Hz' if 'df_dac' in fr else 'df not recorded')
               + ('. ' + '; '.join(notes) if notes else ''), level='info')
         self.f_exc_ref = fr['f_exc_hz']
+        if echo_ok and not problems:
+            result['drive_levels_shown'] = self._drive_levels(check)
         result.update(k_cal=self.k_cal, drive_dac_zero=s0['mean'], echo={'k1': k1, 'k2': k2, 'flat': flat},
                       freq_dac=fr, ok=all(c['ok'] for c in checks if c['level'] == 'fail'))
         write_new(self._numbered('preflight', '.json'), dumps(result))
         return result
+
+    def _drive_levels(self, check) -> dict:
+        """Write every planned drive level once and read it back, then drive -> off and let the sensor ring down.
+
+        SXM rounds a typed number to the digits its field shows: on the instrument (2026-11-06) the DNC Drive
+        field showed 2.5e-06 as 0.0 while 1e-05 and 2e-05 were kept. A level SXM changes would run at the wrong
+        drive (or at zero), so it is refused here, before any condition, with what SXM showed."""
+        cfg, ic = self.cfg, self.cfg.instrument
+        levels = sorted({x for x in cfg.factors.drives if x > 0} | {cfg.reference.drive})
+        shown = {}
+        for lvl in levels:
+            if self.stop():
+                raise Stopped()
+            try:
+                shown[lvl] = self.inst.set(ic.drive_param, lvl).get('after')
+            except Exception as exc:                                 # noqa: BLE001 - reported in the check
+                after = (getattr(exc, 'result', None) or {}).get('after')
+                shown[lvl] = after if after is not None else f'{type(exc).__name__}: {exc}'
+        self.inst.set(ic.drive_param, cfg.off_drive)
+        bad = {lvl: v for lvl, v in shown.items()
+               if not (isinstance(as_number(v), float) and math.isclose(as_number(v), lvl, rel_tol=1e-6))}
+        ok = [f'{lvl:g}' for lvl in levels if lvl not in bad]
+        check('drive levels SXM accepts', not bad,
+              f'kept: {ok or "none"}' + ('; changed by SXM: ' + ', '.join(f'{lvl:g} -> {v!r}' for lvl, v in bad.items())
+                                         + '. SXM rounds the Drive field to the digits it shows: use levels it keeps '
+                                         '(edit factors.drives) or change the field\'s unit in SXM' if bad else ''))
+        if not self.inst.wait(C.settle_s(cfg), self.stop):          # let the last level ring down
+            raise Stopped()
+        return {f'{k:g}': v for k, v in shown.items()}
 
     def _trip(self) -> dict:
         trip = {'QPlusAmpl': self.cfg.limits.amp_max_v}
