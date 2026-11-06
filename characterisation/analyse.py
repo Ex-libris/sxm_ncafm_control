@@ -57,6 +57,7 @@ def analyse_run(run_dir: Path, params: A.AnalysisParams | None = None, plots: bo
         'drift_amp': A.drift(rows, 'amp_ss'), 'drift_tau': A.drift(rows, 'tau_s'),
         'expected_tau_s': expected_tau,
     }
+    summary['ringdown_pooled'] = pooled_groups(records, params, cfg)
     taus = [r['tau_s'] for r in rows if r.get('ringdown_ok') and r.get('status') in ('ok', 'warn')]
     if taus:
         import numpy as np
@@ -66,7 +67,9 @@ def analyse_run(run_dir: Path, params: A.AnalysisParams | None = None, plots: bo
                                  'q': math.pi * f0 * m, 'q_ci95': math.pi * f0 * A.t_crit(len(taus)) * sd / math.sqrt(len(taus)),
                                  'f0_used_hz': f0, 'method': 'mean of per-condition ring-down fits (ok/warn), '
                                  't-distribution CI; Q = pi f0 tau with f0 = the used (excitation) frequency'}
-    summary['excitation'] = excitation_summary(rows, summary.get('tau_pooled'), cfg)
+    summary['excitation'] = excitation_summary(rows, (summary['ringdown_pooled'].get('all') or {}) if
+                                               (summary['ringdown_pooled'].get('all') or {}).get('ok') else
+                                               summary.get('tau_pooled'), cfg)
     for name in ('headroom.json', 'schedule.json'):
         if (run_dir / name).exists():
             summary[name.split('.')[0]] = json.loads((run_dir / name).read_text(encoding='utf-8'))
@@ -94,6 +97,7 @@ def analyse_run(run_dir: Path, params: A.AnalysisParams | None = None, plots: bo
             PL.tau_vs_tc(rows, expected_tau, pd / 'tau_vs_tc.png')
             PL.baseline_vs_tc(rows, pd / 'baseline_vs_tc.png')
             PL.anchors(rows, pd / 'anchors.png')
+            PL.pooled_ringdown(summary['ringdown_pooled'], pd / 'ringdown_pooled.png')
             ref = cfg['reference']['drive']
             for tc in sorted({r['tc'] for r in rows if r['kind'] == 'matrix'}, key=tc_seconds):
                 pick = next((i for i, (_, _, r) in records.items() if r['kind'] == 'matrix' and r['tc'] == tc
@@ -107,6 +111,34 @@ def analyse_run(run_dir: Path, params: A.AnalysisParams | None = None, plots: bo
             summary['plots'] = f'skipped: {exc}'
     summary['derived_dir'] = str(out)
     return summary
+
+
+def pooled_groups(records: dict, params: A.AnalysisParams, cfg: dict) -> dict:
+    """Averaged ring-down fits: all driven conditions together, per drive (all TCs) and per TC (all drives)."""
+    from . import filters as F
+    tau_guess = cfg['expect']['q'] / (math.pi * cfg['expect']['f0_hz'])
+    items = []
+    for _, (t, data, r) in sorted(records.items()):
+        if r.get('kind') in ('matrix', 'anchor', 'headroom') and r.get('status') in ('ok', 'warn') \
+                and r.get('t_off_dac') is not None:
+            sel = t >= r['t_off_dac']
+            items.append({'t': t[sel] - r['t_off_dac'], 'amp': data['QPlusAmpl'][sel], 'drive': r['drive_cmd'],
+                          'tc': r['tc'], 'tc_s': r['tc_s'], 'roll': r['rolloff_db'],
+                          'f0': r.get('f_exc_hz') or cfg['expect']['f0_hz']})
+
+    def group(members):
+        if not members:
+            return {}
+        t_s = max(max(F.settle_time(m['tc_s'], m['roll'], params.fit_settle_accuracy), params.fit_min_start_s)
+                  for m in members)
+        f0 = float(sum(m['f0'] for m in members) / len(members))
+        return A.pooled_ringdown([(m['t'], m['amp']) for m in members], t_s, tau_guess, f0)
+
+    return {'all': group(items),
+            'by_drive': {f'{d:g}': group([m for m in items if m['drive'] == d])
+                         for d in sorted({m['drive'] for m in items})},
+            'by_tc': {tc: group([m for m in items if m['tc'] == tc])
+                      for tc in sorted({m['tc'] for m in items}, key=tc_seconds)}}
 
 
 def excitation_summary(rows: list[dict], tau_pooled: dict | None, cfg: dict) -> dict:
@@ -189,10 +221,23 @@ def report(cfg: dict, s: dict, cells: list[dict], rows: list[dict]) -> str:
                  f'{_f(v["offset_se"], ".2g")} | {_f(v["max_rel_resid"], ".2%")} | {rel} |')
     tp, tv = s.get('tau_pooled'), s.get('tau_vs_tc') or {}
     L += ['', '## 3. Ring-down: mechanical decay vs readout filter', '']
+    rp = s.get('ringdown_pooled') or {}
+    al = rp.get('all') or {}
+    if al.get('ok'):
+        L.append(f'**Averaged ring-down (all {al["n_traces"]} traces): τ = {al["tau_s"]:.4f} ± {_f(al["tau_se"], ".2g")} s '
+                 f'→ Q = {al["q"]:.0f} ± {_f(al["q_se"], ".2g")}** (f0 {al["f0_used_hz"]:.4f} Hz; configured expectation '
+                 f'{s["expected_tau_s"]:.4f} s). Start {al["a0_v"]:.3g} V over a floor of {al["floor_rms_v"]:.3g} V rms '
+                 f'({al["start_over_floor"]:.0f}x). SE: {al["se_method"]}.')
+        L += ['', '| group | traces | τ (s) ± SE | Q ± SE | floor rms (V) |', '|---|---|---|---|---|']
+        for label, groups in (('drive', rp.get('by_drive') or {}), ('TC', rp.get('by_tc') or {})):
+            for k, g in groups.items():
+                if g.get('ok'):
+                    L.append(f'| {label} {k} | {g["n_traces"]} | {g["tau_s"]:.4f} ± {_f(g["tau_se"], ".2g")} | '
+                             f'{g["q"]:.0f} ± {_f(g["q_se"], ".2g")} | {g["floor_rms_v"]:.3g} |')
+        L += ['', 'Per-condition fits below: each is limited by its own floor; the averaged fit above is the result.', '']
     if tp:
-        L.append(f'Pooled τ = {tp["mean_s"]:.5f} ± {tp["ci95_s"]:.2g} s (95 % CI, n = {tp["n"]}) → '
-                 f'Q = {tp["q"]:.0f} ± {tp["q_ci95"]:.0f} (f0 = {tp["f0_used_hz"]} Hz); configured expectation '
-                 f'{s["expected_tau_s"]:.4f} s.')
+        L.append(f'Mean of the per-condition fits: τ = {tp["mean_s"]:.5f} ± {tp["ci95_s"]:.2g} s (95 % CI, n = {tp["n"]}) → '
+                 f'Q = {tp["q"]:.0f} ± {tp["q_ci95"]:.0f} (f0 = {tp["f0_used_hz"]} Hz).')
     if tv:
         z = abs(tv['slope_over_se'])
         verdict = ('no detectable TC dependence (|slope/SE| < 2): the fitted decay is mechanical, not the readout filter.'
@@ -212,10 +257,25 @@ def report(cfg: dict, s: dict, cells: list[dict], rows: list[dict]) -> str:
     bv = s.get('baseline_vs_tc') or {}
     L += ['', '## 4. Zero-drive baseline', '']
     if bv:
-        L.append(f'log-log slope of the baseline mean vs TC = {bv["loglog_slope"]:.3f} (white noise: −0.5). '
-                 f'Implied noise density per quadrature (Rayleigh model, in QPlusAmpl volts) median '
-                 f'{_f(bv["noise_density_v_rthz_median"], ".3g")} V/√Hz, '
-                 f'relative spread {_f(bv["noise_density_spread_rel"], ".1%")} across conditions.')
+        L.append(f'log-log slope of the baseline mean vs TC = {bv["loglog_slope"]:.3f} (white detector noise: −0.5) → '
+                 f'**{bv["floor_kind"]}**; floor rms (median) {_f(bv["floor_rms_median_v"], ".3g")} V.')
+        if bv.get('floor_white'):
+            L.append(f'Implied noise density per quadrature (Rayleigh model, in QPlusAmpl volts) median '
+                     f'{_f(bv["noise_density_v_rthz_median"], ".3g")} V/√Hz, relative spread '
+                     f'{_f(bv["noise_density_spread_rel"], ".1%")} across conditions.')
+        else:
+            L.append('A floor that does not fall with TC is narrower than every lock-in bandwidth used: the sensor moves at '
+                     'its resonance with no drive (thermal, or excited by noise on the drive line or by vibration). '
+                     'The noise-density column assumes white noise and does not apply. Check: zero drive with `use` ~50 Hz '
+                     'off resonance drops to the detector floor if it is the sensor.')
+            ss = {}
+            for r in rows:
+                if r['kind'] == 'matrix' and math.isfinite(r.get('amp_ss', math.nan)):
+                    ss.setdefault(r['drive_cmd'], []).append(r['amp_ss'])
+            fl = bv.get('floor_rms_median_v')
+            if ss and fl and math.isfinite(fl):
+                L.append('Steady amplitude over the floor rms: ' + ', '.join(
+                    f'drive {d:g}: {sum(v) / len(v) / fl:.0f}x' for d, v in sorted(ss.items())) + '.')
         bc = {}
         for r in rows:
             if math.isfinite(r.get('baseline_mean', math.nan)):

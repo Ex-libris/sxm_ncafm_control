@@ -72,7 +72,7 @@ class Limits:
 @dataclass
 class Timing:
     pre_s: float = 2.0                       # zero-drive record before the drive step on
-    settle_tau: float = 8.0                  # ring-up wait, in mechanical tau (8 tau: 0.03 % left)
+    settle_tau: float = 10.0                 # ring-up wait, in configured tau (covers tau up to ~0.7 s at 5 tau)
     steady_s: float = 5.0                    # driven steady window
     off_s: float = 25.0                      # after the step off: ring-down, then baseline
     discard_s: float = 5.0                   # baseline statistics start this long after the step off
@@ -83,7 +83,7 @@ class Timing:
 
 @dataclass
 class Design:
-    repeats: int = 3
+    repeats: int = 5
     seed: int = 20261106
     order: str = 'randomized_blocks'         # or 'sequential'
     anchors: bool = True
@@ -98,8 +98,8 @@ class Reference:
 
 @dataclass
 class Factors:
-    drives: list = field(default_factory=lambda: [1e-5, 3e-5, 1e-4, 3e-4, 1e-3, 3e-3])   # V rms; half decades, 1e-5 = the field's step
-    tcs: list = field(default_factory=lambda: ['0.2 ms', '1 ms', '5 ms', '10 ms', '20 ms', '50 ms'])
+    drives: list = field(default_factory=lambda: [1e-5, 3e-5, 1e-4, 3e-4])   # V rms; 1e-5 = the field's step
+    tcs: list = field(default_factory=lambda: ['0.2 ms', '1 ms', '10 ms', '50 ms'])
     baseline_tcs: list = field(default_factory=list)   # zero-drive baselines per block; [] = none
 
 

@@ -126,6 +126,28 @@ def anchors(rows: list[dict], path: Path) -> None:
     plt.close(fig)
 
 
+def pooled_ringdown(rp: dict, path: Path) -> None:
+    """Averaged ring-downs per drive (sqrt of the averaged power) with their fits."""
+    plt = _plt()
+    groups = [(k, g) for k, g in (rp.get('by_drive') or {}).items() if g.get('ok')]
+    if not groups:
+        return
+    fig, ax = plt.subplots(figsize=(6.8, 4.4))
+    for i, (k, g) in enumerate(groups):
+        col = RAMP[round(i * (len(RAMP) - 1) / max(1, len(groups) - 1))]
+        c = g['curve']
+        ax.plot(c['t'], np.sqrt(np.maximum(c['r2_mean'], 1e-30)), color=col, lw=1.2,
+                marker=MARKERS[i % len(MARKERS)], markevery=max(1, len(c['t']) // 12), ms=6,
+                label=f'drive {k}: tau {g["tau_s"]:.3f} s, {g["n_traces"]} traces')
+        ax.plot(c['t'], np.sqrt(np.maximum(c['fit'], 1e-30)), color=FIT, lw=1.5, ls='--')
+    ax.set(yscale='log', xlabel='time after the drive step off (s)', ylabel='sqrt(<QPlusAmpl^2>) (V)',
+           title='Averaged ring-down per drive (dashed: fit with the floor as offset)')
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(path, dpi=130)
+    plt.close(fig)
+
+
 def trace(t, data: dict, m: dict, title: str, path: Path) -> None:
     """One condition: amplitude (log) with the windows and the ring-down fit; Drive DAC below (shared time)."""
     plt = _plt()
