@@ -128,7 +128,7 @@ class Safety(unittest.TestCase):
         """A slow wander may pass the 6 s preflight; the first condition's check catches it."""
         out, inst, _ = run(small_cfg(), SimSensor(pll_on=True), tmp=self.tmp.name)
         self.assertIn(out['status'], ('refused', 'aborted'))
-        self.assertIn('Frequency DAC', out['message'])
+        self.assertIn('Frequency DAC moves', out['message'])
         self.assertEqual(inst.state['dnc.drive'], 0.0)
 
     def test_only_drive_and_tc_written_and_restored(self):
@@ -285,32 +285,56 @@ if __name__ == '__main__':
 
 
 class PllOffCheck(unittest.TestCase):
-    """The PLL-off check: frequency flat, no frozen df, level within the driver scale's rounding."""
+    """Open loop only a MOVING excitation frequency is a problem; constant offsets are recorded and noted."""
 
-    def test_instrument_reading_2026_11_06_passes(self):
+    def test_instrument_reading_2026_11_06(self):
         # Preflight on the instrument: Frequency DAC 25563.7495 Hz flat at use = 25563.71 Hz, df not recorded.
-        problems, v = A.pll_off_check(np.full(1000, 25563.7495), None, 25563.71, 0.005, 0.00232831)
+        problems, notes, v = A.pll_off_check(np.full(1000, 25563.7495), None, 25563.71, 0.005, 0.00232831)
         self.assertEqual(problems, [])
-        self.assertAlmostEqual(v['freq_dac_dds_scale'], 25563.71, delta=0.002)   # exact 1e7/2^32 scale
+        self.assertEqual(notes, [])
+        self.assertAlmostEqual(v['f_exc_hz'], 25563.71, delta=0.002)          # exact 1e7/2^32 scale
 
-    def test_moving_and_frozen_and_far_fail(self):
+    def test_only_moving_is_a_problem(self):
         moving = 25563.71 + np.cumsum(np.full(1000, 1e-4))
         self.assertTrue(A.pll_off_check(moving, None, 25563.71, 0.005)[0])
-        frozen = A.pll_off_check(np.full(100, 25563.75), np.full(100, 0.04), 25563.71, 0.005)[0]
-        self.assertTrue(any('frozen' in p for p in frozen))
-        self.assertTrue(A.pll_off_check(np.full(100, 25564.71), None, 25563.71, 0.005)[0])
+        problems, notes, _ = A.pll_off_check(np.full(100, 25563.75), np.full(100, 0.04), 25563.71, 0.005)
+        self.assertEqual(problems, [])
+        self.assertTrue(any('frozen' in n for n in notes))
+        problems, notes, _ = A.pll_off_check(np.full(100, 25564.71), None, 25563.71, 0.005)
+        self.assertEqual(problems, [])
+        self.assertTrue(notes)
 
     def test_campaign_with_rounded_scale_completes(self):
         with tempfile.TemporaryDirectory() as tmp:
             out, _, _ = run(small_cfg(), SimSensor(freq_rel_error=1.53e-6), tmp=tmp)
             self.assertEqual(out['status'], 'complete', out['message'])
 
-    def test_frozen_pll_offset_refuses(self):
+    def test_frozen_pll_offset_is_recorded_not_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
-            out, inst, _ = run(small_cfg(), SimSensor(df_frozen=0.04), tmp=tmp)
-            self.assertEqual(out['status'], 'refused')
-            self.assertIn('frozen PLL offset', out['message'])
+            out, _, d = run(small_cfg(), SimSensor(df_frozen=0.04), tmp=tmp)
+            self.assertEqual(out['status'], 'complete', out['message'])
+            pf = json.loads(next(d.glob('preflight_*.json')).read_text(encoding='utf-8'))
+            info = [c for c in pf['checks'] if c['check'] == 'excitation frequency (record only)'][0]
+            self.assertIn('frozen', info['detail'])
+            s = analyse_run(d, plots=False)
+            self.assertAlmostEqual(s['excitation']['df_median_hz'], 0.04, delta=1e-3)
+
+    def test_moving_frequency_still_stops_the_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out, inst, _ = run(small_cfg(), SimSensor(pll_on=True), tmp=tmp)
+            self.assertIn(out['status'], ('refused', 'aborted'))
+            self.assertIn('moves', out['message'])
             self.assertEqual(inst.state['dnc.drive'], 0.0)
+
+    def test_detuning_effect_in_the_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sensor = SimSensor(f_use=25563.8 + 0.05)                     # excited 50 mHz above f0
+            out, _, d = run(small_cfg(), sensor, tmp=tmp)
+            self.assertEqual(out['status'], 'complete', out['message'])
+            fx = analyse_run(d, plots=False)['excitation']
+            self.assertAlmostEqual(fx['detune_median_hz'], 0.05, delta=0.01)
+            x = 2 * sensor.q * 0.05 / sensor.f0
+            self.assertAlmostEqual(fx['amp_factor'], 1 / math.sqrt(1 + x * x), delta=0.01)
 
 
 class Retries(unittest.TestCase):

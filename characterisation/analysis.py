@@ -130,33 +130,41 @@ DDS_SCALE_HZ = 1e7 / 2 ** 32
 SCALE_REL_TOL = 3e-6          # what the 6-digit driver scale can be off by (+-2 ppm, with margin)
 
 
-def pll_off_check(freq, df, f_use: float, tol_hz: float, scale: float | None = None) -> tuple[list[str], dict]:
-    """Physical check that no PLL acts on the excitation frequency. Returns (problems, values).
+def pll_off_check(freq, df, f_use: float, tol_hz: float,
+                  scale: float | None = None) -> tuple[list[str], list[str], dict]:
+    """The excitation frequency during a record. Returns (problems, notes, values).
 
-    - moving:  the Frequency DAC must be flat (std <= tol): a PLL that acts moves it;
-    - frozen:  df must be ~0: gains set to 0 while the PLL was locked can leave its offset in (|df| <= tol);
-    - level:   Frequency DAC = use within max(tol, 3 ppm) (the driver's Frequency scale is rounded to 6 digits).
+    Open loop, what matters is that the excitation frequency is CONSTANT (and known), not that it equals
+    ``use``: a ring-down decays at f0 whatever the drive frequency, and a constant detuning scales every
+    steady amplitude by the same factor. So:
+
+    - problem (refuse / abort): the Frequency DAC moves (std > tol), i.e. a PLL is acting during the record;
+    - notes (recorded, not blocking): df held away from 0 (an offset frozen in when the PLL gains were set to
+      0) and the level differing from ``use`` beyond the driver scale's rounding. Both are constant offsets.
+
+    ``f_exc_hz`` is the best estimate of the excitation frequency (the exact DDS scale when ``scale`` is given).
     """
     f = np.asarray(freq, float)
     s = stats(f)
     v = {'freq_dac': s['mean'], 'freq_dac_std': s['std'], 'freq_dac_minus_use': s['mean'] - f_use,
-         'freq_level_allowed_hz': max(tol_hz, SCALE_REL_TOL * abs(f_use))}
+         'f_exc_hz': s['mean']}
     if scale:
-        v['freq_dac_dds_scale'] = s['mean'] * DDS_SCALE_HZ / scale
+        v['freq_dac_dds_scale'] = v['f_exc_hz'] = s['mean'] * DDS_SCALE_HZ / scale
         v['freq_dds_minus_use'] = v['freq_dac_dds_scale'] - f_use
-    problems = []
+    v['f_exc_minus_use'] = v['f_exc_hz'] - f_use
+    problems, notes = [], []
     if not s['std'] <= tol_hz:
-        problems.append(f'Frequency DAC moves (std {s["std"]:.2e} Hz > {tol_hz:g}): a PLL is acting')
+        problems.append(f'Frequency DAC moves (std {s["std"]:.2e} Hz > {tol_hz:g} Hz): a PLL is acting')
     if df is not None and len(df):
         d = stats(np.asarray(df, float))
         v.update(df_dac=d['mean'], df_dac_std=d['std'])
         if abs(d['mean']) > tol_hz:
-            problems.append(f'df = {d["mean"]:+.4f} Hz is held: a frozen PLL offset (gains set to 0 while locked). '
-                            'Clear it in SXM (re-lock and unlock at 0 Hz, or restart the PLL), then retry')
-    if abs(v['freq_dac_minus_use']) > v['freq_level_allowed_hz']:
-        problems.append(f'Frequency DAC {s["mean"]:.4f} Hz is {v["freq_dac_minus_use"]:+.4f} Hz from use {f_use} Hz '
-                        f'(allowed {v["freq_level_allowed_hz"]:.3f} Hz for the driver scale rounding)')
-    return problems, v
+            notes.append(f'df = {d["mean"]:+.4f} Hz held (an offset frozen in when the PLL gains were set to 0): '
+                         'constant, so harmless open loop; the excitation frequency is recorded')
+    allowed = max(tol_hz, SCALE_REL_TOL * abs(f_use))
+    if abs(v['freq_dac_minus_use']) > allowed:
+        notes.append(f'excitation {v["f_exc_hz"]:.4f} Hz is {v["f_exc_minus_use"]:+.4f} Hz from use {f_use} Hz')
+    return problems, notes, v
 
 
 # ---------------------------------------------------------------------------------------------- fits
@@ -311,10 +319,11 @@ def analyse_condition(t: np.ndarray, data: dict, meta: dict, p: AnalysisParams |
         out['phase_ss'], out['phase_ss_std'] = circ_stats(ph[steady])
     if 'Frequency' in data:
         df = np.asarray(data['df'], float)[steady] if 'df' in data else None
-        problems, vals = pll_off_check(np.asarray(data['Frequency'], float)[steady], df, f_use,
-                                       meta.get('freq_tol_hz', 0.005), (meta.get('scales') or {}).get('Frequency'))
+        problems, notes, vals = pll_off_check(np.asarray(data['Frequency'], float)[steady], df, f_use,
+                                              meta.get('freq_tol_hz', 0.005), (meta.get('scales') or {}).get('Frequency'))
         out.update(vals)
         out['pll_off_problems'] = problems
+        out['excitation_notes'] = notes
     if 'InA' in data:
         out['ina_peak'] = float(np.max(np.abs(np.asarray(data['InA'], float)))) if len(t) else math.nan
     f, a = asd(t[steady], amp[steady])
