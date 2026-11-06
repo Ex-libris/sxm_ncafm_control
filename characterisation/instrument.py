@@ -16,6 +16,7 @@ from __future__ import annotations
 import datetime
 import threading
 import time
+from pathlib import Path
 from array import array
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -100,7 +101,13 @@ class QPlusSxm:
         from sxm_anfatec import CHANNELS
         from sxm_anfatec.bridge import AnfatecSXMBridge
         from sxm_anfatec.writer import AnfatecSXMWriter
+        from sxm_anfatec import bridge as _bridge
         from sxm_anfatec.bridge import SXMBridgeError
+        if not getattr(_bridge, 'DNC_RANGE_MAY_BE_UNSELECTED', False):
+            # Same version date (2026.11.06) as the empty-status fix, so require() cannot tell them apart.
+            raise RuntimeError(f'sxm_anfatec {sxm_anfatec.__version__} at {Path(_bridge.__file__).parent} lacks the '
+                               '2026-11-06 DNC Range fix (at zero drive SXM can leave no Range button selected, and '
+                               'this copy then refuses the whole DNC window). Copy the current sxm_anfatec folder.')
         from sxm_anfatec.writer import SXMWriteError
         self._bridge_error, self._write_error = SXMBridgeError, SXMWriteError
         self.version = sxm_anfatec.__version__

@@ -80,7 +80,11 @@ The campaign does not add any communication code. It uses only these existing ca
   measures k_cal = Drive-DAC volts per SXM unit and checks that the smallest drive is ≥ 200 DAC counts.
 - **The Drive field rounds to the digits it shows.** On the instrument (2026-11-06) 1e-05 and 2e-05 were kept
   but 2.5e-06 showed as 0.0, so the smallest step is 1e-5 in the field's present unit (V rms per the manual;
-  1e-5 = 10 µV). The preflight writes every planned level once, reads it back and refuses levels SXM changes.
+  1e-5 = 10 µV). The preflight checks, without writing, that every level is a whole multiple of the reference
+  the echo wrote and SXM kept; no drive is ever written outside a protected record (echo, headroom, conditions).
+- **At zero drive SXM can leave no output-gain Range button selected** (after it auto-ranges). sxm_anfatec
+  2026-11-06 (`DNC_RANGE_MAY_BE_UNSELECTED`) reads that as Range = None instead of refusing the DNC window;
+  this tool refuses an older copy.
 - **QPlusAmpl is in volts.** Nothing here converts it to displacement.
 - **Output gain auto-ranges with the drive** (manual), which changes the DAC resolution. The runner records
   `dnc.output_gain` before and after each condition and warns when it changes. Fix it in SXM (e.g. ±0.1).
