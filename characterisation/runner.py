@@ -86,6 +86,7 @@ class Campaign:
         self.start_state: dict = {}
         self.k_cal: float | None = None
         self.dac_zero = 0.0
+        self.f_exc_ref: float | None = None                    # excitation frequency at the preflight
         self.ina_range: float | None = None
         self.touched = False
         self.results: list[dict] = []
@@ -253,13 +254,16 @@ class Campaign:
               f'smallest drive {dmin:g} = {counts:.0f} DAC counts (limit {lim.min_dac_counts})')
         fuse = self.start_state['used_freq'] or cfg.expect.f0_hz
         scale = self.inst.channel_info(['Frequency'])[1]['Frequency']
-        problems, fr = A.pll_off_check(rec.data['Frequency'], rec.data.get('df'), fuse, lim.freq_tol_hz, scale)
-        detail = (f'Frequency DAC {fr["freq_dac"]:.4f} Hz, std {fr["freq_dac_std"]:.1e} Hz; use {fuse} Hz; '
-                  + (f'df {fr["df_dac"]:+.4f} Hz; ' if 'df_dac' in fr else 'df not recorded; ')
-                  + (f'with the exact DDS scale 1e7/2^32 the DAC reads {fr["freq_dac_dds_scale"]:.4f} Hz '
-                     f'({fr["freq_dds_minus_use"]:+.4f} Hz from use)' if 'freq_dac_dds_scale' in fr else ''))
-        check('PLL off: frequency fixed, no frozen offset', not problems,
-              detail + ('. ' + '; '.join(problems) if problems else ''))
+        problems, notes, fr = A.pll_off_check(rec.data['Frequency'], rec.data.get('df'), fuse, lim.freq_tol_hz, scale)
+        check('PLL off: excitation frequency does not move', not problems,
+              f'Frequency DAC std {fr["freq_dac_std"]:.1e} Hz (limit {lim.freq_tol_hz:g})'
+              + ('. ' + '; '.join(problems) if problems else ''))
+        check('excitation frequency (record only)', True,
+              f'{fr["f_exc_hz"]:.4f} Hz (Frequency DAC {fr["freq_dac"]:.4f} Hz with the driver scale, '
+              f'{fr["f_exc_hz"]:.4f} Hz with the exact DDS scale 1e7/2^32); use {fuse} Hz; '
+              + (f'df {fr["df_dac"]:+.4f} Hz' if 'df_dac' in fr else 'df not recorded')
+              + ('. ' + '; '.join(notes) if notes else ''), level='info')
+        self.f_exc_ref = fr['f_exc_hz']
         result.update(k_cal=self.k_cal, drive_dac_zero=s0['mean'], echo={'k1': k1, 'k2': k2, 'flat': flat},
                       freq_dac=fr, ok=all(c['ok'] for c in checks if c['level'] == 'fail'))
         write_new(self._numbered('preflight', '.json'), dumps(result))
@@ -414,6 +418,11 @@ class Campaign:
             return out
         for p in m.get('pll_off_problems', []):
             out.append(('state', p))
+        if self.f_exc_ref is not None and math.isfinite(m.get('f_exc_hz', math.nan)):
+            shift = m['f_exc_hz'] - self.f_exc_ref
+            if abs(shift) > lim.freq_tol_hz:
+                warn.append(f'excitation frequency {shift:+.4f} Hz from the preflight\'s {self.f_exc_ref:.4f} Hz '
+                            '(use changed in SXM?): this cell is at a different detuning')
         if e['kind'] == 'baseline':
             z = self.dac_zero + cfg.off_drive * (self.k_cal or 0)
             if abs(m.get('drive_dac_baseline', 0) - z) > max(1e-9, 0.01 * cfg.reference.drive * (self.k_cal or 1)):

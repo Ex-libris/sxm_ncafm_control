@@ -60,10 +60,13 @@ The campaign does not add any communication code. It uses only these existing ca
   non-zero gains). So "AFL off" means the operator confirms it (`operator.afl_off_confirmed`) **and** the
   runner checks it physically. With AFL off, the Drive DAC follows `dnc.drive` in proportion and stays flat.
   A running AFL breaks either property.
-- **"PLL off" means Kp = Ki = 0** (the manual), read back before and after every condition, plus three
-  physical checks (`analysis.pll_off_check`): the Frequency DAC must be flat (a PLL that acts moves it),
-  **df** must be ~0 (gains set to 0 while locked can leave the offset frozen in), and the Frequency DAC must
-  equal `use` within max(5 mHz, 3 ppm).
+- **"PLL off" means Kp = Ki = 0** (the manual), read back before and after every condition, plus one physical
+  check (`analysis.pll_off_check`): the Frequency DAC must not move during a record (a PLL that acts moves it).
+  Open loop the excitation frequency only has to be **constant and known**, not equal to `use`: a ring-down
+  decays at f0 whatever the drive frequency, and a constant detuning scales every steady amplitude alike. So
+  a held **df** (an offset frozen in when the gains were set to 0) or a level off `use` is recorded and noted,
+  not refused; a change between conditions is a warning; the report gives the excitation frequency and the
+  ring-up detuning with its amplitude / phase effect.
 - **The driver's Frequency scale is rounded.** `CHANNELS['Frequency']` is 0.00232831 Hz/count (6 digits); the
   DDS step is 10 MHz/2^32 = 0.00232830644 Hz, +1.5 ppm lower, i.e. the IOCTL Frequency reads **~39 mHz high**
   at 25.56 kHz. Instrument, 2026-11-06: Frequency DAC 25563.7495 Hz, flat, at `use` = 25563.71 Hz; with the
@@ -152,7 +155,7 @@ Raw data: ~0.5 MB per condition (lossless int32 DAC counts + float32 time), ~60 
 | V1 | `dnc.drive` is the drive field and AFL is off | drive echo: Drive DAC follows off→d→2d in proportion (±3 %), flat (std/level < 0.3 %) | refused: check the AFL switch; if AFL is off, the field mapping is wrong (fallback: DDE `DNCPara(4, v)`) |
 | V2 | `dnc.tc` writes reach the lock-in | analysis: baseline ∝ TC^-½ and ring-down delay ≈ 2·TC (12 dB/oct) | if the baseline does not change with TC, the write only changed the GUI |
 | V3 | TC levels exist (0.2 ms and 5 ms in particular) | `options('dnc.tc')` at preflight | refused, with SXM's list printed: edit `factors.tcs` |
-| V4 | PLL off | Kp = Ki = 0 read back; Frequency DAC flat; df ≈ 0 (no frozen offset); Frequency DAC = use within max(5 mHz, 3 ppm) | refused / aborted |
+| V4 | PLL off | Kp = Ki = 0 read back; Frequency DAC flat during every record (df and the level vs use are recorded, not checked) | refused / aborted |
 | V5 | drive resolution | smallest drive ≥ 200 DAC counts | refused: raise the drives or fix the output gain |
 | V6 | polling rate | ≥ 50 % of 2000 sweeps/s (warning below 80 %) | lower `sample_rate_hz` |
 | V7 | Drive DAC 0 at zero drive | baseline conditions | aborted (state) |

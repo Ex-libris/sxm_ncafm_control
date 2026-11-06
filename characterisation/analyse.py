@@ -66,6 +66,7 @@ def analyse_run(run_dir: Path, params: A.AnalysisParams | None = None, plots: bo
                                  'q': math.pi * f0 * m, 'q_ci95': math.pi * f0 * A.t_crit(len(taus)) * sd / math.sqrt(len(taus)),
                                  'f0_used_hz': f0, 'method': 'mean of per-condition ring-down fits (ok/warn), '
                                  't-distribution CI; Q = pi f0 tau with f0 = the used (excitation) frequency'}
+    summary['excitation'] = excitation_summary(rows, summary.get('tau_pooled'), cfg)
     for name in ('headroom.json', 'schedule.json'):
         if (run_dir / name).exists():
             summary[name.split('.')[0]] = json.loads((run_dir / name).read_text(encoding='utf-8'))
@@ -106,6 +107,27 @@ def analyse_run(run_dir: Path, params: A.AnalysisParams | None = None, plots: bo
             summary['plots'] = f'skipped: {exc}'
     summary['derived_dir'] = str(out)
     return summary
+
+
+def excitation_summary(rows: list[dict], tau_pooled: dict | None, cfg: dict) -> dict:
+    """Where on the resonance the run excited: the excitation frequency, df, and the ring-up detuning with its
+    effect on the steady amplitude and phase (driven damped oscillator)."""
+    import numpy as np
+    ok = [r for r in rows if r.get('status') in ('ok', 'warn')]
+    fe = np.array([r['f_exc_hz'] for r in ok if math.isfinite(r.get('f_exc_hz', math.nan))])
+    if not len(fe):
+        return {}
+    dfs = np.array([r['df_dac'] for r in ok if math.isfinite(r.get('df_dac', math.nan))])
+    det = np.array([r['detune_abs_hz'] for r in ok if r.get('ringup_ok') and math.isfinite(r.get('detune_abs_hz', math.nan))])
+    q = (tau_pooled or {}).get('q') or cfg['expect']['q']
+    out = {'f_exc_median_hz': float(np.median(fe)), 'f_exc_span_hz': float(np.ptp(fe)),
+           'use_hz': next((r.get('f_exc_hz', 0) - r.get('f_exc_minus_use', 0) for r in ok if 'f_exc_minus_use' in r), math.nan),
+           'df_median_hz': float(np.median(dfs)) if len(dfs) else math.nan,
+           'detune_median_hz': float(np.median(det)) if len(det) else math.nan, 'detune_n': int(len(det)), 'q_used': q}
+    if len(det):
+        x = 2 * q * out['detune_median_hz'] / out['f_exc_median_hz']
+        out.update(amp_factor=1 / math.sqrt(1 + x * x), phase_shift_deg=math.degrees(math.atan(x)))
+    return out
 
 
 def _f(x, fmt='.4g') -> str:
@@ -207,6 +229,17 @@ def report(cfg: dict, s: dict, cells: list[dict], rows: list[dict]) -> str:
                      f'{_f(np.mean([r["baseline_std"] for r in rs]), ".3g")} | '
                      f'{_f(float(np.mean(disc)) if disc else None, ".2f")} (driven) | '
                      f'{_f(float(np.nanmean([r.get("noise_density_v_rthz", math.nan) for r in rs])), ".3g")} |')
+    fx = s.get('excitation') or {}
+    if fx:
+        L += ['', '## Excitation frequency (open loop)', '',
+              f'Excitation {_f(fx.get("f_exc_median_hz"), ".4f")} Hz (exact DDS scale; spread over the run '
+              f'{_f(fx.get("f_exc_span_hz"), ".2g")} Hz); use {_f(fx.get("use_hz"), ".4f")} Hz; df '
+              f'{_f(fx.get("df_median_hz"), "+.4f")} Hz.']
+        if math.isfinite(fx.get('detune_median_hz', math.nan)):
+            L.append(f'Ring-up |detuning| from f0: median {fx["detune_median_hz"]:.3f} Hz (n = {fx["detune_n"]}) '
+                     f'-> every steady amplitude is {fx["amp_factor"]:.4f} x the on-resonance value and the phase is '
+                     f'shifted {fx["phase_shift_deg"]:.1f} deg (1/sqrt(1 + x^2), atan x, x = 2 Q delta / f0). The same '
+                     'for all cells while the excitation frequency is constant; ring-down tau is not affected.')
     da, dt_ = s.get('drift_amp') or {}, s.get('drift_tau') or {}
     L += ['', '## 5. Repeatability and drift (anchors)', '']
     if da:
