@@ -13,7 +13,7 @@
     "freq_param": "dnc.used_freq",
     "rolloff_param": "dnc.rolloff",
     "output_gain_expected": null,
-    "channels": ["QPlusAmpl", "Phase", "Drive", "Frequency", "InA"],
+    "channels": ["QPlusAmpl", "Phase", "Drive", "Frequency", "df", "InA"],
     "sample_rate_hz": 2000
   },
   "expect": {"f0_hz": 25563.8, "q": 44451},

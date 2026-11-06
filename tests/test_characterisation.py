@@ -282,3 +282,89 @@ class RingdownFit(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class PllOffCheck(unittest.TestCase):
+    """The PLL-off check: frequency flat, no frozen df, level within the driver scale's rounding."""
+
+    def test_instrument_reading_2026_11_06_passes(self):
+        # Preflight on the instrument: Frequency DAC 25563.7495 Hz flat at use = 25563.71 Hz, df not recorded.
+        problems, v = A.pll_off_check(np.full(1000, 25563.7495), None, 25563.71, 0.005, 0.00232831)
+        self.assertEqual(problems, [])
+        self.assertAlmostEqual(v['freq_dac_dds_scale'], 25563.71, delta=0.002)   # exact 1e7/2^32 scale
+
+    def test_moving_and_frozen_and_far_fail(self):
+        moving = 25563.71 + np.cumsum(np.full(1000, 1e-4))
+        self.assertTrue(A.pll_off_check(moving, None, 25563.71, 0.005)[0])
+        frozen = A.pll_off_check(np.full(100, 25563.75), np.full(100, 0.04), 25563.71, 0.005)[0]
+        self.assertTrue(any('frozen' in p for p in frozen))
+        self.assertTrue(A.pll_off_check(np.full(100, 25564.71), None, 25563.71, 0.005)[0])
+
+    def test_campaign_with_rounded_scale_completes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out, _, _ = run(small_cfg(), SimSensor(freq_rel_error=1.53e-6), tmp=tmp)
+            self.assertEqual(out['status'], 'complete', out['message'])
+
+    def test_frozen_pll_offset_refuses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out, inst, _ = run(small_cfg(), SimSensor(df_frozen=0.04), tmp=tmp)
+            self.assertEqual(out['status'], 'refused')
+            self.assertIn('frozen PLL offset', out['message'])
+            self.assertEqual(inst.state['dnc.drive'], 0.0)
+
+
+class Retries(unittest.TestCase):
+    """QPlusSxm retries a transient read refusal of the strict bridge, never a write SXM rejected."""
+
+    def setUp(self):
+        from sxm_ncafm_control.characterisation import instrument as I
+        self.I = I
+        self._pause, I.RETRY_PAUSE_S = I.RETRY_PAUSE_S, 0.0
+
+    def tearDown(self):
+        self.I.RETRY_PAUSE_S = self._pause
+
+    def make(self, failures):
+        from sxm_anfatec.bridge import SXMBridgeError
+
+        class Writer:
+            def __init__(self):
+                self.calls = 0
+
+            def set(self, name, value):
+                self.calls += 1
+                if self.calls <= len(failures):
+                    raise failures[self.calls - 1]
+                return {'before': 1.0, 'after': value}
+
+            def get(self, name):
+                self.calls += 1
+                if self.calls <= len(failures):
+                    raise failures[self.calls - 1]
+                return 0.0
+
+        w = Writer()
+        return self.I.QPlusSxm({'dnc.drive'}, driver=object(), writer=w), w, SXMBridgeError
+
+    def test_transient_read_refusal_is_retried(self):
+        from sxm_anfatec.bridge import SXMBridgeError
+        empty = SXMBridgeError("Dynamic Non-Contact R / Phi: field 'Range' missing or empty")
+        inst, w, _ = self.make([empty, empty])
+        self.assertEqual(inst.set('dnc.drive', 0.0)['attempts'], 3)
+        inst, w, _ = self.make([empty])
+        self.assertEqual(inst.read('dnc.drive'), (0.0, None))
+
+    def test_gives_up_after_three(self):
+        from sxm_anfatec.bridge import SXMBridgeError
+        empty = SXMBridgeError('empty')
+        inst, w, _ = self.make([empty] * 3)
+        with self.assertRaises(SXMBridgeError):
+            inst.set('dnc.drive', 0.0)
+        self.assertEqual(w.calls, 3)
+
+    def test_rejected_write_is_not_retried(self):
+        from sxm_anfatec.writer import SXMWriteError
+        inst, w, _ = self.make([SXMWriteError('dnc.drive is disabled (greyed out) in SXM; nothing sent')])
+        with self.assertRaises(SXMWriteError):
+            inst.set('dnc.drive', 0.0)
+        self.assertEqual(w.calls, 1)

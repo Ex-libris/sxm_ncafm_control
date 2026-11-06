@@ -38,7 +38,7 @@ class InstrumentCfg:
     freq_param: str = 'dnc.used_freq'        # read only in this stage
     rolloff_param: str = 'dnc.rolloff'       # read only
     output_gain_expected: str | None = None  # e.g. '±0.1': checked against read-back, never written
-    channels: list = field(default_factory=lambda: ['QPlusAmpl', 'Phase', 'Drive', 'Frequency', 'InA'])
+    channels: list = field(default_factory=lambda: ['QPlusAmpl', 'Phase', 'Drive', 'Frequency', 'df', 'InA'])
     sample_rate_hz: float = 2000.0           # polling sweeps per second (all channels per sweep); >= 4x the
                                              # -3 dB bandwidth of the shortest TC (0.2 ms, 12 dB/oct: 0.5 kHz)
 
