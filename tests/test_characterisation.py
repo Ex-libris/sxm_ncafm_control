@@ -235,6 +235,8 @@ class Analysis(unittest.TestCase):
         self.assertAlmostEqual(tp['mean_s'] / self.sensor.tau_m, 1, delta=0.005)
         self.assertAlmostEqual(tp['q'] / self.sensor.q, 1, delta=0.005)
         self.assertLess(abs(self.summary['tau_vs_tc']['change_over_range_rel']), 0.01)
+        al = self.summary['ringdown_pooled']['all']
+        self.assertAlmostEqual(al['tau_s'] / self.sensor.tau_m, 1, delta=0.005)    # averaged fit agrees
 
     def test_delay_follows_filter_group_delay(self):
         per = self.summary['delay_vs_tc']['per_tc']
@@ -308,11 +310,73 @@ class DriveLevels(unittest.TestCase):
             out, inst, d = run(cfg, SimSensor(drive_decimals=5), tmp=tmp, preflight_only=True)
             self.assertEqual(out['status'], 'preflight', out['message'])
             pf = json.loads(next(d.glob('preflight_*.json')).read_text(encoding='utf-8'))
-            self.assertEqual(set(pf['drive_levels_shown']), {'1e-05', '3e-05', '0.0001', '0.0003', '0.001', '0.003'})
+            self.assertEqual(set(pf['drive_levels_shown']), {'1e-05', '3e-05', '0.0001', '0.0003'})
             # the preflight writes only the echo (off, 1e-5, 2e-5, off) and the restore: never the high levels
             drive_writes = [w for w in inst.written if w == 'dnc.drive']
             self.assertLessEqual(len(drive_writes), 6)
             self.assertLessEqual(max(inst.drive_values), 2e-5)
+
+
+class NoiseFloor(unittest.TestCase):
+    """The sensor moving at its resonance with no drive (instrument 2026-11-06: ~65 µV at every TC, against 1.1 mV
+    driven): single ring-down fits scatter, the averaged fit does not; the floor is reported as narrowband."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cfg = small_cfg()
+        cfg.design.repeats = 3
+        cfg.factors.tcs = ['1 ms', '50 ms']
+        cfg.factors.baseline_tcs = ['1 ms', '50 ms']
+        cls.sensor = SimSensor(thermal_v=6e-5, seed=4)      # 60 µV of sensor motion, 1 mV driven at 1e-5
+        cls.out, _, cls.dir = run(cfg, cls.sensor, tmp=cls.tmp.name)
+        cls.s = analyse_run(cls.dir, plots=False)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_completes(self):
+        self.assertEqual(self.out['status'], 'complete', self.out['message'])
+
+    def test_averaged_ringdown_recovers_tau(self):
+        al = self.s['ringdown_pooled']['all']
+        self.assertTrue(al['ok'])
+        self.assertAlmostEqual(al['tau_s'] / self.sensor.tau_m, 1, delta=0.08)
+        self.assertTrue(math.isfinite(al['tau_se']))
+        self.assertLess(al['tau_se'] / al['tau_s'], 0.1)
+
+    def test_floor_reported_as_narrowband(self):
+        bv = self.s['baseline_vs_tc']
+        self.assertFalse(bv['floor_white'])
+        self.assertGreater(bv['loglog_slope'], -0.25)
+        report = next(Path(self.s['derived_dir']).glob('report.md')).read_text(encoding='utf-8')
+        self.assertIn('narrowband', report)
+
+
+class HeadroomCompression(unittest.TestCase):
+    def test_noise_alone_does_not_stop(self):
+        from sxm_ncafm_control.characterisation.runner import compression
+        comp, se, sig = compression(0.69, 0.20, 1.0, 0.15, 0.03)      # 31 % drop, but +-25 % noise
+        self.assertAlmostEqual(comp, 0.31, places=6)
+        self.assertFalse(sig)
+
+    def test_real_drop_stops(self):
+        from sxm_ncafm_control.characterisation.runner import compression
+        self.assertTrue(compression(0.69, 0.01, 1.0, 0.01, 0.03)[2])
+        self.assertFalse(compression(0.99, 0.001, 1.0, 0.001, 0.03)[2])  # 1 % < 3 % threshold
+
+    def test_compressing_sensor_still_ends_the_ladder_after_a_repeat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = small_cfg()
+            cfg.factors.drives = [1e-5, 2e-5, 4e-5, 8e-5, 1.6e-4]
+            cfg.factors.tcs = ['1 ms']
+            cfg.factors.baseline_tcs = []
+            out, _, d = run(cfg, SimSensor(amp_sat_v=0.004), tmp=tmp, max_blocks=1)
+            h = json.loads((d / 'headroom.json').read_text(encoding='utf-8'))
+            stopped = [st for st in h['steps'] if st.get('stop')]
+            self.assertEqual(stopped[-1]['repeat'], 2)                  # confirmed before stopping
+            self.assertNotIn(stopped[-1]['drive'], h['allowed'])
 
 
 class PllOffCheck(unittest.TestCase):

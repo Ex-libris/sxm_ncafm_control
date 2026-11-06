@@ -13,8 +13,8 @@ records). Stages 3 and 5–8 are designed below and come later, as separate stag
 1. In SXM: tip retracted, Amplitude feedback OFF, PLL Kp = Ki = 0, DNC Range (output gain) fixed (e.g. ±0.1).
 2. Run on: *SXM instrument*. Tick *Amplitude feedback is switched OFF* and *Tip retracted, no surface*.
 3. *Preflight* (~15 s). If it says REFUSED, the reason is in the status line and the run folder.
-4. *Blocks this run* = 1, *Run* (headroom + block 1, ~33 min). Then *Resume run...* on the same folder for
-   blocks 2 and 3 (~29 min each). Each finished batch is analysed automatically (`derived/<time>/report.md`).
+4. *Blocks this run* = 1 or 2, *Run* (headroom ~3 min + ~14 min per block). Then *Resume run...* on the same
+   folder for the remaining blocks (5 in all). Each finished batch is analysed automatically (`derived/<time>/report.md`).
 5. *Stop* at any time: the record ends, the drive goes to 0 and the TimeConstant back to its start value.
 
 The tab shares the app's driver handle: stop Scope, Live Scope and Single Step captures first. Results go
@@ -126,13 +126,13 @@ reconnect and on close.
 
 | Factor | Levels | Stage | Responses compared |
 |---|---|---|---|
-| Drive amplitude (SXM units: V rms per the manual) | **1e-5 (reference, the smallest step the field keeps)**, 3e-5, 1e-4, 3e-4, 1e-3, 3e-3 (half decades up to the usual maximum 3e-3 V). The headroom pass decides how far up to go | 2 | A_ss, phase, Drive DAC, A/D slope and offset, compression |
-| DNC lock-in TC | 0.2, 1, 5, 10, 20, 50 ms (checked against SXM's list) | 1, 2 | baseline mean/std/ASD, ring-down τ and delay, steady noise |
+| Drive amplitude (SXM units: V rms per the manual) | **1e-5 (reference, the smallest step the field keeps)**, 3e-5, 1e-4, 3e-4 (up to ~30 mV of QPlusAmpl, ~400x the sensor's own ~70 µV motion; the usual maximum 3e-3 V would exceed the 50 mV limit). The headroom pass decides how far up to go | 2 | A_ss, phase, Drive DAC, A/D slope and offset, compression |
+| DNC lock-in TC | 0.2, 1, 10, 50 ms (checked against SXM's list; 5 and 20 ms dropped after the first run: A_ss, τ and the floor did not depend on TC) | 1, 2 | baseline mean/std/ASD, ring-down τ and delay, steady noise |
 | Drive state | zero (baseline conditions) vs driven | 1 | noise floor vs TC (white noise: R ∝ TC^-½) |
 | Excitation frequency | coarse ±5 Hz / 0.25 Hz, fine ±1 Hz / 0.05 Hz around f0 | 3 (later) | f0, Q (Lorentzian), phase curve, drive-dependent shift |
 | AFL gains | one at a time from conservative values | 5 (later) | setpoint error, settling, overshoot, drive effort |
 | PLL gains | one at a time, AFL off | 6 (later) | frequency error, settling, overshoot, phase |
-| Repetition / order | 3 blocks, shuffled per block (seed stored), anchor at each block start + end | 1–2 | CI per cell, drift (%/h) |
+| Repetition / order | 5 blocks, shuffled per block (seed stored), anchor at each block start + end | 1–2 | CI per cell, drift (%/h), averaged ring-downs |
 
 ## 4. Run schedule (default config, `configs/open_loop_matrix.json`)
 
@@ -148,12 +148,12 @@ writes the new TC inside the record (so the transition is kept), then 30 s at ze
 | Part | Conditions | Time |
 |---|---|---|
 | Preflight (read-backs, rate, drive echo off→1e-5→2e-5→off) | – | ~15 s |
-| Headroom pass at TC 1 ms, ascending drive, stops at compression > 3 %, InA > 40 % of range, or QPlusAmpl > 80 % of the limit | 6 | ~4 min |
-| Block 1: anchor + 36 drive × TC cells + 6 baselines, shuffled | 43 | ~29 min |
-| Block 2, block 3 (3 also closes with an anchor) | 43 + 44 | ~29 + 30 min |
-| **Total** | 136 records | **~92 min** (run as 3 batches with `--blocks 1`) |
+| Headroom pass at TC 1 ms, ascending drive; stops at compression > max(3 %, 3 SE) seen twice, InA > 40 % of range, or QPlusAmpl > 80 % of the limit | 4 (+ repeats) | ~3 min |
+| Each block: anchor + 16 drive × TC cells + 4 baselines, shuffled | 21 | ~14 min |
+| Blocks 2–5 (5 also closes with an anchor) | 21 each (+1) | ~14 min each |
+| **Total** | 110 records | **~75 min** (run as batches of 1–2 blocks) |
 
-Raw data: ~0.5 MB per condition (lossless int32 DAC counts + float32 time), ~70 MB per campaign.
+Raw data: ~0.5 MB per condition (lossless int32 DAC counts + float32 time), ~55 MB per campaign.
 
 ## 5. Instrument-specific items to verify (preflight does V1, V3–V6 itself)
 
@@ -188,13 +188,13 @@ Raw data: ~0.5 MB per condition (lossless int32 DAC counts + float32 time), ~70 
   "limits":     {"drive_max": 3e-3, "amp_max_v": 0.05, "ina_max_fraction": 0.5, "drive_echo_rel_tol": 0.03,
                  "drive_flat_rel": 0.003, "freq_tol_hz": 0.005, "compression_max": 0.03, "min_dac_counts": 200,
                  "max_total_min": 120, "max_conditions": 250, "condition_timeout_s": 240},
-  "timing":     {"pre_s": 2, "settle_tau": 8, "steady_s": 5, "off_s": 25, "discard_s": 5, "baseline_s": 30,
+  "timing":     {"pre_s": 2, "settle_tau": 10, "steady_s": 5, "off_s": 25, "discard_s": 5, "baseline_s": 30,
                  "tc_settle_s": 1, "overhead_s": 4},
-  "design":     {"repeats": 3, "seed": 20261106, "order": "randomized_blocks", "anchors": true, "headroom": true},
+  "design":     {"repeats": 5, "seed": 20261106, "order": "randomized_blocks", "anchors": true, "headroom": true},
   "reference":  {"drive": 1e-5, "tc": "1 ms"},
-  "factors":    {"drives": [1e-5, 3e-5, 1e-4, 3e-4, 1e-3, 3e-3],    // V rms; levels SXM's Drive field keeps
-                 "tcs": ["0.2 ms","1 ms","5 ms","10 ms","20 ms","50 ms"],
-                 "baseline_tcs": ["0.2 ms","1 ms","5 ms","10 ms","20 ms","50 ms"]},   // [] = no stage 1
+  "factors":    {"drives": [1e-5, 3e-5, 1e-4, 3e-4],             // V rms; levels SXM's Drive field keeps
+                 "tcs": ["0.2 ms","1 ms","10 ms","50 ms"],
+                 "baseline_tcs": ["0.2 ms","1 ms","10 ms","50 ms"]},   // [] = no stage 1
   "loops":      {"afl": "off", "pll": "off"},         // the only values this stage accepts
   "off_drive": 0.0, "end_drive": "start"              // after a normal end: the drive the run found
 }
@@ -230,11 +230,13 @@ scales, run order (idx, block), status, aborts, warnings, online metrics and the
 |---|---|
 | Step times | from the **Drive DAC** crossing its midpoint; command→DAC delay reported separately |
 | Steady A_ss, phase, Drive DAC | last `steady_s` before the step-off command minus 0.1 s; block SE; circular mean for phase; drift over the window |
-| Ring-down τ, Q | R² = P0·exp(−2(t−t_s)/τ) + c, weighted LSQ, c = noise power (E[R²] = A² + 2σ²: subtract power, not amplitude). t_s = DAC step + filter settling to 0.1 %; end at 5× the floor or 6 τ. SE × √(N/N_eff), N_eff = window × 2·ENBW. Cross-check: log-linear fit where R > 10× the floor |
+| **Ring-down τ, Q (result)** | **Averaged** fit: R² of all ring-downs of a group (all; per drive; per TC), aligned at the DAC step off, averaged, then R² = P0·exp(−2(t−t_s)/τ) + c over the whole decay into the floor. The floor, which fluctuates (the sensor's own motion is correlated over ~τ), averages to the constant c. SE = bootstrap over traces. Instrument 2026-11-06: 9 traces gave τ = 0.621 ± 0.018 s (Q 49 900 ± 1 400) where the per-trace fits scattered 0.44–1.5 s |
+| Ring-down per condition | Same model on one trace, end at 2× the floor or 8 τ; SE × √(N/N_eff), N_eff = window × 2·ENBW. Limited by the floor when the drive is small; kept for the TC / drive regressions |
 | Ring-down delay | where the fitted exponential meets A_ss, compared with the group delay n·TC (not resolved when TC is shorter than the sample period) |
 | Ring-up (secondary) | \|A_ss(1 − e^{−(1/τ + j2πδ)t})\| → τ and \|detuning\| δ (beats when the drive is off resonance) |
 | Baseline | from ≥ 5 s after the DAC step off, **extended automatically** until the fitted tail is < 0.1 × the baseline std (the 5 s you used is too short at the larger drives and longer TCs; the value used is reported); mean, std, block SE, median, slope, ASD in 0.5–5 / 5–50 / 50–500 Hz |
-| Noise density | Rayleigh model: E[R] = σ√(π/2), σ² = S·ENBW per quadrature |
+| Noise floor | log-log slope of the zero-drive amplitude vs TC: −½ = white detector noise (then a density from the Rayleigh model, E[R] = σ√(π/2), σ² = S·ENBW per quadrature); ~0 = **narrowband**: the sensor moving at its resonance (reported as a floor rms and steady amplitude / floor, no density). Instrument 2026-11-06: ~70 µV at every TC at resonance, ~14 µV 50 Hz off resonance (9 K: far above thermal) |
+| Headroom stop | amplitude/drive below the lowest level by > max(3 %, 3 SE), confirmed by one repeat; SE from the steady-window std with ~steady_s/τ independent samples |
 | Cells | mean, SD, t-distribution 95 % CI over repeats |
 | Linearity | per TC: A_ss = k·(Drive DAC − zero) + b, max relative residual, A/D relative to the lowest drive |
 | Readout vs mechanics | τ regressed on TC: \|slope/SE\| < 2 and a negligible change → the decay is mechanical |

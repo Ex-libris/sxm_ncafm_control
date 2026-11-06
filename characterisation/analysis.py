@@ -31,6 +31,9 @@ from . import filters as P
 from .config import rolloff_db, tc_seconds
 
 MODEL_RINGDOWN = 'R^2 = P0 exp(-2 (t - t_s)/tau) + c; weighted LSQ (sigma_i = 2 R_i s + s^2, s = baseline std)'
+MODEL_POOLED = ('<R^2>(t) = P0 exp(-2 (t - t_s)/tau) + c, fitted to R^2 AVERAGED over the ring-downs of a group '
+                '(aligned at the Drive-DAC step off); t_s = the slowest member\'s filter settling; weights '
+                '1/sqrt(max(<R^2>, c)); SE = bootstrap over the traces (resampled with replacement, refitted)')
 MODEL_RINGUP = '|A_ss (1 - exp(-(1/tau + j 2 pi delta)(t - t_0)))|, t_0 = DAC step + n TC; LSQ'
 
 
@@ -42,8 +45,8 @@ class AnalysisParams:
     min_baseline_s: float = 5.0        # never shorten the baseline window below this when extending
     fit_settle_accuracy: float = 1e-3  # ring-down window starts when the filter transient is below this
     fit_min_start_s: float = 0.005
-    fit_floor_factor: float = 5.0      # ring-down window ends where R falls below this x baseline mean ...
-    fit_max_tau: float = 6.0           # ... or after this many expected tau
+    fit_floor_factor: float = 2.0      # ring-down window ends where R falls below this x baseline mean ...
+    fit_max_tau: float = 8.0           # ... or after this many expected tau
     loglin_floor_factor: float = 10.0  # log-linear cross-check: only where R > this x baseline mean
     steady_margin_s: float = 0.1       # steady window ends this long before the step-off command
     pre_margin_s: float = 0.05
@@ -217,6 +220,62 @@ def fit_ringdown(t, amp, t_step, tc_s, roll, f0, floor_mean, floor_std, tau_gues
         kk = np.polyfit(t[hi] - t_s, np.log(np.asarray(amp[hi], float)), 1)[0]
         out['tau_loglin_s'] = float(-1 / kk) if kk < 0 else math.nan
         out['loglin_window'] = [float(t[hi][0] - t_step), float(t[hi][-1] - t_step)]
+    return out
+
+
+def pooled_ringdown(traces: list, t_start: float, tau_guess: float, f0: float, dt: float = 0.005,
+                    n_boot: int = 100, seed: int = 1) -> dict:
+    """Fit the AVERAGED power of several ring-downs.
+
+    ``traces`` = [(t_rel, amp)], t_rel = s after the Drive-DAC step off. Averaging R^2 keeps the decay and turns a
+    floor that fluctuates (noise, or the sensor's own motion at its resonance, correlated over ~tau) into a
+    constant c, so the fit can follow the decay down into the floor. The SE comes from a bootstrap over whole
+    traces, which needs no assumption about how the floor is correlated in time.
+    """
+    from scipy.optimize import curve_fit
+    out = {'model': MODEL_POOLED, 'n_traces': len(traces), 'ok': False}
+    if not traces:
+        return out
+    t_end = min(float(t[-1]) for t, _ in traces)
+    grid = np.arange(t_start, t_end, dt)
+    if len(grid) < 50:
+        out['note'] = 'window too short'
+        return out
+    P = np.array([np.interp(grid, np.asarray(t, float), np.asarray(a, float) ** 2) for t, a in traces])
+    x = grid - t_start
+
+    def model(xx, p0, tau, c):
+        return p0 * np.exp(-2 * xx / tau) + c
+
+    def fit(pm):
+        c0 = float(np.mean(pm[-max(10, len(pm) // 4):]))
+        floor = c0 if c0 > 0 else float(np.max(pm)) * 1e-6
+        sig = np.sqrt(np.maximum(pm, floor))
+        popt, _ = curve_fit(model, x, pm, p0=[max(float(pm[0]) - c0, floor), tau_guess, c0], sigma=sig,
+                            bounds=([0, tau_guess / 20, -np.inf], [np.inf, tau_guess * 20, np.inf]), maxfev=20000)
+        return popt
+
+    try:
+        p0, tau, c = (float(v) for v in fit(P.mean(axis=0)))
+    except (RuntimeError, ValueError) as exc:
+        out['note'] = f'fit failed: {exc}'
+        return out
+    boot = []
+    if len(traces) >= 3:
+        rng = np.random.default_rng(seed)
+        for _ in range(n_boot):
+            try:
+                boot.append(float(fit(P[rng.integers(0, len(traces), len(traces))].mean(axis=0))[1]))
+            except (RuntimeError, ValueError):
+                pass
+    se = float(np.std(boot, ddof=1)) if len(boot) > 10 else math.nan
+    step = max(1, len(grid) // 400)
+    out.update(ok=True, tau_s=tau, tau_se=se, q=math.pi * f0 * tau, q_se=math.pi * f0 * se, f0_used_hz=f0,
+               a0_v=math.sqrt(max(p0, 0.0)), floor_rms_v=math.sqrt(max(c, 0.0)),
+               start_over_floor=math.sqrt(p0 / c) if c > 0 else math.inf, window=[t_start, t_end],
+               se_method=f'bootstrap over traces ({len(boot)} refits)' if boot else 'fewer than 3 traces: no SE',
+               curve={'t': grid[::step].tolist(), 'r2_mean': P.mean(axis=0)[::step].tolist(),
+                      'fit': model(x, p0, tau, c)[::step].tolist()})
     return out
 
 
@@ -477,7 +536,12 @@ def baseline_vs_tc(rows: list[dict]) -> dict:
     x, y = np.log([r['tc_s'] for r in rs]), np.log([r['baseline_mean'] for r in rs])
     k = float(np.polyfit(x, y, 1)[0])
     dens = np.array([r['noise_density_v_rthz'] for r in rs if math.isfinite(r.get('noise_density_v_rthz', math.nan))])
+    rms = np.array([r['baseline_rms'] for r in rs if math.isfinite(r.get('baseline_rms', math.nan))])
+    white = k < -0.35
     return {'loglog_slope': k, 'expected_white': -0.5,
+            'floor_kind': 'white (falls as TC^-1/2: detector noise)' if white else
+                          'narrowband (does not fall with TC: motion at the excitation frequency, i.e. the sensor)',
+            'floor_white': white, 'floor_rms_median_v': float(np.median(rms)) if len(rms) else math.nan,
             'noise_density_v_rthz_median': float(np.median(dens)) if len(dens) else math.nan,
             'noise_density_spread_rel': float(np.std(dens) / np.mean(dens)) if len(dens) > 1 else math.nan,
             'n': len(rs), 'method': 'least squares ln(baseline_mean) = a + k ln(TC), driven and baseline conditions'}

@@ -93,7 +93,7 @@ class CharacterisationTab(QtWidgets.QWidget):
         gl.addWidget(QtWidgets.QLabel("Blocks this run:"), 1, 2)
         self.blocks = QtWidgets.QSpinBox()
         self.blocks.setRange(1, 99)
-        self.blocks.setToolTip("Each block is every drive x TC cell once (~29 min with the default config). "
+        self.blocks.setToolTip("Each block is every drive x TC cell once (~14 min with the default config). "
                                "Run one, then 'Resume run...' for the next.")
         gl.addWidget(self.blocks, 1, 3)
         gl.addWidget(QtWidgets.QLabel("Results folder:"), 2, 0)

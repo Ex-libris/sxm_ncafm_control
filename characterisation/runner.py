@@ -66,6 +66,16 @@ def _json_default(o):
     return str(o)
 
 
+def compression(ratio, rel, r0, rel0, threshold: float) -> tuple[float, float, bool]:
+    """Amplitude/drive drop relative to the lowest level, its SE, and whether it is significant:
+    above ``threshold`` AND above 3 SE (one noisy point must not end the ladder)."""
+    if not (ratio and r0):
+        return math.nan, math.nan, False
+    comp = 1 - ratio / r0
+    se = (ratio / r0) * math.sqrt((rel or 0) ** 2 + (rel0 or 0) ** 2)
+    return comp, se, bool(comp > threshold and comp > 3 * se)
+
+
 def write_new(path: Path, text: str) -> None:
     """Create ``path``; never overwrite."""
     with open(path, 'x', encoding='utf-8') as fh:
@@ -395,6 +405,7 @@ class Campaign:
         summary = {'idx': e['idx'], 'kind': e['kind'], 'block': e['block'], 'drive': e.get('drive'), 'tc': e['tc'],
                    'status': status, 'amp_ss': metrics.get('amp_ss'), 'tau_s': metrics.get('tau_s'),
                    'baseline_mean': metrics.get('baseline_mean'), 'amp_per_drive': metrics.get('amp_per_drive'),
+                   'amp_ss_std': metrics.get('amp_ss_std'),
                    'drive_dac': metrics.get('drive_dac'), 'ina_peak': metrics.get('ina_peak'),
                    'warnings': list(warn), 'aborts': meta['aborts'], 'file': stem}
         self.results.append(summary)
@@ -454,7 +465,8 @@ class Campaign:
                                  'AFL acting on the drive, or a different drive field'))
         if m.get('drive_dac_flat_rel', 0) > lim.drive_flat_rel:
             out.append(('state', f'Drive DAC not constant while driven (std/level {m["drive_dac_flat_rel"]:.2e}): loop active?'))
-        if math.isfinite(m.get('amp_ss_drift_rel', math.nan)) and abs(m['amp_ss_drift_rel']) > 0.02:
+        noise_rel = (m.get('amp_ss_std') or 0) / m['amp_ss'] if m.get('amp_ss') else 0.0
+        if math.isfinite(m.get('amp_ss_drift_rel', math.nan)) and abs(m['amp_ss_drift_rel']) > max(0.02, 2 * noise_rel):
             warn.append(f'steady amplitude drifts {m["amp_ss_drift_rel"]:+.1%} over the steady window (not settled?)')
         if not m.get('ringdown_ok'):
             warn.append(f'ring-down fit failed: {m.get("ringdown_note", "?")}')
@@ -474,41 +486,60 @@ class Campaign:
             return json.loads(path.read_text(encoding='utf-8'))['allowed']
         self._progress('stage', 'headroom')
         cfg, lim = self.cfg, self.cfg.limits
-        allowed, steps, r0 = [], [], None
+        allowed, steps, r0, rel0 = [], [], None, 0.0
         attempt = len({i // 100 for i in self.done_indices() if i >= 9000})     # a stopped pass is re-run whole
-        for i, e in enumerate(C.headroom_entries(cfg), 1):
-            e['idx'] = 9000 + 100 * attempt + i
-            try:
-                s = self.run_entry(e)
-            except Abort as a:
-                if a.kind != 'limit':
-                    raise
-                steps.append({'drive': e['drive'], 'stop': a.reason})
+        n = 0
+        independent = max(1.0, cfg.timing.steady_s / cfg.expect.tau_mech)   # the floor is correlated over ~tau
+        for lvl in sorted(x for x in cfg.factors.drives if x > 0):
+            stop = None
+            for repeat in (1, 2):                   # a significant compression is measured twice before it stops
+                n += 1
+                e = C.entry('headroom', lvl, cfg.reference.tc, 0)
+                e['idx'] = 9000 + 100 * attempt + n
+                try:
+                    s = self.run_entry(e)
+                except Abort as a:
+                    if a.kind != 'limit':
+                        raise
+                    stop = a.reason
+                    steps.append({'drive': lvl, 'repeat': repeat, 'stop': stop})
+                    break
+                ratio = s.get('amp_per_drive')
+                rel = ((s.get('amp_ss_std') or 0) / s['amp_ss'] / math.sqrt(independent)) if s.get('amp_ss') else math.nan
+                if r0 is None:
+                    r0, rel0 = ratio, rel
+                comp, comp_se, significant = compression(ratio, rel, r0, rel0, lim.compression_max)
+                ina = (s.get('ina_peak') or 0) / self.ina_range if self.ina_range else math.nan
+                amp = (s.get('amp_ss') or 0) / lim.amp_max_v
+                reasons = []
+                if math.isfinite(ina) and ina > 0.8 * lim.ina_max_fraction:
+                    reasons.append(f'InA peak at {ina:.0%} of range (stop at 80 % of the {lim.ina_max_fraction:.0%} limit)')
+                if amp > 0.8:
+                    reasons.append(f'QPlusAmpl at {amp:.0%} of limits.amp_max_v')
+                if significant:
+                    reasons.append(f'amplitude/drive {comp:.1%} ± {comp_se:.1%} below the lowest level '
+                                   f'(> {lim.compression_max:.0%} and > 3 SE)' + (', confirmed by a repeat' if repeat == 2 else ''))
+                step = {'drive': lvl, 'repeat': repeat, 'amp_ss': s.get('amp_ss'), 'amp_per_drive': ratio,
+                        'compression': comp, 'compression_se': comp_se, 'ina_fraction': ina,
+                        'amp_fraction_of_limit': amp, 'stop': '; '.join(reasons) or None}
+                steps.append(step)
+                self.log(f'headroom {lvl:g}{" (repeat)" if repeat == 2 else ""}: A {s.get("amp_ss", math.nan):.4g} V, '
+                         f'A/D rel {1 - comp if math.isfinite(comp) else math.nan:.4f} ± {comp_se:.4f}, InA {ina:.0%}'
+                         + (f' -> {"STOP" if (repeat == 2 or not significant or len(reasons) > 1) else "repeat to confirm"}: '
+                            f'{"; ".join(reasons)}' if reasons else ''))
+                if significant and repeat == 1 and len(reasons) == 1:
+                    continue                        # only the compression: measure once more before stopping
+                if reasons:
+                    stop = step['stop']
                 break
-            ratio = s.get('amp_per_drive')
-            r0 = r0 or ratio
-            comp = 1 - ratio / r0 if ratio and r0 else math.nan
-            ina = (s.get('ina_peak') or 0) / self.ina_range if self.ina_range else math.nan
-            amp = (s.get('amp_ss') or 0) / lim.amp_max_v
-            step = {'drive': e['drive'], 'amp_ss': s.get('amp_ss'), 'amp_per_drive': ratio, 'compression': comp,
-                    'ina_fraction': ina, 'amp_fraction_of_limit': amp}
-            reasons = []
-            if math.isfinite(comp) and comp > lim.compression_max:
-                reasons.append(f'amplitude/drive {comp:.1%} below the lowest level (> {lim.compression_max:.0%})')
-            if math.isfinite(ina) and ina > 0.8 * lim.ina_max_fraction:
-                reasons.append(f'InA peak at {ina:.0%} of range (stop at 80 % of the {lim.ina_max_fraction:.0%} limit)')
-            if amp > 0.8:
-                reasons.append(f'QPlusAmpl at {amp:.0%} of limits.amp_max_v')
-            steps.append({**step, 'stop': '; '.join(reasons) or None})
-            self.log(f'headroom {e["drive"]:g}: A {s.get("amp_ss", math.nan):.4g} V, A/D rel {1 - comp if math.isfinite(comp) else math.nan:.4f}, '
-                     f'InA {ina:.0%}' + (f' -> STOP: {"; ".join(reasons)}' if reasons else ''))
-            if reasons:
+            if stop:
                 break
-            allowed.append(e['drive'])
+            allowed.append(lvl)
         allowed = [d for d in cfg.factors.drives if d in allowed]
         write_new(path, dumps({'allowed': allowed, 'steps': steps, 'tc': cfg.reference.tc,
-                               'rule': f'stop at compression > {lim.compression_max:g}, InA > 80 % of '
-                                       f'{lim.ina_max_fraction:g} x range, or QPlusAmpl > 80 % of {lim.amp_max_v:g} V'}))
+                               'rule': f'stop at compression > max({lim.compression_max:g}, 3 SE) seen twice, InA > 80 % '
+                                       f'of {lim.ina_max_fraction:g} x range, or QPlusAmpl > 80 % of {lim.amp_max_v:g} V; '
+                                       'SE from the steady-window std with the floor correlated over tau'}))
         if not allowed:
             raise Abort('limit', 'no drive level passed the headroom pass')
         return allowed

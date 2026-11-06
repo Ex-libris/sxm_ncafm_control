@@ -32,7 +32,7 @@
   },
   "timing": {
     "pre_s": 2.0,
-    "settle_tau": 8.0,
+    "settle_tau": 10.0,
     "steady_s": 5.0,
     "off_s": 25.0,
     "discard_s": 5.0,
@@ -40,12 +40,12 @@
     "tc_settle_s": 1.0,
     "overhead_s": 4.0
   },
-  "design": {"repeats": 3, "seed": 20261106, "order": "randomized_blocks", "anchors": true, "headroom": true},
+  "design": {"repeats": 5, "seed": 20261106, "order": "randomized_blocks", "anchors": true, "headroom": true},
   "reference": {"drive": 1e-5, "tc": "1 ms"},
   "factors": {
-    "drives": [1e-5, 3e-5, 1e-4, 3e-4, 1e-3, 3e-3],
-    "tcs": ["0.2 ms", "1 ms", "5 ms", "10 ms", "20 ms", "50 ms"],
-    "baseline_tcs": ["0.2 ms", "1 ms", "5 ms", "10 ms", "20 ms", "50 ms"]
+    "drives": [1e-5, 3e-5, 1e-4, 3e-4],
+    "tcs": ["0.2 ms", "1 ms", "10 ms", "50 ms"],
+    "baseline_tcs": ["0.2 ms", "1 ms", "10 ms", "50 ms"]
   },
   "loops": {"afl": "off", "pll": "off"},
   "off_drive": 0.0,
