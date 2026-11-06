@@ -251,11 +251,15 @@ class Campaign:
         counts = dmin * (self.k_cal or 0) / lsb
         check('drive resolution', counts >= lim.min_dac_counts,
               f'smallest drive {dmin:g} = {counts:.0f} DAC counts (limit {lim.min_dac_counts})')
-        fr = A.stats(rec.data['Frequency'].astype(float))
         fuse = self.start_state['used_freq'] or cfg.expect.f0_hz
-        check('Frequency DAC fixed at the used frequency', abs(fr['mean'] - fuse) < lim.freq_tol_hz
-              and fr['std'] < lim.freq_tol_hz,
-              f'mean {fr["mean"]:.4f} Hz (used {fuse} Hz), std {fr["std"]:.2e} Hz: a PLL moving it shows here')
+        scale = self.inst.channel_info(['Frequency'])[1]['Frequency']
+        problems, fr = A.pll_off_check(rec.data['Frequency'], rec.data.get('df'), fuse, lim.freq_tol_hz, scale)
+        detail = (f'Frequency DAC {fr["freq_dac"]:.4f} Hz, std {fr["freq_dac_std"]:.1e} Hz; use {fuse} Hz; '
+                  + (f'df {fr["df_dac"]:+.4f} Hz; ' if 'df_dac' in fr else 'df not recorded; ')
+                  + (f'with the exact DDS scale 1e7/2^32 the DAC reads {fr["freq_dac_dds_scale"]:.4f} Hz '
+                     f'({fr["freq_dds_minus_use"]:+.4f} Hz from use)' if 'freq_dac_dds_scale' in fr else ''))
+        check('PLL off: frequency fixed, no frozen offset', not problems,
+              detail + ('. ' + '; '.join(problems) if problems else ''))
         result.update(k_cal=self.k_cal, drive_dac_zero=s0['mean'], echo={'k1': k1, 'k2': k2, 'flat': flat},
                       freq_dac=fr, ok=all(c['ok'] for c in checks if c['level'] == 'fail'))
         write_new(self._numbered('preflight', '.json'), dumps(result))
@@ -302,6 +306,7 @@ class Campaign:
         self._progress('condition_start', e)
         pre = self.inst.snapshot()
         meta = {**e, 'start': datetime.datetime.now().astimezone().isoformat(), 'expect': asdict(cfg.expect),
+                'freq_tol_hz': lim.freq_tol_hz, 'scales': self.inst.channel_info(ic.channels)[1],
                 'off_drive': cfg.off_drive, 'steady_s': tm.steady_s, 'k_cal': self.k_cal,
                 'f_use': as_number(pre.get(ic.freq_param)), 'rolloff': pre.get(ic.rolloff_param),
                 'loops': {'afl': 'off (operator-confirmed; switch not readable; drive echo checked)',
@@ -407,10 +412,8 @@ class Campaign:
             if m.get('note'):
                 out.append(('state', m['note']))
             return out
-        if math.isfinite(m.get('freq_dac_minus_use', math.nan)):
-            if abs(m['freq_dac_minus_use']) > lim.freq_tol_hz or m.get('freq_dac_std', 0) > lim.freq_tol_hz:
-                out.append(('state', f'Frequency DAC off the used frequency by {m["freq_dac_minus_use"]:.4f} Hz '
-                                     f'(std {m.get("freq_dac_std", math.nan):.2e}): PLL active?'))
+        for p in m.get('pll_off_problems', []):
+            out.append(('state', p))
         if e['kind'] == 'baseline':
             z = self.dac_zero + cfg.off_drive * (self.k_cal or 0)
             if abs(m.get('drive_dac_baseline', 0) - z) > max(1e-9, 0.01 * cfg.reference.drive * (self.k_cal or 1)):

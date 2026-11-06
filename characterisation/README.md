@@ -60,9 +60,19 @@ The campaign does not add any communication code. It uses only these existing ca
   non-zero gains). So "AFL off" means the operator confirms it (`operator.afl_off_confirmed`) **and** the
   runner checks it physically. With AFL off, the Drive DAC follows `dnc.drive` in proportion and stays flat.
   A running AFL breaks either property.
-- **"PLL off" means Kp = Ki = 0** (the manual), read back before and after every condition. Gains of zero can
-  still freeze an old frequency offset, so the runner also checks that the Frequency DAC equals the used
-  frequency and does not move.
+- **"PLL off" means Kp = Ki = 0** (the manual), read back before and after every condition, plus three
+  physical checks (`analysis.pll_off_check`): the Frequency DAC must be flat (a PLL that acts moves it),
+  **df** must be ~0 (gains set to 0 while locked can leave the offset frozen in), and the Frequency DAC must
+  equal `use` within max(5 mHz, 3 ppm).
+- **The driver's Frequency scale is rounded.** `CHANNELS['Frequency']` is 0.00232831 Hz/count (6 digits); the
+  DDS step is 10 MHz/2^32 = 0.00232830644 Hz, +1.5 ppm lower, i.e. the IOCTL Frequency reads **~39 mHz high**
+  at 25.56 kHz. Instrument, 2026-11-06: Frequency DAC 25563.7495 Hz, flat, at `use` = 25563.71 Hz; with the
+  exact scale 25563.7104 Hz. The level check therefore allows 3 ppm and reports the exact-scale value. (A fix
+  of the table belongs in sxm_anfatec, after confirming at a second `use` value.)
+- **Transient read refusals.** Right after a drive change SXM re-ranges the output gain, and the DNC "Range"
+  radio group can read with no button checked; the strict bridge then refuses the whole DNC window. Reads and
+  writes retry such refusals 3 times, 0.7 s apart (writes set absolute values, so repeating one is harmless);
+  a write SXM itself rejects is never retried.
 - **Units of the `dnc.drive` field are not readable.** All drive levels are in "SXM units". The preflight
   measures k_cal = Drive-DAC volts per SXM unit and checks that the smallest drive is ≥ 200 DAC counts.
 - **QPlusAmpl is in volts.** Nothing here converts it to displacement.
@@ -142,7 +152,7 @@ Raw data: ~0.5 MB per condition (lossless int32 DAC counts + float32 time), ~60 
 | V1 | `dnc.drive` is the drive field and AFL is off | drive echo: Drive DAC follows off→d→2d in proportion (±3 %), flat (std/level < 0.3 %) | refused: check the AFL switch; if AFL is off, the field mapping is wrong (fallback: DDE `DNCPara(4, v)`) |
 | V2 | `dnc.tc` writes reach the lock-in | analysis: baseline ∝ TC^-½ and ring-down delay ≈ 2·TC (12 dB/oct) | if the baseline does not change with TC, the write only changed the GUI |
 | V3 | TC levels exist (0.2 ms and 5 ms in particular) | `options('dnc.tc')` at preflight | refused, with SXM's list printed: edit `factors.tcs` |
-| V4 | PLL off | Kp = Ki = 0 read back; Frequency DAC = used frequency ± 5 mHz, flat | refused / aborted |
+| V4 | PLL off | Kp = Ki = 0 read back; Frequency DAC flat; df ≈ 0 (no frozen offset); Frequency DAC = use within max(5 mHz, 3 ppm) | refused / aborted |
 | V5 | drive resolution | smallest drive ≥ 200 DAC counts | refused: raise the drives or fix the output gain |
 | V6 | polling rate | ≥ 50 % of 2000 sweeps/s (warning below 80 %) | lower `sample_rate_hz` |
 | V7 | Drive DAC 0 at zero drive | baseline conditions | aborted (state) |
@@ -162,7 +172,7 @@ Raw data: ~0.5 MB per condition (lossless int32 DAC counts + float32 time), ~60 
                  "tc_param": "dnc.tc",                // VERIFY (V2)
                  "freq_param": "dnc.used_freq", "rolloff_param": "dnc.rolloff",   // read only
                  "output_gain_expected": null,        // e.g. "±0.1": refused if SXM shows another range
-                 "channels": ["QPlusAmpl","Phase","Drive","Frequency","InA"],
+                 "channels": ["QPlusAmpl","Phase","Drive","Frequency","df","InA"],
                  "sample_rate_hz": 2000},
   "expect":     {"f0_hz": 25563.8, "q": 44451},      // sets the waits (tau = Q/(pi f0)) and a sanity check
   "limits":     {"drive_max": 1e-4, "amp_max_v": 0.05, "ina_max_fraction": 0.5, "drive_echo_rel_tol": 0.03,

@@ -30,6 +30,8 @@ SNAPSHOT_NAMES = (
     'feedback.mode', 'z.feedback_off', 'stm.status',
 )
 
+RETRIES, RETRY_PAUSE_S = 3, 0.7        # transient read refusals (see QPlusSxm._transient)
+
 # InA input range by DNC input gain (manual: Gain 1 = +-7 V, Gain 10 = +-0.7 V).
 INA_RANGE_V = {'1': 7.0, '10': 0.7}
 
@@ -98,6 +100,9 @@ class QPlusSxm:
         from sxm_anfatec import CHANNELS
         from sxm_anfatec.bridge import AnfatecSXMBridge
         from sxm_anfatec.writer import AnfatecSXMWriter
+        from sxm_anfatec.bridge import SXMBridgeError
+        from sxm_anfatec.writer import SXMWriteError
+        self._bridge_error, self._write_error = SXMBridgeError, SXMWriteError
         self.version = sxm_anfatec.__version__
         self.channels = CHANNELS
         self.writer = writer or AnfatecSXMWriter(AnfatecSXMBridge(strict=True))
@@ -113,11 +118,20 @@ class QPlusSxm:
 
     # -- settings --------------------------------------------------------------------------------------
 
+    def _transient(self, exc: Exception) -> bool:
+        """A read refusal (the strict bridge found a field empty, e.g. the DNC Range radio group while SXM
+        re-ranges the output gain after a drive change), not a write SXM rejected."""
+        return isinstance(exc, self._bridge_error) and not isinstance(exc, self._write_error)
+
     def read(self, name: str) -> tuple[Any, str | None]:
-        try:
-            return self.writer.get(name), None
-        except Exception as exc:                                     # noqa: BLE001 - recorded, never raised
-            return None, f'{type(exc).__name__}: {exc}'
+        for attempt in range(1, RETRIES + 1):
+            try:
+                return self.writer.get(name), None
+            except Exception as exc:                                 # noqa: BLE001 - recorded, never raised
+                if attempt < RETRIES and self._transient(exc):
+                    time.sleep(RETRY_PAUSE_S)
+                    continue
+                return None, f'{type(exc).__name__}: {exc}' + (f' (after {attempt} tries)' if attempt > 1 else '')
 
     def snapshot(self, names=SNAPSHOT_NAMES) -> dict:
         out = {'time': now_iso()}
@@ -130,9 +144,20 @@ class QPlusSxm:
         return self.writer.options(name)
 
     def set(self, name: str, value: Any) -> dict:
+        """Write and read back. A transient read refusal is retried (RETRIES x, RETRY_PAUSE_S apart): every
+        write here sets an absolute value, so sending it again is harmless."""
         if name not in self.writable:
             raise SafetyError(f'{name!r} is not writable by this campaign (allowed: {sorted(self.writable)})')
-        return self.writer.set(name, value)
+        for attempt in range(1, RETRIES + 1):
+            try:
+                res = self.writer.set(name, value)
+                res['attempts'] = attempt
+                return res
+            except Exception as exc:
+                if attempt < RETRIES and self._transient(exc):
+                    time.sleep(RETRY_PAUSE_S)
+                    continue
+                raise
 
     # -- capture -------------------------------------------------------------------------------------------
 

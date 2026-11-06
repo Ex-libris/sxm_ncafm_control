@@ -53,6 +53,8 @@ class SimSensor:
     afl_on: bool = False
     afl_level: float = 3e-5                # drive the 'AFL' holds when afl_on
     pll_on: bool = False
+    freq_rel_error: float = 0.0            # Frequency DAC read with a rounded scale (+1.5e-6 on the instrument)
+    df_frozen: float = 0.0                 # PLL offset left in after its gains were set to 0
     pll_gains: tuple = (0.0, 0.0)
     seed: int = 1
 
@@ -153,6 +155,12 @@ class SimQPlus:
         if self.s.amp_sat_v:
             amp = self.s.amp_sat_v * np.tanh(amp / self.s.amp_sat_v)
         out = {}
+        use = self.state['dnc.used_freq']
+        dfv = np.full(n, self.s.df_frozen, float)
+        if self.s.pll_on and ('Frequency' in names or 'df' in names):
+            dfv = dfv + self._f_walk + np.cumsum(self.rng.standard_normal(n)) * 2e-4
+            self._f_walk = float(dfv[-1] - self.s.df_frozen)
+        freq = (use + dfv) * (1 + self.s.freq_rel_error)
         for nm in names:
             if nm == 'QPlusAmpl':
                 out[nm] = amp
@@ -165,11 +173,9 @@ class SimQPlus:
                     level = level * (1 + 0.01 * self.rng.standard_normal(n))
                 out[nm] = np.round(np.full(n, level) / lsb) * lsb
             elif nm == 'Frequency':
-                f = np.full(n, self.state['dnc.used_freq'], float)
-                if self.s.pll_on:
-                    f = f + self._f_walk + np.cumsum(self.rng.standard_normal(n)) * 2e-4
-                    self._f_walk = float(f[-1] - self.state['dnc.used_freq'])
-                out[nm] = f
+                out[nm] = freq
+            elif nm == 'df':
+                out[nm] = dfv
             elif nm == 'InA':
                 ph = self.rng.uniform(0, 2 * math.pi, n)
                 out[nm] = math.sqrt(2) * self.s.ina_v_per_v * np.abs(a) * np.sin(ph)
