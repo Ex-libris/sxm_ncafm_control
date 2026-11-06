@@ -13,8 +13,8 @@ records). Stages 3 and 5–8 are designed below and come later, as separate stag
 1. In SXM: tip retracted, Amplitude feedback OFF, PLL Kp = Ki = 0, DNC Range (output gain) fixed (e.g. ±0.1).
 2. Run on: *SXM instrument*. Tick *Amplitude feedback is switched OFF* and *Tip retracted, no surface*.
 3. *Preflight* (~15 s). If it says REFUSED, the reason is in the status line and the run folder.
-4. *Blocks this run* = 1, *Run* (headroom + block 1, ~29 min). Then *Resume run...* on the same folder for
-   blocks 2 and 3 (~25 min each). Each finished batch is analysed automatically (`derived/<time>/report.md`).
+4. *Blocks this run* = 1, *Run* (headroom + block 1, ~33 min). Then *Resume run...* on the same folder for
+   blocks 2 and 3 (~29 min each). Each finished batch is analysed automatically (`derived/<time>/report.md`).
 5. *Stop* at any time: the record ends, the drive goes to 0 and the TimeConstant back to its start value.
 
 The tab shares the app's driver handle: stop Scope, Live Scope and Single Step captures first. Results go
@@ -78,6 +78,9 @@ The campaign does not add any communication code. It uses only these existing ca
   a write SXM itself rejects is never retried.
 - **Units of the `dnc.drive` field are not readable.** All drive levels are in "SXM units". The preflight
   measures k_cal = Drive-DAC volts per SXM unit and checks that the smallest drive is ≥ 200 DAC counts.
+- **The Drive field rounds to the digits it shows.** On the instrument (2026-11-06) 1e-05 and 2e-05 were kept
+  but 2.5e-06 showed as 0.0, so the smallest step is 1e-5 in the field's present unit (V rms per the manual;
+  1e-5 = 10 µV). The preflight writes every planned level once, reads it back and refuses levels SXM changes.
 - **QPlusAmpl is in volts.** Nothing here converts it to displacement.
 - **Output gain auto-ranges with the drive** (manual), which changes the DAC resolution. The runner records
   `dnc.output_gain` before and after each condition and warns when it changes. Fix it in SXM (e.g. ±0.1).
@@ -119,7 +122,7 @@ reconnect and on close.
 
 | Factor | Levels | Stage | Responses compared |
 |---|---|---|---|
-| Drive amplitude (SXM units) | 2.5e-6, 5e-6, **1e-5 (reference)**, 2e-5, 4e-5. The headroom pass decides how far up to go | 2 | A_ss, phase, Drive DAC, A/D slope and offset, compression |
+| Drive amplitude (SXM units: V rms per the manual) | **1e-5 (reference, the smallest step the field keeps)**, 3e-5, 1e-4, 3e-4, 1e-3, 3e-3 (half decades up to the usual maximum 3e-3 V). The headroom pass decides how far up to go | 2 | A_ss, phase, Drive DAC, A/D slope and offset, compression |
 | DNC lock-in TC | 0.2, 1, 5, 10, 20, 50 ms (checked against SXM's list) | 1, 2 | baseline mean/std/ASD, ring-down τ and delay, steady noise |
 | Drive state | zero (baseline conditions) vs driven | 1 | noise floor vs TC (white noise: R ∝ TC^-½) |
 | Excitation frequency | coarse ±5 Hz / 0.25 Hz, fine ±1 Hz / 0.05 Hz around f0 | 3 (later) | f0, Q (Lorentzian), phase curve, drive-dependent shift |
@@ -141,12 +144,12 @@ writes the new TC inside the record (so the transition is kept), then 30 s at ze
 | Part | Conditions | Time |
 |---|---|---|
 | Preflight (read-backs, rate, drive echo off→1e-5→2e-5→off) | – | ~15 s |
-| Headroom pass at TC 1 ms, ascending drive, stops at compression > 3 %, InA > 40 % of range, or QPlusAmpl > 80 % of the limit | 5 | ~3.5 min |
-| Block 1: anchor + 30 drive × TC cells + 6 baselines, shuffled | 37 | ~25 min |
-| Block 2, block 3 (3 also closes with an anchor) | 37 + 38 | ~25 + 26 min |
-| **Total** | 117 records | **~79 min** (run as 3 batches with `--blocks 1`) |
+| Headroom pass at TC 1 ms, ascending drive, stops at compression > 3 %, InA > 40 % of range, or QPlusAmpl > 80 % of the limit | 6 | ~4 min |
+| Block 1: anchor + 36 drive × TC cells + 6 baselines, shuffled | 43 | ~29 min |
+| Block 2, block 3 (3 also closes with an anchor) | 43 + 44 | ~29 + 30 min |
+| **Total** | 136 records | **~92 min** (run as 3 batches with `--blocks 1`) |
 
-Raw data: ~0.5 MB per condition (lossless int32 DAC counts + float32 time), ~60 MB per campaign.
+Raw data: ~0.5 MB per condition (lossless int32 DAC counts + float32 time), ~70 MB per campaign.
 
 ## 5. Instrument-specific items to verify (preflight does V1, V3–V6 itself)
 
@@ -178,14 +181,14 @@ Raw data: ~0.5 MB per condition (lossless int32 DAC counts + float32 time), ~60 
                  "channels": ["QPlusAmpl","Phase","Drive","Frequency","df","InA"],
                  "sample_rate_hz": 2000},
   "expect":     {"f0_hz": 25563.8, "q": 44451},      // sets the waits (tau = Q/(pi f0)) and a sanity check
-  "limits":     {"drive_max": 1e-4, "amp_max_v": 0.05, "ina_max_fraction": 0.5, "drive_echo_rel_tol": 0.03,
+  "limits":     {"drive_max": 3e-3, "amp_max_v": 0.05, "ina_max_fraction": 0.5, "drive_echo_rel_tol": 0.03,
                  "drive_flat_rel": 0.003, "freq_tol_hz": 0.005, "compression_max": 0.03, "min_dac_counts": 200,
                  "max_total_min": 120, "max_conditions": 250, "condition_timeout_s": 240},
   "timing":     {"pre_s": 2, "settle_tau": 8, "steady_s": 5, "off_s": 25, "discard_s": 5, "baseline_s": 30,
                  "tc_settle_s": 1, "overhead_s": 4},
   "design":     {"repeats": 3, "seed": 20261106, "order": "randomized_blocks", "anchors": true, "headroom": true},
   "reference":  {"drive": 1e-5, "tc": "1 ms"},
-  "factors":    {"drives": [2.5e-6, 5e-6, 1e-5, 2e-5, 4e-5],
+  "factors":    {"drives": [1e-5, 3e-5, 1e-4, 3e-4, 1e-3, 3e-3],    // V rms; levels SXM's Drive field keeps
                  "tcs": ["0.2 ms","1 ms","5 ms","10 ms","20 ms","50 ms"],
                  "baseline_tcs": ["0.2 ms","1 ms","5 ms","10 ms","20 ms","50 ms"]},   // [] = no stage 1
   "loops":      {"afl": "off", "pll": "off"},         // the only values this stage accepts
@@ -235,7 +238,7 @@ scales, run order (idx, block), status, aborts, warnings, online metrics and the
 
 ## 9. Example output (SIMULATED: format only, not a measurement)
 
-Default config on `--sim` (f0 25 563.8 Hz, Q 44 451, 1e-7 V/√Hz detector noise), 117 records, all `ok`:
+Earlier default config (5 drives 2.5e-6...4e-5) on `--sim` (f0 25 563.8 Hz, Q 44 451, 1e-7 V/√Hz detector noise), 117 records, all `ok`:
 
 ```
 ## 3. Ring-down: mechanical decay vs readout filter

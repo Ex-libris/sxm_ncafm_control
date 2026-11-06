@@ -56,7 +56,7 @@ class Expect:
 
 @dataclass
 class Limits:
-    drive_max: float = 1e-4                  # SXM drive units; levels above are refused
+    drive_max: float = 3e-3                  # V rms (SXM drive units); levels above are refused
     amp_max_v: float = 0.05                  # QPlusAmpl above this: drive off at once, campaign aborted
     ina_max_fraction: float = 0.5            # |InA| peak over the InA input range (x1: 7 V, x10: 0.7 V)
     drive_echo_rel_tol: float = 0.03         # Drive DAC vs k_cal x command
@@ -98,7 +98,7 @@ class Reference:
 
 @dataclass
 class Factors:
-    drives: list = field(default_factory=lambda: [2.5e-6, 5e-6, 1e-5, 2e-5, 4e-5])
+    drives: list = field(default_factory=lambda: [1e-5, 3e-5, 1e-4, 3e-4, 1e-3, 3e-3])   # V rms; half decades, 1e-5 = the field's step
     tcs: list = field(default_factory=lambda: ['0.2 ms', '1 ms', '5 ms', '10 ms', '20 ms', '50 ms'])
     baseline_tcs: list = field(default_factory=list)   # zero-drive baselines per block; [] = none
 

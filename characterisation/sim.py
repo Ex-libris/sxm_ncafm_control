@@ -55,6 +55,7 @@ class SimSensor:
     pll_on: bool = False
     freq_rel_error: float = 0.0            # Frequency DAC read with a rounded scale (+1.5e-6 on the instrument)
     df_frozen: float = 0.0                 # PLL offset left in after its gains were set to 0
+    drive_decimals: int | None = None      # SXM's Drive field rounds to this many decimals (5 on the instrument)
     pll_gains: tuple = (0.0, 0.0)
     seed: int = 1
 
@@ -115,6 +116,13 @@ class SimQPlus:
         before = self.state.get(name)
         if name == 'dnc.tc' and value not in TC_OPTIONS:
             raise ValueError(f'dnc.tc: {value!r} is not one of {TC_OPTIONS}')
+        if name == 'dnc.drive' and self.s.drive_decimals is not None:
+            shown = round(float(value), self.s.drive_decimals)
+            if shown != value:                                       # what the writer raises (SXMWriteError)
+                self.state[name] = shown
+                err = ValueError(f'dnc.drive: sent {value!r} but SXM shows {shown!r}')
+                err.result = {'before': before, 'after': shown}
+                raise err
         self.state[name] = value
         return {'name': name, 'before': before, 'requested': value, 'after': self.state[name]}
 

@@ -18,7 +18,7 @@
   },
   "expect": {"f0_hz": 25563.8, "q": 44451},
   "limits": {
-    "drive_max": 1e-4,
+    "drive_max": 3e-3,
     "amp_max_v": 0.05,
     "ina_max_fraction": 0.5,
     "drive_echo_rel_tol": 0.03,
@@ -43,7 +43,7 @@
   "design": {"repeats": 3, "seed": 20261106, "order": "randomized_blocks", "anchors": true, "headroom": true},
   "reference": {"drive": 1e-5, "tc": "1 ms"},
   "factors": {
-    "drives": [2.5e-6, 5e-6, 1e-5, 2e-5, 4e-5],
+    "drives": [1e-5, 3e-5, 1e-4, 3e-4, 1e-3, 3e-3],
     "tcs": ["0.2 ms", "1 ms", "5 ms", "10 ms", "20 ms", "50 ms"],
     "baseline_tcs": ["0.2 ms", "1 ms", "5 ms", "10 ms", "20 ms", "50 ms"]
   },
