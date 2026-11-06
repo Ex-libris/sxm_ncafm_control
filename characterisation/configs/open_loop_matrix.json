@@ -1,0 +1,53 @@
+{
+  "kind": "qplus_open_loop_matrix",
+  "version": 1,
+  "name": "open_loop_matrix",
+  "notes": "Stages 1+2: zero-drive baselines and drive x DNC lock-in TC, AFL and PLL off, no surface. Set both operator flags to true after checking SXM.",
+  "operator": {
+    "afl_off_confirmed": false,
+    "no_surface_confirmed": false
+  },
+  "instrument": {
+    "drive_param": "dnc.drive",
+    "tc_param": "dnc.tc",
+    "freq_param": "dnc.used_freq",
+    "rolloff_param": "dnc.rolloff",
+    "output_gain_expected": null,
+    "channels": ["QPlusAmpl", "Phase", "Drive", "Frequency", "InA"],
+    "sample_rate_hz": 2000
+  },
+  "expect": {"f0_hz": 25563.8, "q": 44451},
+  "limits": {
+    "drive_max": 1e-4,
+    "amp_max_v": 0.05,
+    "ina_max_fraction": 0.5,
+    "drive_echo_rel_tol": 0.03,
+    "drive_flat_rel": 0.003,
+    "freq_tol_hz": 0.005,
+    "compression_max": 0.03,
+    "min_dac_counts": 200,
+    "max_total_min": 120,
+    "max_conditions": 250,
+    "condition_timeout_s": 240
+  },
+  "timing": {
+    "pre_s": 2.0,
+    "settle_tau": 8.0,
+    "steady_s": 5.0,
+    "off_s": 25.0,
+    "discard_s": 5.0,
+    "baseline_s": 30.0,
+    "tc_settle_s": 1.0,
+    "overhead_s": 4.0
+  },
+  "design": {"repeats": 3, "seed": 20261106, "order": "randomized_blocks", "anchors": true, "headroom": true},
+  "reference": {"drive": 1e-5, "tc": "1 ms"},
+  "factors": {
+    "drives": [2.5e-6, 5e-6, 1e-5, 2e-5, 4e-5],
+    "tcs": ["0.2 ms", "1 ms", "5 ms", "10 ms", "20 ms", "50 ms"],
+    "baseline_tcs": ["0.2 ms", "1 ms", "5 ms", "10 ms", "20 ms", "50 ms"]
+  },
+  "loops": {"afl": "off", "pll": "off"},
+  "off_drive": 0.0,
+  "end_drive": "start"
+}

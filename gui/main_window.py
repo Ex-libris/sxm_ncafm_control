@@ -17,6 +17,7 @@ Tabs:
     - QPlus Calibration: Sweep amplitude and calibrate delta-topography response.
     - Constant Height: Control Z in constant-height mode.
     - Tuning: run sheets of step tests for the PLL / amplitude loop (G and rho ramps, settings ramps, quiet-window noise).
+    - Sensor Characterisation: the qPlus by itself, open loop: drive x DNC TimeConstant campaigns (characterisation/).
 
 Safety:
     Displays a footer warning if voltage-like parameters exceed ±10 V.
@@ -42,6 +43,7 @@ from sxm_ncafm_control.gui.single_step_tab import SingleStepTab
 from sxm_ncafm_control.gui.qplus_calibration_tab import QplusCalibrationTab
 from sxm_ncafm_control.gui.z_const_acquisition import ZConstAcquisition
 from sxm_ncafm_control.gui.runsheet_tab import RunSheetTab
+from sxm_ncafm_control.gui.characterisation_tab import CharacterisationTab
 from sxm_ncafm_control.gui.gui_accessibility_manager import (
     AccessibilityManager, 
     AccessibilityToolbar,
@@ -146,6 +148,7 @@ class MainWindow(QtWidgets.QWidget):
         self.qplus_tab = QplusCalibrationTab(conn.dde, reader=conn.reader)
         self.topo_hold_tab = ZConstAcquisition(conn.dde, conn.driver)
         self.tuning_tab = RunSheetTab(conn.dde, conn.driver, params_tab=self.params_tab, reader=conn.reader)
+        self.characterisation_tab = CharacterisationTab(conn.driver)
 
         # Link StepTest to Scope and Tabs
         self.step_tab.scope_tab = self.scope_tab
@@ -162,6 +165,7 @@ class MainWindow(QtWidgets.QWidget):
         self.tabs.addTab(self.qplus_tab, "QPlus Amplitude calibration")
         self.tabs.addTab(self.topo_hold_tab, "Constant Height")
         self.tabs.addTab(self.tuning_tab, "Tuning")
+        self.tabs.addTab(self.characterisation_tab, "Sensor Characterisation")
         self.step_tab.scope_tab_index = self.tabs.indexOf(self.scope_tab)   # Step Test jumps there on Start
 
         # Connect custom parameters from ParamsTab to StepTestTab
@@ -213,6 +217,8 @@ class MainWindow(QtWidgets.QWidget):
         self.live_scope_tab.driver = self.conn.driver
         self.single_step_tab.dde = self.conn.dde
         self.single_step_tab.driver = self.conn.driver
+        self.characterisation_tab.driver = self.conn.driver
+        self.characterisation_tab._update_enabled()
 
     def reconnect_hardware(self):
         """
@@ -247,6 +253,9 @@ class MainWindow(QtWidgets.QWidget):
 
         if self.single_step_tab.is_running():        # keeps what it recorded; writes X0 back if asked to
             self.single_step_tab.stop()
+
+        if self.characterisation_tab.runner_active():  # waits for drive -> off, TC -> start before the handle goes
+            self.characterisation_tab.stop(wait_ms=20000)
 
         self.topo_hold_tab.timer.stop()
 
@@ -385,7 +394,8 @@ class MainWindow(QtWidgets.QWidget):
             self.suggest_tab,
             self.qplus_tab,
             self.topo_hold_tab,
-            self.tuning_tab
+            self.tuning_tab,
+            self.characterisation_tab
         ]
         
         for tab in tabs_to_update:
@@ -590,6 +600,8 @@ class MainWindow(QtWidgets.QWidget):
             self.tuning_tab.stop()
         if self.single_step_tab.is_running():        # its recorder reads the driver
             self.single_step_tab.stop()
+        if self.characterisation_tab.runner_active():  # restores drive and TC before the driver closes
+            self.characterisation_tab.stop(wait_ms=20000)
 
         # The IOCTL driver is shared across tabs (Scope, Constant Height), so it
         # is closed once here rather than by any individual tab.

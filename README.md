@@ -121,6 +121,7 @@ An example of the script running with SXM in the background. The scope improves 
 - Use the Parameters tab to adjust feedback settings
 - Use Step Test tab to perform square wave tests
 - Use Scope tab for real-time channel monitoring (data acquired directly from controller driver)
+- Use the Sensor Characterisation tab to characterise the qPlus sensor by itself (no surface, AFL and PLL off): drive x lock-in TimeConstant campaigns with repeats, ring-down Q, baselines and a report. See [characterisation/README.md](characterisation/README.md)
 
 ## Requirements
 - Windows (required for SXM/DDE interface)
@@ -141,6 +142,7 @@ sxm_ncafm_control/
 ├── app.py                                  # Main entry point
 ├── common.py                               # Shared functions between the tabs
 ├── connection.py                           # Creation of the DDE and IOCTL connections
+├── characterisation/                      # qPlus sensor characterisation without a surface (pure logic, CLI, configs)
 └── gui/                                    # GUI components
     ├── params_tab.py                       # Parameter adjustment
     ├── step_test_tab.py                    # Square wave testing
