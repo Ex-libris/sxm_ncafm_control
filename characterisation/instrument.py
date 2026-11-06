@@ -91,7 +91,10 @@ class QPlusSxm:
         """``driver``: an open SXMIOCTL to share (the app's ``conn.driver``; it is not closed here). Without
         one a handle is opened, which fails while another program (the app) holds it."""
         import sxm_anfatec
-        sxm_anfatec.require('2026.10.09')
+        # 2026.11.06: an empty DNC status bar (no resonance sweep since SXM started) no longer makes the
+        # strict bridge refuse the whole DNC window, i.e. dnc.drive / dnc.used_freq / dnc.tc. Only this tool
+        # needs it, so the app's SXM_ANFATEC_MIN stays lower.
+        sxm_anfatec.require('2026.11.06')
         from sxm_anfatec import CHANNELS
         from sxm_anfatec.bridge import AnfatecSXMBridge
         from sxm_anfatec.writer import AnfatecSXMWriter
