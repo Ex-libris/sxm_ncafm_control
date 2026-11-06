@@ -22,7 +22,7 @@ def small_cfg(**over) -> C.Config:
     cfg = C.Config()
     cfg.operator.afl_off_confirmed = cfg.operator.no_surface_confirmed = True
     cfg.design.repeats = 1
-    cfg.factors.drives = [5e-6, 1e-5]
+    cfg.factors.drives = [1e-5, 2e-5]               # whole multiples of the 1e-5 reference
     cfg.factors.tcs = ['1 ms', '20 ms']
     cfg.factors.baseline_tcs = ['1 ms']
     cfg.timing.off_s = 15.0
@@ -33,13 +33,15 @@ def small_cfg(**over) -> C.Config:
 
 
 class Recorder(SimQPlus):
-    """Remembers every name written."""
+    """Remembers every name written (and every drive value)."""
     def __init__(self, *a, **k):
         super().__init__(*a, **k)
-        self.written = []
+        self.written, self.drive_values = [], []
 
     def set(self, name, value):
         self.written.append(name)
+        if name == 'dnc.drive':
+            self.drive_values.append(value)
         return super().set(name, value)
 
 
@@ -140,18 +142,19 @@ class Safety(unittest.TestCase):
 
     def test_compression_ends_the_headroom_ladder(self):
         cfg = small_cfg()
-        cfg.factors.drives = [2.5e-6, 5e-6, 1e-5, 2e-5, 4e-5]
+        cfg.factors.drives = [1e-5, 2e-5, 4e-5, 8e-5, 1.6e-4]
         cfg.factors.tcs = ['1 ms']
         cfg.factors.baseline_tcs = []
         out, _, d = run(cfg, SimSensor(amp_sat_v=0.004), tmp=self.tmp.name, preflight_only=False, max_blocks=1)
         allowed = json.loads((d / 'headroom.json').read_text(encoding='utf-8'))['allowed']
         self.assertLess(len(allowed), 5)
-        self.assertIn(2.5e-6, allowed)
+        self.assertIn(1e-5, allowed)
 
     def test_amplitude_trip_sets_drive_off_and_aborts(self):
         cfg = small_cfg()
         cfg.design.headroom = False
         cfg.reference.drive = 2.5e-6                                # echo and anchors stay below the limit
+        cfg.factors.drives = [5e-6, 1e-5]                           # multiples of the 2.5e-6 reference
         cfg.limits.amp_max_v = 0.0007                               # the 1e-5 cells (1 mV) exceed it
         out, inst, d = run(cfg, tmp=self.tmp.name, start_drive=2.5e-6)
         self.assertEqual(out['status'], 'aborted', out['message'])
@@ -287,25 +290,29 @@ if __name__ == '__main__':
 class DriveLevels(unittest.TestCase):
     """SXM's Drive field keeps only the digits it shows (5 decimals on the instrument)."""
 
-    def test_rounded_level_is_refused_at_preflight(self):
+    def test_level_not_a_multiple_of_the_reference_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = small_cfg()
             cfg.factors.drives = [2.5e-6, 1e-5]
             out, inst, d = run(cfg, SimSensor(drive_decimals=5), tmp=tmp)
             self.assertEqual(out['status'], 'refused')
-            self.assertIn('drive levels SXM accepts', out['message'])
-            self.assertIn('2.5e-06 -> 0.0', out['message'])
+            self.assertIn('drive levels SXM can hold', out['message'])
+            self.assertIn('2.5e-06', out['message'])
             self.assertEqual(inst.state['dnc.drive'], 0.0)
             self.assertFalse(list((d / 'raw').glob('c0*.json')))       # no condition ran
 
-    def test_default_levels_are_kept(self):
+    def test_default_levels_pass_without_writing_them(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = C.load(DEFAULT)
             cfg.operator.afl_off_confirmed = cfg.operator.no_surface_confirmed = True
-            out, _, d = run(cfg, SimSensor(drive_decimals=5), tmp=tmp, preflight_only=True)
+            out, inst, d = run(cfg, SimSensor(drive_decimals=5), tmp=tmp, preflight_only=True)
             self.assertEqual(out['status'], 'preflight', out['message'])
             pf = json.loads(next(d.glob('preflight_*.json')).read_text(encoding='utf-8'))
             self.assertEqual(set(pf['drive_levels_shown']), {'1e-05', '3e-05', '0.0001', '0.0003', '0.001', '0.003'})
+            # the preflight writes only the echo (off, 1e-5, 2e-5, off) and the restore: never the high levels
+            drive_writes = [w for w in inst.written if w == 'dnc.drive']
+            self.assertLessEqual(len(drive_writes), 6)
+            self.assertLessEqual(max(inst.drive_values), 2e-5)
 
 
 class PllOffCheck(unittest.TestCase):

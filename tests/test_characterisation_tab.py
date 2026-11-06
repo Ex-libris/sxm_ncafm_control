@@ -18,7 +18,7 @@ app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 def small_config(folder: Path) -> Path:
     d = json.loads(DEFAULT_CONFIG.read_text(encoding='utf-8'))
     d['design']['repeats'] = 1
-    d['factors'].update(drives=[5e-6, 1e-5], tcs=['1 ms', '20 ms'], baseline_tcs=['1 ms'])
+    d['factors'].update(drives=[1e-5, 2e-5], tcs=['1 ms', '20 ms'], baseline_tcs=['1 ms'])
     d['timing'].update(off_s=15.0, baseline_s=10.0)
     p = folder / 'small.json'
     p.write_text(json.dumps(d), encoding='utf-8')
