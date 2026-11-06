@@ -110,6 +110,32 @@ Goal: tune the PLL or the amplitude loop the way it is done by hand - set parame
 - `gui/runsheet_tab.py` - `RunSheetTab` (the "Tuning" tab): loop and SXM read-back, anchor (= SXM gains while the sheet is empty), train settings, *Add a ramp* (values prefilled per loop from `runsheet.DEFAULT_VALUES`), the sheet table (status colour, rise up / down, overshoot, Drive sigma or Phase peak, amplitude noise, df per pixel; best = clean with the lowest df per pixel, starred), plots of the selected condition (averaged step up / down, controller output, quiet-window spectrum, recording with marks) and *Ramp trends* (speed and noise against the ramped value), sheet save / load, *Stage gains in Parameters*, export. Checks block Run when offline, without a confirmed retracted tip, with an empty sheet or a bad anchor.
 - `tuning/loopid.py`, `trial.py` - physical identification of a PI loop from one train; a diagnostic, not used for decisions. Test fixtures: `tests/sim.py` (simulators), `tests/fake_instrument.py` (`FakeInstrument` PLL, `FakeAFLInstrument` amplitude loop with Drive clipped at zero, both real time).
 
+### Sensor characterisation (`characterisation/` pure numpy/scipy; `gui/characterisation_tab.py`)
+The qPlus sensor **by itself** (tip retracted, no surface), open loop: zero-drive baselines and drive x DNC TimeConstant
+campaigns, in seeded shuffled blocks with repeats and drift anchors. Plan, interface notes, factor matrix, later stages
+(frequency sweep, AFL, PLL, thermal stiffness): `characterisation/README.md`.
+- `config.py` - JSON config (`kind: "qplus_open_loop_matrix"`, unknown keys refused, `loops` must be off), schedule,
+  time estimate. `instrument.py` - `QPlusSxm`: a **write allowlist** (only `dnc.drive` and `dnc.tc`, through
+  `AnfatecSXMWriter`; anything else raises `SafetyError`), `snapshot()` (read-backs via the writer), `record()` (polled
+  IOCTL capture on its own thread, writes at scheduled offsets with `t_cmd` / `t_ack` marks, a QPlusAmpl / InA trip
+  that sets the drive to off at once). It takes the app's `conn.driver` and never closes a handle it did not open.
+  `sim.py` - `SimQPlus`, same methods (driven oscillator + n-stage lock-in, fault switches).
+- `runner.py` - `Campaign.run(progress, stop)`: preflight (operator flags, PLL gains = 0, TC levels offered by SXM,
+  **drive echo**: the Drive DAC must follow off -> d -> 2d in proportion and stay flat, which is the physical AFL-off check
+  because the AFL On/Off switch is not readable; Frequency DAC fixed = PLL off), headroom ladder, blocks, per-condition
+  read-back before / after and checks (abort classes limit / state / error), raw files created exclusively (never
+  overwritten; int32 DAC counts + scales), resume, restore (drive -> off after a stop / abort, -> start value after a
+  normal end; TC -> start). `STOP` file in the run folder also stops.
+- `analysis.py` / `analyse.py` - step times from the Drive DAC, steady stats, ring-down fit (R^2 = P0 e^{-2t/tau} + c
+  after the filter settles, SE inflated by sqrt(N/N_eff)), ring-up, baseline with an automatically extended discard,
+  noise density, cells with t-CIs, linearity, tau vs TC, drift; writes a new `derived/<time>/` (report.md, csv, json,
+  matplotlib plots if installed).
+- `gui/characterisation_tab.py` - `CharacterisationTab(driver)`: config, Run on SXM / Simulation, blocks per run, the two
+  operator tick boxes (AFL off, no surface), Preflight / Run / Resume / Stop / Analyse, progress, results table, log.
+  `CampaignThread` runs the job; writes are Win32 messages (thread-safe), no DDE. `MainWindow` pushes `driver` to it,
+  stops it (waiting for the restore) before a reconnect and on close.
+- Results go to `qplus_characterisation_results/` next to this folder, never into the repo.
+
 ### Gotchas
 - `MainWindow` sets `step_tab.scope_tab_index` from `tabs.indexOf(scope_tab)` after the tabs are added, so tabs can be reordered (Single Step sits next to Step Test).
 - Don't `print()` non-ASCII (e.g. `→`): with a cp1252 stdout it raises `UnicodeEncodeError`, and an exception inside a Qt slot aborts PyQt5. Use `->`.
