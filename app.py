@@ -28,6 +28,14 @@ from sxm_ncafm_control.connection import SXMConnection
 from sxm_ncafm_control.gui import hidpi
 from sxm_ncafm_control.gui.main_window import MainWindow
 
+# sxm_ui (the shared window frame) sits next to this folder like sxm_anfatec. Without it, or with --classic,
+# the old tabbed window opens.
+try:
+    from sxm_ncafm_control.gui.shell_window import ShellWindow
+except ImportError as exc:
+    ShellWindow = None
+    print(f"[UI] sxm_ui not found next to sxm_ncafm_control ({exc}): opening the classic tabbed window.")
+
 
 def show_connection_status_dialog(parent: QtWidgets.QWidget, conn: SXMConnection) -> None:
     """
@@ -111,7 +119,8 @@ def main() -> int:
 
     # Create and show the main window. Pass the connection object in, so all
     # tabs/widgets share the same handles and no one re-implements connection logic.
-    win = MainWindow(conn)
+    classic = ShellWindow is None or "--classic" in sys.argv
+    win = MainWindow(conn) if classic else ShellWindow(conn)
     win.show()
 
     # Append mode tag to the window title for constant visual feedback.

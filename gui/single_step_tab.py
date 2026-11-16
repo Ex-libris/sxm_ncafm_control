@@ -27,6 +27,7 @@ from PyQt5 import QtCore, QtWidgets
 from .. import metadata as MD
 from ..common import PARAMS_BASE, confirm_high_voltage, append_log_line
 from sxm_anfatec.driver import CHANNELS
+from . import driver_gate
 from .export_image import save_scene_png
 from .sci_spinbox import SciDoubleSpinBox
 from .step_test_tab import StepTestTab, _NAME_TAGS
@@ -442,7 +443,7 @@ class SingleStepTab(QtWidgets.QWidget):
 
     def start(self):
         """Start the recording; the step follows after 'Time at X0'."""
-        if self.is_running():
+        if self.is_running() or not driver_gate.allow(self, "Single Step"):
             return
         ptype, pcode, label = self.param.currentData()
         write_x0 = self.chk_write_x0.isChecked()

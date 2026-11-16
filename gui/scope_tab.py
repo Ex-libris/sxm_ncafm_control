@@ -18,6 +18,7 @@ from PyQt5 import QtWidgets, QtCore
 import pyqtgraph as pg
 from sxm_ncafm_control import metadata as MD
 from sxm_anfatec.driver import CHANNELS
+from . import driver_gate
 from .export_image import save_scene_png
 
 
@@ -297,6 +298,8 @@ class ScopeTab(QtWidgets.QWidget):
         return max(lo, min(hi, npoints))
 
     def start_capture(self, npoints_override=None):
+        if not driver_gate.allow(self, "Scope capture"):
+            return
         # 1. PROPERLY CLEANUP PREVIOUS THREAD
         if self.capture_thread is not None:
             self.capture_thread.stop()

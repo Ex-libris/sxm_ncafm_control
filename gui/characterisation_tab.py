@@ -21,6 +21,7 @@ from PyQt5 import QtCore, QtWidgets
 from ..characterisation import DEFAULT_CONFIG, RESULTS_DIR
 from ..characterisation import config as C
 from ..common import append_log_line
+from . import driver_gate
 
 COLUMNS = ['#', 'kind', 'block', 'drive', 'TC', 'status', 'A_ss (V)', 'tau (s)', 'baseline (V)']
 FINISHED_OK = ('complete', 'batch done', 'preflight')
@@ -241,6 +242,9 @@ class CharacterisationTab(QtWidgets.QWidget):
     def start(self, mode: str, folder: Path | None = None):
         """mode: 'preflight' | 'run' | 'resume' (folder) | 'analyse' (folder)."""
         if self.runner_active():
+            return
+        uses_driver = mode != 'analyse' and self.target.currentText() != "Simulation"
+        if uses_driver and not driver_gate.allow(self, "Sensor characterisation"):
             return
         from ..characterisation.analyse import analyse_run
         from ..characterisation.runner import Campaign
