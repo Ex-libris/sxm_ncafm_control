@@ -107,7 +107,25 @@ Goal: tune the PLL or the amplitude loop the way it is done by hand - set parame
 - `tuning/workflow.py` - one step test: `StepTestPlan` (amplitude step +-5 % by default: Drive cannot go below zero and the manual's 10 % pins it at small amplitudes), `detect_loop`, `analyze_test` (folded and per-direction step metrics, Drive-at-zero fraction `drive_floor_frac`, failure messages that distinguish too slow / oscillating / ran away), `runaway_reason`, `afl_start_values` (manual: Ki = 5e8/Q, Kp = 1e4 Ki at +-1 V, x10 per lower output-gain range; Tau = Q/(100 f0)).
 - `tuning/explore.py` - `assess` (status per direction: clean / slow / overshoot / floor / ringing / lost; a condition is as good as its worse direction; amplitude down-steps at the ring-down rate are flagged as a sensor limit) and the steadiness checks (`steady`, `settled_at`, ...) used by the runner. Its `Explorer` / `SearchRegion` / `trade_off` (decade-grid exploration of the Kp-Ki plane) belonged to the old Tuning tab and are no longer used by the app.
 - `gui/sheet_runner.py` - `SheetRunner`, a QTimer state machine per condition: GUI-only settings (the run pauses with `operator_needed` and continues on `continue_()` once SXM's read-back shows them; or written through `AnfatecSXMWriter` when 'automatically' is ticked) -> gains + first level over DDE -> settle (`steady`) -> step train -> back to base, settle, **quiet window** -> analyse (`analyze_test` on the loop's two channels, `quiet_metrics` on all) -> `stop_rule`. One `TrainCaptureThread` per condition records QPlusAmpl, Drive, df and Phase together (it yields the GIL once per slice so the GUI-thread timers that send the steps stay on time). A lost condition (own loop runaway, or the other loop losing lock / amplitude) releases the PLL (0, 0), writes the anchor and waits until steady before the next one; no recovery aborts the run. At the end, on Stop and on abort: anchor gains, start Ref / `use` and (with the writer) the start settings are written back; otherwise the log lists the settings to put back by hand. Outcomes keep a 5 ms display copy of the recording; the full one goes to disk when 'Save every condition' is on (the default; Run asks for the folder if none is set, and the results table is saved there at the end of the run). SXM is re-read when a condition ends, so its saved settings show its own gains (the read at its start comes before they are written); a lost condition is not re-read, its start read gets the gains as written.
-- `gui/runsheet_tab.py` - `RunSheetTab` (the "Tuning" tab): loop and SXM read-back, anchor (= SXM gains while the sheet is empty), train settings, *Add a ramp* (values prefilled per loop from `runsheet.DEFAULT_VALUES`), the sheet table (status colour, rise up / down, overshoot, Drive sigma or Phase peak, amplitude noise, df per pixel; best = clean with the lowest df per pixel, starred), plots of the selected condition (averaged step up / down, controller output, quiet-window spectrum, recording with marks) and *Ramp trends* (speed and noise against the ramped value), sheet save / load, *Stage gains in Parameters*, export. Checks block Run when offline, without a confirmed retracted tip, with an empty sheet or a bad anchor.
+- `tuning/autotune.py` - the **automatic search** for the amplitude loop: `AutoTuneConfig` (from SXM's f0 / Q / Ref /
+  output gain), `timing` (hold / settle from the ring-down via `afl_start_values`), `AutoTuner` (`first_stage`, then
+  `next_stage(measured)` per finished stage: coarse G -> shape rho -> edge G -> optional Tau -> validate (+ one
+  fallback at G/1.5); chosen G = min(fastest clean, edge / margin)), `Measured.from_outcome` (duck-typed `Outcome`),
+  `summary()` / `report_markdown()`. The anchor is the manual rule x `start_factor` (default 1/100), i.e. the
+  **gentlest** point: G only grows from it, so the runner's recovery "at the anchor" is always a slow, safe setting.
+  Pure Python; `tests/test_autotune.py` drives it with a synthetic judge. It judges the amplitude loop from
+  **QPlusAmpl only**: its runs use `EXPLORE_LIMITS` (Drive at zero never fails a condition), overshoot counts only
+  beyond the gentlest point's per direction (`overshoot_excess`), ties go to the lower amplitude noise. Reason: with
+  the AFL on, SXM's Drive is not the whole excitation (docs/test_plan.md, C0).
+- The Drive scale in `sxm_anfatec.driver.CHANNELS` is calibrated at output gain ±0.1 V (k = 11.214 vs the old factor,
+  from the characterisation drive echo); other ranges are unverified.
+- `gui/runsheet_tab.py` - `RunSheetTab` (the "Tuning" tab): loop and SXM read-back, anchor (= SXM gains while the sheet is empty), train settings, *Add a ramp* (values prefilled per loop from `runsheet.DEFAULT_VALUES`), the sheet table (status colour, rise up / down, overshoot, Drive sigma or Phase peak, amplitude noise, df per pixel; best = clean with the lowest df per pixel, starred), plots of the selected condition (averaged step up / down, controller output, quiet-window spectrum, recording with marks) and *Ramp trends* (speed and noise against the ramped value), sheet save / load, *Stage gains in Parameters*, export.
+  Section 6 runs the automatic search: `run_auto` (checks via `auto_blocked`, config via `auto_config`) ->
+  `start_auto(cfg)` -> per stage `_auto_stage` appends the stage's conditions to the sheet and `_launch`es a runner
+  over the whole sheet with the earlier rows in `runner.skip` (outcomes kept); `_on_run_finished` hands over to
+  `_auto_after_run`, which asks the tuner for the next stage or ends in `_auto_finish` (results CSV/JSON +
+  `<time>_autotune_AFL_summary.json/.md` in the recordings folder, recommendation staged in Parameters). Stop between
+  two stages ends the search too. `run()` and the search share `_launch(skip, quiet_s, keep_outcomes)`. Checks block Run when offline, without a confirmed retracted tip, with an empty sheet or a bad anchor.
 - `tuning/loopid.py`, `trial.py` - physical identification of a PI loop from one train; a diagnostic, not used for decisions. Test fixtures: `tests/sim.py` (simulators), `tests/fake_instrument.py` (`FakeInstrument` PLL, `FakeAFLInstrument` amplitude loop with Drive clipped at zero, both real time).
 
 ### Sensor characterisation (`characterisation/` pure numpy/scipy; `gui/characterisation_tab.py`)
@@ -135,6 +153,12 @@ campaigns, in seeded shuffled blocks with repeats and drift anchors. Plan, inter
   `CampaignThread` runs the job; writes are Win32 messages (thread-safe), no DDE. `MainWindow` pushes `driver` to it,
   stops it (waiting for the restore) before a reconnect and on close.
 - Results go to `qplus_characterisation_results/` next to this folder, never into the repo.
+
+### Window size
+`MainWindow` puts all its content (toolbar, tabs, footer) in one `content_scroll` (`QScrollArea`): a `QTabWidget`
+cannot be smaller than its largest tab, which on a scaled screen was wider / taller than the display and hid the
+bottom of tabs. Scroll bars appear instead. The Tuning tab's section 6 takes f₀ / Q from SXM into editable fields
+(`auto_f0` / `auto_q`, typed when the DNC status bar is empty) and shows why it cannot start (`auto_why`).
 
 ### Gotchas
 - `MainWindow` sets `step_tab.scope_tab_index` from `tabs.indexOf(scope_tab)` after the tabs are added, so tabs can be reordered (Single Step sits next to Step Test).

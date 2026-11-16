@@ -104,8 +104,21 @@ class MainWindow(QtWidgets.QWidget):
         scale = max(1.0, self.accessibility_manager.settings["font_scale"])
         self.resize(hidpi.initial_window_size(self, wanted=(int(1500 * scale), int(950 * scale))))
 
+        # Everything sits in one scroll area: the tab widget cannot be smaller than its largest tab (and the toolbar
+        # than its row of controls), which can be wider / taller than the screen. In a scroll area the window can
+        # always be made smaller; scroll bars appear instead of the window growing past the screen and hiding the
+        # bottom of a tab.
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.content_scroll = QtWidgets.QScrollArea()
+        self.content_scroll.setWidgetResizable(True)
+        self.content_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        content = QtWidgets.QWidget()
+        self.content_scroll.setWidget(content)
+        outer.addWidget(self.content_scroll)
+
         # Create main layout
-        layout = QtWidgets.QVBoxLayout(self)
+        layout = QtWidgets.QVBoxLayout(content)
 
         # Add accessibility toolbar at the top
         self.accessibility_toolbar = AccessibilityToolbar(self.accessibility_manager, self)
@@ -172,7 +185,7 @@ class MainWindow(QtWidgets.QWidget):
         self.params_tab.custom_params_changed.connect(self.step_tab.set_custom_params)
         self.params_tab.custom_params_changed.connect(self.single_step_tab.set_custom_params)
 
-        layout.addWidget(self.tabs)
+        layout.addWidget(self.tabs, 1)
 
         # Safety footer: a short one-line reminder, not a permanent alarm, true for every tab.
         self.footer = QtWidgets.QLabel(
@@ -232,8 +245,8 @@ class MainWindow(QtWidgets.QWidget):
         explicitly pushed out again - just replacing self.conn.dde/driver
         would not reach them.
         """
-        if self.tuning_tab.runner_active():          # it writes gains: never pull the handles from under it
-            self.tuning_tab.stop()
+        if self.tuning_tab.runner_active() or self.tuning_tab.auto_active():   # it writes gains: never pull the
+            self.tuning_tab.stop()                                                # handles from under it
 
         scope_was_capturing = (
             self.scope_tab.capture_thread is not None
@@ -596,8 +609,8 @@ class MainWindow(QtWidgets.QWidget):
         # only the top-level MainWindow is closed, so this is done centrally.)
         if self.live_scope_tab.capture_thread is not None:
             self.live_scope_tab.stop_live()
-        if self.tuning_tab.runner_active():          # restores the anchor gains before the driver closes
-            self.tuning_tab.stop()
+        if self.tuning_tab.runner_active() or self.tuning_tab.auto_active():   # restores the anchor gains
+            self.tuning_tab.stop()                                                # before the driver closes
         if self.single_step_tab.is_running():        # its recorder reads the driver
             self.single_step_tab.stop()
         if self.characterisation_tab.runner_active():  # restores drive and TC before the driver closes
