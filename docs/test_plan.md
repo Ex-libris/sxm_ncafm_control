@@ -190,6 +190,33 @@ Speed alone never decides.
 Run C1 and C2 in the configuration you will image with: the other loop on at its current best values, and Ref
 at the value chosen in A5.
 
+### C0. Automatic search, amplitude loop (unattended, ≈ 15–30 min)
+
+Tuning tab, section 6 (`tuning/autotune.py`). Needs f₀, Q, Ref and the output gain read from SXM, the tip retracted
+and a folder. It does not depend on earlier results: it starts from the manual rule for the current Q.
+
+| Stage | What runs | Decision |
+|---|---|---|
+| Start | Anchor G = 1 = manual rule ÷ 100 (selectable ÷ 10 … ÷ 1000): the gentlest point, and where a lost condition recovers | Step train from the ring-down Q/(π f₀): hold 3×, settle 5× (`afl_start_values`) |
+| 1. Speed | G ramp at ρ = 1 in 1-3-10 steps, up to 3 × the manual rule; stop rule applies | Fastest clean G, and the first not-clean G (the edge). Drive never moving = AFL off: stop and say so |
+| 1b. Lower (once, if needed) | When even G = 1 is not clean: G = 0.01, 0.03, 0.1, 0.3 at ρ = 1 | As stage 1. Seen on 9 Nov 2026 (Q 60k, Ref 0.6 mV): manual ÷ 100 already put Drive at zero |
+| 2. Shape | ρ = 0.1, 0.3, 1, 3, 10 at that G | Clean ρ that settles fastest (ties: quieter Drive) |
+| 3. Edge | G ramp at that ρ, ×1.5 steps, from the clean G to 1.5 × stage 1's edge | Chosen G = min(fastest clean G, edge / 2) |
+| 4. Tau (optional) | AFL Tau around Q/(100 f₀) ÷ 10 … × 2; needs the settings writer | Quietest Drive among the clean values within 20 % of the fastest settling |
+| 5. Validation | The chosen point 3 times (+ Ref × 0.5 and × 2, reported only) | All repeats clean = confirmed; otherwise once more at G / 1.5 |
+
+**Judged from QPlusAmpl only** (since 9 Nov 2026). With the AFL on, SXM's Drive is not the whole excitation: a 10 %
+Ref step moved the amplitude 10 % (rising in ≈ 0.3 s, 6× faster than the sensor's own 10–90 % of ≈ 1.8 s) while
+Drive stayed flat, in the app and in SXM's own oscilloscope, and Drive read ≈ 8× below what the open-loop gain
+(AFL off: 55 µV → 5.4 mV) needs. So "Drive at zero" no longer fails a condition or stops a ramp (reported in the
+notes), and ties are broken by the amplitude noise. Up-steps overshot ≈ 35–65 % at every gain over a 100× range,
+so overshoot counts only beyond the gentlest point's, per direction (+ 20 % of the step).
+
+"Clean" etc. are `explore.assess` statuses. Output in the folder: every condition (CSV + JSON + PNG as usual),
+`<time>_autotune_AFL_results.csv/.json`, and `<time>_autotune_AFL_summary.json/.md` (stages, every measurement,
+the decisions in words, the recommendation and its margin to the edge). The recommendation is staged in the
+Parameters tab, not applied; SXM is left at the gentle start gains.
+
 ### C1. Amplitude loop
 
 | Run | Fixed | Ramped | Purpose |

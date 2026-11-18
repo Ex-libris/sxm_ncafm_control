@@ -13,12 +13,17 @@ What the user does
 4. Click a row to see its step response, its quiet-window noise and its recording; *Ramp trends* plots speed and
    noise against the ramped value. The best condition is the cleanest one with the lowest df noise per pixel.
 
+*Automatic search* (amplitude loop only) builds and runs the sheet by itself, stage after stage (speed, shape,
+edge, optional Tau, validation; tuning/autotune.py), each stage decided from the one before, and writes a summary
+(JSON + Markdown) next to the recordings. It is meant to be left running.
+
 The tests themselves: gui/sheet_runner.py; the sheet logic: tuning/runsheet.py; noise: tuning/noise.py.
 """
 from __future__ import annotations
 
 import csv
 import dataclasses
+import json
 import math
 import os
 import time
@@ -29,6 +34,7 @@ import pyqtgraph as pg
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from sxm_ncafm_control import metadata as MD
+from sxm_ncafm_control.tuning import autotune as A
 from sxm_ncafm_control.tuning import explore as X
 from sxm_ncafm_control.tuning import runsheet as R
 from sxm_ncafm_control.tuning import workflow as W
@@ -51,6 +57,8 @@ TRAIN_DEFAULTS = {
     "pll": dict(step=1.0, hold=1.5, events=8, settle=2.0, quiet=20.0, quiet_settle=1.5, timeout=20.0, window=0.5),
 }
 PIXEL_CHOICES = (0.01, 0.03, 0.1, 0.3)
+AUTO_STARTS = (1e-4, 1e-3, 3e-3, 1e-2, 3e-2, 0.1)  # anchor of the automatic search = manual rule x this
+AUTO_START_DEFAULT = 1e-2
 COLUMNS = ("#", "Ramp", "G", "ρ", "Settings", "Kp", "Ki", "Result", "Up 10-90", "Down 10-90", "Overshoot",
            "Drive σ / Phase pk", "Amp noise", "df / pixel", "Notes")
 SERIES = [(42, 120, 214), (235, 104, 52), (27, 175, 122), (237, 161, 0)]     # categorical slots 1-4
@@ -93,6 +101,7 @@ class RunSheetTab(QtWidgets.QWidget):
         super().__init__(parent)
         self.dde, self.driver, self.reader, self.params_tab = dde, driver, reader, params_tab
         self.sxm: Dict[str, Any] = {}
+        self.sxm_errors: Dict[str, str] = {}               # why a value was not read (from the SXM readout)
         self.sxm_time: Optional[str] = None
         self.sheet: List[R.Condition] = []
         self.outcomes: Dict[int, Outcome] = {}
@@ -101,6 +110,10 @@ class RunSheetTab(QtWidgets.QWidget):
         self._last_dir = ""
         self._raw_dir = ""
         self._best: Optional[int] = None
+        self._auto: Optional[A.AutoTuner] = None          # the automatic search in progress
+        self._auto_range = (0, 0)                         # sheet rows of its current stage
+        self._auto_stamp = ""
+        self._auto_logged = 0                             # decisions already written to the log
         self._build()
         self._on_loop_changed()
         self.refresh_from_sxm(quiet=True)
@@ -279,6 +292,58 @@ class RunSheetTab(QtWidgets.QWidget):
             row.addWidget(b)
         v.addLayout(row)
         lv.addWidget(g)
+
+        g = QtWidgets.QGroupBox("6. Automatic search (amplitude loop)")
+        f = QtWidgets.QFormLayout(g)
+        intro = QtWidgets.QLabel("Builds and runs the sheet by itself: speed (G), shape (ρ), edge, optional Tau, "
+                                 "validation. Starts gentle and only goes faster. Uses f₀, Q, Ref and the output "
+                                 "gain read from SXM, the tip-retracted box and the folder of section 5; Stop "
+                                 "ends it.")
+        intro.setWordWrap(True)
+        f.addRow(intro)
+        self.auto_f0 = self._spin(0.0, 1e7, 0.0, dec=3, suffix=" Hz")
+        self.auto_q = self._spin(0.0, 1e8, 0.0, dec=0)
+        for s_ in (self.auto_f0, self.auto_q):
+            s_.setToolTip("Filled from SXM (Read SXM: the DNC status bar after a resonance sweep); type it if SXM "
+                          "does not show it. 0 = unknown.")
+        f.addRow("f₀ (from SXM, or type):", self.auto_f0)
+        f.addRow("Q (from SXM, or type):", self.auto_q)
+        self.auto_start = QtWidgets.QComboBox()
+        for v_ in AUTO_STARTS:
+            self.auto_start.addItem(f"manual rule ÷ {1 / v_:g}", v_)
+        self.auto_start.setCurrentIndex(AUTO_STARTS.index(AUTO_START_DEFAULT))
+        self.auto_start.setToolTip("The gentlest point (G = 1, also the anchor a lost condition recovers at). "
+                                   "Manual rule: Ki = 5e8/Q, Kp = 1e4 Ki at ±1 V, x10 per lower output range.")
+        f.addRow("Start at:", self.auto_start)
+        self.auto_top = self._spin(0.1, 30.0, 3.0, dec=1)
+        self.auto_top.setToolTip("The speed ramp goes up to this multiple of the manual rule (it stops earlier "
+                                 "at the first ringing / Drive at zero / lost condition).")
+        f.addRow("Go up to (x manual rule):", self.auto_top)
+        self.auto_quiet = self._spin(0.0, 120.0, 10.0, dec=0, suffix=" s")
+        self.auto_quiet.setToolTip("Quiet window per condition while searching; validation uses 30 s.")
+        f.addRow("Quiet window while searching:", self.auto_quiet)
+        self.auto_tau = QtWidgets.QCheckBox("Include AFL Tau (needs 'Set … automatically' in section 5)")
+        f.addRow(self.auto_tau)
+        self.auto_refs = QtWidgets.QCheckBox("Also try the result at Ref x0.5 and x2 (reported only)")
+        self.auto_refs.setChecked(True)
+        f.addRow(self.auto_refs)
+        self.auto_preview = QtWidgets.QLabel()
+        self.auto_preview.setWordWrap(True)
+        f.addRow(self.auto_preview)
+        self.btn_auto = QtWidgets.QPushButton("Run automatic search")
+        self.btn_auto.clicked.connect(self.run_auto)
+        f.addRow(self.btn_auto)
+        self.auto_why = QtWidgets.QLabel()
+        self.auto_why.setWordWrap(True)
+        self.auto_why.setStyleSheet("QLabel{color:#c03030}")
+        f.addRow(self.auto_why)
+        for w in (self.auto_start, self.auto_top, self.auto_quiet, self.auto_tau, self.auto_refs, self.auto_f0,
+                  self.auto_q):
+            sig = w.currentIndexChanged if isinstance(w, QtWidgets.QComboBox) else (
+                w.toggled if isinstance(w, QtWidgets.QCheckBox) else w.valueChanged)
+            sig.connect(self._refresh_panels)
+        self.auto_check.toggled.connect(self._refresh_panels)
+        lv.addWidget(g)
         lv.addStretch(1)
 
         scroll = QtWidgets.QScrollArea()
@@ -411,7 +476,12 @@ class RunSheetTab(QtWidgets.QWidget):
             self._refresh_panels()
             return False
         self.sxm = dict(ro.values)
+        self.sxm_errors = dict(getattr(ro, "errors", {}) or {})
         self.sxm_time = ro.timestamp.strftime("%H:%M:%S")
+        self._auto_from_sxm()
+        for key in ("amp_ref", "afl_output_gain", "q", "f_peak"):
+            if self.sxm.get(key) is None and key in self.sxm_errors:
+                self._log(f"  SXM: {key} not read ({self.sxm_errors[key]})")
         if not self.sheet and not self.outcomes:
             self._anchor_from_sxm(quiet=True)
         self._log("Read SXM at " + self.sxm_time + ".")
@@ -506,6 +576,7 @@ class RunSheetTab(QtWidgets.QWidget):
             self.anchor_label.setText(f"Ki₀/Kp₀ = {format_number(float(f'{ki / kp:.3g}'), sci_above=1e4)}  ·  "
                                       "Kp = G·Kp₀, Ki = G·ρ·Ki₀")
         self._refresh_ramp_preview()
+        self._refresh_auto_preview()
         self._update_enabled()
 
     def _on_loop_changed(self, *_):
@@ -578,17 +649,28 @@ class RunSheetTab(QtWidgets.QWidget):
     def runner_active(self) -> bool:
         return self.runner is not None and self.runner.running
 
+    def auto_active(self) -> bool:
+        return self._auto is not None
+
     def _blocked(self) -> Optional[str]:
         b = [t for lvl, t in self.checks() if lvl == "block"]
         return b[0] if b else None
 
     def _update_enabled(self, *_):
-        running = self.runner_active()
+        running = self.runner_active() or self.auto_active()
         why = self._blocked()
         self.btn_run.setEnabled(not running and why is None)
         self.btn_run.setToolTip(why or "")
+        auto_why = self.auto_blocked()
+        self.btn_auto.setEnabled(not running and auto_why is None)
+        self.btn_auto.setToolTip(auto_why or "")
+        self.auto_why.setText("" if running or auto_why is None else f"Not ready: {auto_why}")
+        self.auto_why.setVisible(bool(self.auto_why.text()))
+        self.auto_tau.setEnabled(self.auto_check.isChecked() and not running)
+        for w in (self.auto_start, self.auto_top, self.auto_quiet, self.auto_refs, self.auto_f0, self.auto_q):
+            w.setEnabled(not running)
         self.btn_stop.setEnabled(running)
-        self.btn_continue.setEnabled(running and self.runner.waiting_operator)
+        self.btn_continue.setEnabled(self.runner_active() and self.runner.waiting_operator)
         app = QtWidgets.QApplication.instance()
         mgr = getattr(app, "accessibility_manager", None)
         self.btn_stop.setStyleSheet(mgr.stop_button_style(running) if mgr else "")
@@ -597,7 +679,9 @@ class RunSheetTab(QtWidgets.QWidget):
         self.btn_save.setEnabled(bool(self.sheet))
         self.btn_export.setEnabled(bool(self.outcomes) and not running)
         self.btn_stage.setEnabled(self.params_tab is not None and self._selected_outcome() is not None and not running)
-        if not running:
+        if not running and self.loop == "afl" and auto_why is None and why is not None:
+            self._status("<b>Ready</b> for the automatic search (section 6).")
+        elif not running:
             if why:
                 self._status(f"<b>Not ready:</b> {why}")
             else:
@@ -711,29 +795,43 @@ class RunSheetTab(QtWidgets.QWidget):
             if not self._raw_dir:
                 return
         try:
-            plan = self.plan()
-            anchor = self.anchor()
+            self._launch()
         except ValueError as e:
             QtWidgets.QMessageBox.warning(self, "Run sheet", str(e))
-            return
+
+    def _launch(self, skip=(), quiet_s: Optional[float] = None, keep_outcomes: bool = False,
+                explore_limits: Optional[X.ExploreLimits] = None):
+        """
+        Start a runner on the whole sheet. ``skip``: rows not to run (earlier stages of the automatic search; their
+        outcomes stay when ``keep_outcomes``). ``quiet_s``: quiet window instead of the spin box's.
+        ``explore_limits``: how conditions are judged, instead of the defaults (the automatic search ignores Drive).
+        """
+        plan = self.plan()
+        anchor = self.anchor()
         ld = self.loop_def
         other_on = True
         if self.sxm:
             ok, ik = ("pll_kp", "pll_ki") if ld.key == "afl" else ("amp_kp", "amp_ki")
             other_on = not (self.sxm.get(ok) == 0 and self.sxm.get(ik) == 0)
         crit = X.RecoveryCriteria(window_s=TRAIN_DEFAULTS[ld.key]["window"])
+        ring = self.ring_down_s() or (self._auto.timing.ring_down_s if self._auto is not None else None)
         cfg = RunConfig(anchor=anchor, sheet=list(self.sheet), plan=plan, start_settings=self.current_settings(),
                         base_use=float(self.sxm.get("used_freq") or plan.base),
-                        quiet_s=self.quiet_spin.value(), quiet_settle_s=self.quiet_settle_spin.value(),
+                        quiet_s=self.quiet_spin.value() if quiet_s is None else float(quiet_s),
+                        quiet_settle_s=self.quiet_settle_spin.value(),
                         settle_timeout_s=self.timeout_spin.value(),
-                        recover_timeout_s=max(30.0, 10 * (self.ring_down_s() or 2.0)),
+                        recover_timeout_s=max(30.0, 10 * (ring or 2.0)),
                         compensate=self.compensate.isChecked(), record_both=self.both_check.isChecked(),
-                        other_loop_on=other_on, criteria=crit, ring_down_s=self.ring_down_s())
-        self.outcomes = {}
+                        other_loop_on=other_on, criteria=crit, ring_down_s=ring)
+        if explore_limits is not None:
+            cfg.explore_limits = explore_limits
+        if not keep_outcomes:
+            self.outcomes = {}
         self._best = None
         self.runner = SheetRunner(self.dde, self.driver, cfg, reader=self.reader, writer=self._writer_or_none(),
                                   meta_fn=(lambda: MD.collect(self.reader)) if self.reader is not None else None,
                                   parent=self)
+        self.runner.skip.update({int(i): "earlier stage" for i in skip})
         self.runner.message.connect(self._log)
         self.runner.phase.connect(lambda t: self._status(f"<b>Running</b> {t}"))
         self.runner.condition_started.connect(self._on_started)
@@ -742,13 +840,17 @@ class RunSheetTab(QtWidgets.QWidget):
         self.runner.operator_needed.connect(self._on_operator)
         self.runner.finished.connect(self._on_run_finished)
         self._refresh_table()
-        self._log(f"Run started: {len(self.sheet)} conditions, anchor Kp₀={_gain(anchor.kp)}, Ki₀={_gain(anchor.ki)}.")
+        n = len(self.sheet) - len(self.runner.skip)
+        self._log(f"Run started: {n} conditions, anchor Kp₀={_gain(anchor.kp)}, Ki₀={_gain(anchor.ki)}.")
         self.runner.start()
         self._update_enabled()
 
     def stop(self):
-        if self.runner is not None:
-            self.runner.stop()
+        if self.runner_active():
+            self.runner.stop()                     # its 'finished' ends an automatic search too
+        elif self._auto is not None:               # between two stages of the automatic search
+            self._auto.stop("stopped")
+            self._auto_finish()
 
     def _continue(self):
         self.operator_banner.hide()
@@ -798,6 +900,9 @@ class RunSheetTab(QtWidgets.QWidget):
     def _on_run_finished(self, reason: str):
         self.operator_banner.hide()
         self._log(f"Run {reason}.")
+        if self._auto is not None:
+            self._auto_after_run(reason)
+            return
         if self._best is not None:
             o = self.outcomes[self._best]
             self._log(f"Best so far: #{self._best + 1} {o.condition.label()} (Kp {_gain(o.kp)}, Ki {_gain(o.ki)}).")
@@ -810,6 +915,206 @@ class RunSheetTab(QtWidgets.QWidget):
                 self._log(f"Could not save the results: {e}")
         self._update_enabled()
         self._refresh_table()
+
+    # ================================================================== automatic search
+    def _auto_from_sxm(self):
+        """f₀ and Q from SXM into section 6, where SXM gives them (otherwise what is typed there stays)."""
+        for key, spin in (("f_peak", self.auto_f0), ("q", self.auto_q)):
+            v = self.sxm.get(key)
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+                spin.setValue(float(v))
+
+    def auto_blocked(self) -> Optional[str]:
+        """Why the automatic search cannot start now (None: it can)."""
+        if self.loop != "afl":
+            return "The automatic search is for the amplitude loop: pick it in section 1."
+        if not self._online():
+            return "Offline: the automatic search needs SXM and the driver (the window title says ONLINE / OFFLINE)."
+        if not self.sxm:
+            return "Press Read SXM in section 1: Ref and the output gain come from SXM."
+        if not (self.auto_f0.value() > 0 and self.auto_q.value() > 0):
+            return ("f₀ and Q are unknown: do a resonance sweep and Read SXM, or type them in the two fields "
+                    "above.")
+        for key, what, where in (("amp_ref", "the amplitude Ref", "SXM's Parameter window, Amplitude feedback"),
+                                 ("afl_output_gain", "the AFL output gain", "SXM's DNC window")):
+            v = self.sxm.get(key)
+            if key == "amp_ref" and isinstance(v, (int, float)) and not isinstance(v, bool) and v <= 0:
+                return ("The amplitude Ref in SXM is 0: set an amplitude setpoint (Parameter window, Amplitude "
+                        "feedback, Ref), then Read SXM.")
+            if not isinstance(v, (int, float)) or isinstance(v, bool) or not v > 0:
+                why = self.sxm_errors.get(key) or (f"read as {v!r}" if v is not None else "not readable")
+                return f"SXM did not give {what} [{why}]. It is read from {where}: open it, then Read SXM."
+        if not self.retracted_check.isChecked():
+            return "Tick 'Tip retracted' in section 5."
+        return None
+
+    def auto_config(self) -> A.AutoTuneConfig:
+        """The search as set in section 6, at the Ref / output gain SXM shows and the f₀ / Q of section 6."""
+        s = self.sxm
+        return A.AutoTuneConfig(
+            q=self.auto_q.value(), f0=self.auto_f0.value(), output_gain_v=float(s["afl_output_gain"]),
+            input_gain=float(s.get("input_gain_ina") or 1.0), base_ref=float(s["amp_ref"]),
+            step_frac=self.step_spin.value() / 100.0, start_factor=float(self.auto_start.currentData()),
+            top=self.auto_top.value(), include_tau=self.auto_tau.isChecked() and self.auto_check.isChecked(),
+            ref_factors=(0.5, 2.0) if self.auto_refs.isChecked() else (), quiet_search_s=self.auto_quiet.value())
+
+    def _auto_condition_s(self, tm: A.Timing, quiet_s: float) -> float:
+        train = 2.0 + self.events_spin.value() * tm.hold_s + 0.5            # lead and tail as in plan()
+        return tm.settle_s + train + (self.quiet_settle_spin.value() + quiet_s if quiet_s > 0 else 0.0) + 2.0
+
+    def _refresh_auto_preview(self, *_):
+        if self._auto is not None:
+            return
+        if self.loop != "afl":
+            self.auto_preview.setText("<i>Amplitude loop only.</i>")
+            return
+        try:
+            cfg = self.auto_config()
+        except (KeyError, TypeError, ValueError):
+            self.auto_preview.setText("<i>Needs f₀ and Q (above), and Ref and the output gain from SXM.</i>")
+            return
+        t = A.AutoTuner(cfg)
+        n = len(t.coarse_values()) + len(cfg.rho_values) + 4 + (len(t.tau_candidates_ms()) if cfg.include_tau else 0)
+        val = cfg.repeats + len(cfg.ref_factors)
+        total = (n * self._auto_condition_s(t.timing, cfg.quiet_search_s)
+                 + val * self._auto_condition_s(t.timing, cfg.quiet_validate_s))
+        self.auto_preview.setText(
+            f"Start (G 1): Kp {_gain(t.anchor.kp)}, Ki {_gain(t.anchor.ki)}; the manual rule is G {t.manual_g:g}.<br>"
+            f"Hold {t.timing.hold_s:g} s, settle {t.timing.settle_s:g} s (ring-down {t.timing.ring_down_s:.2g} s).<br>"
+            f"At most ~{n + val} conditions, ~{total / 60:.0f} min (fewer when a ramp stops early).")
+
+    def run_auto(self):
+        self.refresh_from_sxm(quiet=True)
+        why = self.auto_blocked()
+        if why:
+            QtWidgets.QMessageBox.warning(self, "Automatic search", why)
+            return
+        if not self._raw_dir:
+            self._choose_raw_dir()
+            if not self._raw_dir:
+                return
+        self.raw_check.setChecked(True)
+        if self.sheet or self.outcomes:
+            ans = QtWidgets.QMessageBox.question(self, "Automatic search",
+                                                 "This replaces the current sheet and its results. Continue?")
+            if ans != QtWidgets.QMessageBox.Yes:
+                return
+        try:
+            self.start_auto(self.auto_config())
+        except ValueError as e:
+            QtWidgets.QMessageBox.warning(self, "Automatic search", str(e))
+
+    def start_auto(self, cfg: A.AutoTuneConfig, use_timing: bool = True):
+        """Start the search with ``cfg`` (Run automatic search calls this after its checks). ``use_timing``: set the
+        step train from the sensor's ring-down; off keeps section 3 as it is (tests)."""
+        if self.runner_active() or self._auto is not None:
+            raise ValueError("a run is in progress")
+        if self.loop != "afl":
+            raise ValueError("the automatic search is for the amplitude loop")
+        tuner = A.AutoTuner(cfg)
+        self._clear_sheet()
+        self._auto = tuner
+        self._auto_stamp = time.strftime("%Y%m%d-%H%M%S")
+        self._auto_logged = 0
+        self.kp0.setValue(tuner.anchor.kp)
+        self.ki0.setValue(tuner.anchor.ki)
+        for combo, v in ((self.anchor_og, cfg.output_gain_v), (self.anchor_ina, cfg.input_gain)):
+            i = combo.findData(v)
+            if i >= 0:
+                combo.setCurrentIndex(i)
+        if use_timing:
+            tm = tuner.timing
+            self.step_spin.setValue(cfg.step_frac * 100.0)
+            self.hold_spin.setValue(tm.hold_s)
+            self.settle_spin.setValue(tm.settle_s)
+            self.timeout_spin.setValue(tm.settle_timeout_s)
+        stage = tuner.first_stage()
+        self._log("Automatic search started.")
+        self._auto_log_decisions()
+        self._auto_stage(stage)
+
+    def _auto_stage(self, stage: A.Stage):
+        if self._auto is None or self._auto.finished:
+            return
+        start = len(self.sheet)
+        self.sheet.extend(stage.conditions)
+        self._auto_range = (start, len(self.sheet))
+        self._log(f"Automatic search, stage {len(self._auto.stages)}: {stage.title}. {stage.why}")
+        self._refresh_table()
+        try:
+            self._launch(skip=range(start), quiet_s=stage.quiet_s, keep_outcomes=True,
+                         explore_limits=A.EXPLORE_LIMITS)
+        except ValueError as e:
+            self._auto.stop(f"could not start the stage: {e}")
+            self._auto_finish()
+
+    def _auto_measured(self) -> List[A.Measured]:
+        a, b = self._auto_range
+        return [A.Measured.from_outcome(self.sheet[i], self.outcomes.get(i)) for i in range(a, b)]
+
+    def _auto_after_run(self, reason: str):
+        tuner = self._auto
+        if reason == "done":
+            nxt = tuner.next_stage(self._auto_measured())
+            self._auto_log_decisions()
+            if nxt is not None:
+                self._update_enabled()
+                QtCore.QTimer.singleShot(300, lambda: self._auto_stage(nxt) if self._auto is tuner else None)
+                return
+        else:
+            tuner.stop(reason, self._auto_measured())
+        self._auto_finish()
+
+    def _auto_log_decisions(self):
+        if self._auto is None:
+            return
+        for d in self._auto.decisions[self._auto_logged:]:
+            self._log(f"  {d}")
+        self._auto_logged = len(self._auto.decisions)
+
+    def _auto_finish(self):
+        """Save the results table and the summary (JSON + Markdown), stage the result, end the search."""
+        tuner = self._auto
+        if tuner is None:
+            return
+        self._auto_log_decisions()
+        written = []
+        if self._raw_dir:
+            stem = os.path.join(self._raw_dir, f"{self._auto_stamp}_autotune_AFL")
+            try:
+                csv_name = None
+                if any(o.status != "skipped" for o in self.outcomes.values()):
+                    self.export_results_to(stem + "_results.csv")
+                    csv_name = os.path.basename(stem) + "_results.csv"
+                    written.append(csv_name)
+                summary = {**tuner.summary(), "results_csv": csv_name}
+                with open(stem + "_summary.json", "w", encoding="utf-8") as f:
+                    json.dump(summary, f, indent=2, ensure_ascii=False)
+                with open(stem + "_summary.md", "w", encoding="utf-8") as f:
+                    f.write(tuner.report_markdown())
+                written += [os.path.basename(stem) + "_summary.json", os.path.basename(stem) + "_summary.md"]
+            except OSError as e:
+                self._log(f"Could not save the automatic-search summary: {e}")
+        self._auto = None
+        rec = tuner.recommendation
+        if rec is not None:
+            tau = f", Tau {rec.tau_ms:g} ms" if rec.tau_ms is not None else ""
+            msg = (f"Automatic search finished: Kp {_gain(rec.kp)}, Ki {_gain(rec.ki)}{tau} "
+                   + ("(confirmed)" if rec.confirmed else "(NOT confirmed: starting point only)"))
+            if self.params_tab is not None:
+                ld = W.LOOPS["afl"]
+                ok = (self.params_tab.stage_value(*ld.kp_param, rec.kp)
+                      and self.params_tab.stage_value(*ld.ki_param, rec.ki))
+                if ok:
+                    self._log("The recommended gains are staged in the Parameters tab (not applied).")
+        else:
+            msg = f"Automatic search finished without a recommendation: {tuner.failure or tuner.stopped}"
+        self._log(msg + ". SXM is back at the gentle start gains.")
+        if written:
+            self._log("Saved: " + ", ".join(written))
+        self._refresh_table()
+        self._refresh_panels()
+        self._status(f"<b>{msg}</b>")
 
     def _save_raw(self, out: Outcome) -> List[str]:
         """The condition as a Step Test export (CSV + JSON + PNG) in the recordings folder. Returns the paths."""

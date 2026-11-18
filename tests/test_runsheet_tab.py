@@ -16,6 +16,9 @@ from PyQt5 import QtWidgets                                             # noqa: 
 from sxm_anfatec.dde import MockDDEClient                  # noqa: E402
 from sxm_ncafm_control.gui import runsheet_tab as T                     # noqa: E402
 from sxm_ncafm_control.tests.fake_instrument import FakeAFLInstrument   # noqa: E402
+from sxm_ncafm_control.tuning import autotune as A                      # noqa: E402
+
+SXM_AFL = {"f_peak": 25564.0, "q": 40000.0, "amp_ref": 1.0, "afl_output_gain": 0.1, "input_gain_ina": 1.0}
 
 app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
@@ -132,6 +135,100 @@ class Running(unittest.TestCase):
             self.assertEqual(len(payload["sheet"]["conditions"]), 2)
             self.assertIn("QPlusAmpl", payload["results"][0]["quiet"]["channels"])
         self.assertEqual(inst.writes[-3:], [("Edit32", 2e8), ("Edit24", 2e4), ("Edit23", 1.0)])
+
+
+class AutoSearch(unittest.TestCase):
+    def test_it_is_gated_until_sxm_gave_the_sensor_and_the_tip_is_retracted(self):
+        inst = FakeAFLInstrument()
+        tab = T.RunSheetTab(inst, inst)
+        self.assertIn("Read SXM", tab.auto_blocked())
+        self.assertFalse(tab.btn_auto.isEnabled())
+        self.assertIn("Not ready", tab.auto_why.text())               # the reason is shown, not only a tooltip
+        # SXM read, but its DNC status bar was empty: f0 / Q can be typed
+        tab.sxm = {k: v for k, v in SXM_AFL.items() if k not in ("f_peak", "q")}
+        tab._auto_from_sxm()
+        self.assertIn("f₀ and Q are unknown", tab.auto_blocked())
+        tab.auto_f0.setValue(25564.0)
+        tab.auto_q.setValue(40000.0)
+        self.assertIn("retracted", tab.auto_blocked())
+        tab.sxm = {**SXM_AFL, "amp_ref": 0.0}                       # no amplitude setpoint in SXM
+        self.assertIn("set an amplitude setpoint", tab.auto_blocked())
+        tab.sxm = dict(SXM_AFL)
+        tab._auto_from_sxm()
+        tab.retracted_check.setChecked(True)
+        self.assertIsNone(tab.auto_blocked())
+        tab._refresh_panels()
+        self.assertTrue(tab.btn_auto.isEnabled())
+        self.assertEqual(tab.auto_why.text(), "")
+        self.assertIn("the manual rule is G 100", tab.auto_preview.text())
+        cfg = tab.auto_config()
+        self.assertEqual((cfg.start_factor, cfg.q, cfg.step_frac, cfg.include_tau), (0.01, 40000.0, 0.05, False))
+        tab.auto_tau.setChecked(True)
+        self.assertFalse(tab.auto_config().include_tau)           # Tau only with the automatic settings writer
+        tab.loop_combo.setCurrentIndex(tab.loop_combo.findData("pll"))
+        self.assertIn("amplitude loop", tab.auto_blocked())
+
+    def test_a_short_search_runs_its_stages_and_writes_the_summary(self):
+        inst = FakeAFLInstrument()
+        tab = T.RunSheetTab(inst, inst)
+        quick(tab)
+        tab.retracted_check.setChecked(True)
+        # Q and output gain chosen so that the start (manual rule / 10) is the fake's comfortable 2e8 / 2e4
+        cfg = A.AutoTuneConfig(q=25000.0, f0=25564.0, output_gain_v=0.1, base_ref=1.0, start_factor=0.1,
+                               coarse_values=(1.0,), rho_values=(1.0,), edge_max_steps=1, repeats=1, ref_factors=(),
+                               quiet_search_s=1.0, quiet_validate_s=1.0)
+        with tempfile.TemporaryDirectory() as d:
+            tab._raw_dir = d
+            tab.start_auto(cfg, use_timing=False)
+            self.assertTrue(tab.auto_active())
+            self.assertFalse(tab.btn_auto.isEnabled())
+            self.assertTrue(tab.btn_stop.isEnabled())
+            self.assertEqual((tab.kp0.value(), tab.ki0.value()), (2e8, 2e4))
+            self.assertIs(tab.runner.cfg.explore_limits, A.EXPLORE_LIMITS)      # judged from QPlusAmpl only
+            end = time.perf_counter() + 300
+            while tab.auto_active() and time.perf_counter() < end:
+                app.processEvents()
+                time.sleep(0.005)
+            self.assertFalse(tab.auto_active(), "the search did not finish")
+            files = os.listdir(d)
+            summary = [f for f in files if f.endswith("_autotune_AFL_summary.json")]
+            self.assertEqual(len(summary), 1, files)
+            self.assertTrue(any(f.endswith("_autotune_AFL_summary.md") for f in files))
+            with open(os.path.join(d, summary[0]), encoding="utf-8") as f:
+                s = json.load(f)
+            self.assertEqual(s["kind"], A.KIND)
+            self.assertEqual(s["stages"][0]["key"], "coarse")
+            self.assertEqual(tab.table.rowCount(), sum(len(st["conditions"]) for st in s["stages"]))
+            self.assertTrue(s["recommendation"] is not None or s["failure"] or s["stopped"])
+            if s["results_csv"]:
+                self.assertIn(s["results_csv"], files)
+            self.assertTrue(tab.btn_auto.isEnabled() or tab.auto_blocked() is not None)
+        self.assertEqual(inst.writes[-3:], [("Edit32", 2e8), ("Edit24", 2e4), ("Edit23", 1.0)])   # back at the start
+
+    def test_stop_ends_the_search_and_still_writes_the_summary(self):
+        inst = FakeAFLInstrument()
+        tab = T.RunSheetTab(inst, inst)
+        quick(tab)
+        cfg = A.AutoTuneConfig(q=25000.0, f0=25564.0, output_gain_v=0.1, start_factor=0.1, coarse_values=(1.0, 2.0),
+                               quiet_search_s=1.0)
+        with tempfile.TemporaryDirectory() as d:
+            tab._raw_dir = d
+            tab.start_auto(cfg, use_timing=False)
+            end = time.perf_counter() + 30
+            while not tab.outcomes and time.perf_counter() < end:
+                app.processEvents()
+                time.sleep(0.005)
+            tab.stop()
+            end = time.perf_counter() + 30
+            while tab.auto_active() and time.perf_counter() < end:
+                app.processEvents()
+                time.sleep(0.005)
+            self.assertFalse(tab.auto_active())
+            with open(os.path.join(d, [f for f in os.listdir(d) if f.endswith("_summary.json")][0]),
+                      encoding="utf-8") as f:
+                s = json.load(f)
+            self.assertEqual(s["stopped"], "stopped")
+            self.assertIsNone(s["recommendation"])
 
 
 if __name__ == "__main__":
