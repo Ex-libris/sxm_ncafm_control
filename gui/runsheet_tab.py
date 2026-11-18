@@ -41,6 +41,7 @@ from sxm_ncafm_control.tuning import workflow as W
 
 from ..common import append_log_line, format_number
 from . import condition_export as CX
+from . import driver_gate
 from .sci_spinbox import SciDoubleSpinBox
 from .sheet_runner import LOOP_CHANNELS, Outcome, RunConfig, SheetRunner
 
@@ -790,6 +791,8 @@ class RunSheetTab(QtWidgets.QWidget):
         if why:
             QtWidgets.QMessageBox.warning(self, "Run sheet", why)
             return
+        if not driver_gate.allow(self, "Tuning run"):
+            return
         if self.raw_check.isChecked() and not self._raw_dir:
             self._choose_raw_dir()
             if not self._raw_dir:
@@ -988,6 +991,8 @@ class RunSheetTab(QtWidgets.QWidget):
         why = self.auto_blocked()
         if why:
             QtWidgets.QMessageBox.warning(self, "Automatic search", why)
+            return
+        if not driver_gate.allow(self, "Tuning run"):
             return
         if not self._raw_dir:
             self._choose_raw_dir()

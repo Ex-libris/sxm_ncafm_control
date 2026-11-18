@@ -154,6 +154,21 @@ campaigns, in seeded shuffled blocks with repeats and drift anchors. Plan, inter
   stops it (waiting for the restore) before a reconnect and on close.
 - Results go to `qplus_characterisation_results/` next to this folder, never into the repo.
 
+### Shell window (`gui/shell_window.py`, needs `sxm_ui` next to this folder)
+`app.py` opens `ShellWindow` (pages by task in a left navigation) when the shared `sxm_ui` package is importable, and
+the classic tabbed `MainWindow` otherwise or with `--classic`. `ShellWindow` builds a `MainWindow` it never shows and
+moves its tabs into pages (`LAYOUT`: Sensor / Tune / Look / Operate), so cross-tab wiring, reconnect, fonts and
+shutdown stay in `MainWindow`; **a new tab is added in `MainWindow` and in `LAYOUT`**. It adds:
+- **Status** page (`gui/status_page.py`, rules in `gui/status_rules.py`, pure Python): SXM read on a
+  `sxm_ui.state.StatePoller` thread, values by group, changes since the read before, findings (`use` off the peak with
+  the PLL off, AFL Ki against the manual rule, Q missing, z feedback on).
+- status strip: connection, driver users, f0 / Q; Reconnect button; View menu (text size, dark, high contrast).
+- `gui/driver_gate.py`: Scope, Live Scope, Single Step, Tuning runs and characterisation call `driver_gate.allow(self,
+  name)` before they start. With the shell's `sxm_ui.session.Arbiter` installed, Live Scope is stopped for a new
+  capture and any other running capture refuses the new one by name. Without an arbiter (classic window, tests) it
+  allows. A new capture that reads the driver must call it and be registered in `ShellWindow`.
+Not yet run on the instrument.
+
 ### Window size
 `MainWindow` puts all its content (toolbar, tabs, footer) in one `content_scroll` (`QScrollArea`): a `QTabWidget`
 cannot be smaller than its largest tab, which on a scaled screen was wider / taller than the display and hid the

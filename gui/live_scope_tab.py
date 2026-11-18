@@ -36,6 +36,8 @@ import pyqtgraph as pg
 
 from sxm_anfatec.driver import CHANNELS
 
+from . import driver_gate
+
 
 class LiveCaptureThread(QtCore.QThread):
     """
@@ -255,6 +257,8 @@ class LiveScopeTab(QtWidgets.QWidget):
             self.start_live()
 
     def start_live(self):
+        if not driver_gate.allow(self, "Live Scope"):
+            return
         if self.driver is None:
             QtWidgets.QMessageBox.warning(
                 self, "No driver",
